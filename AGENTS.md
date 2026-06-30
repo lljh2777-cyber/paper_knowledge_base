@@ -4,27 +4,121 @@
 
 This workspace is a scientific-paper research workspace split into a tool library and an Obsidian knowledge vault. Keep raw sources, converted Markdown, workflows, templates, scripts, AI-maintained wiki pages, research projects, MOCs, and synthesis notes separate.
 
-Use the global Codex skill `research-vault` for concrete paper ingest, PDF-to-Markdown conversion, Zotero/BibTeX handling, paper X-Ray analysis, evidence-grounded retrieval, synthesis, and lint workflows.
+This file is written for AI agents. User-facing Markdown content in the vault should still be written in Simplified Chinese unless the user asks otherwise.
 
-Skill location:
+## Skill Architecture
+
+Use `research-vault` as the router only when the request is broad or ambiguous. For concrete execution, use the focused child skill that matches the current workflow stage.
+
+Skill locations:
 
 ```text
-%USERPROFILE%\.codex\skills\research-vault\SKILL.md
+%USERPROFILE%\.codex\skills\research-vault\SKILL.md              # router
+%USERPROFILE%\.codex\skills\research-vault-ingest\SKILL.md       # intake, metadata, Zotero/BibTeX, duplicate checks
+%USERPROFILE%\.codex\skills\research-vault-convert\SKILL.md      # PDF/HTML/TeX/OCR to Markdown
+%USERPROFILE%\.codex\skills\research-vault-source-note\SKILL.md  # source note writing and repair
+%USERPROFILE%\.codex\skills\research-vault-xray\SKILL.md         # full-text paper deep reading
+%USERPROFILE%\.codex\skills\research-vault-retrieval\SKILL.md    # answer from vault evidence
+%USERPROFILE%\.codex\skills\research-vault-synthesis\SKILL.md    # synthesis, MOC, concept/project pages
+%USERPROFILE%\.codex\skills\research-vault-lint\SKILL.md         # vault quality audit and repair
 ```
+
+## Skill Routing Policy
+
+Use a skill when the task touches the vault workflow, files, metadata, source notes, or evidence maintenance.
+
+- Use `research-vault-ingest` for new Zotero items, local PDFs, DOI/arXiv/URL inputs, BibTeX/RIS records, duplicate checks, metadata normalization, attachment path discovery, `papers.csv`, `references.bib`, and intake depth decisions.
+- Use `research-vault-convert` for PDF/HTML/TeX/OCR conversion, MarkItDown/PyMuPDF extraction, converted Markdown creation, and conversion quality checks.
+- Use `research-vault-source-note` for creating, rewriting, normalizing, or repairing `知识库/wiki/sources/*.md` source notes.
+- Use `research-vault-xray` for full-text paper reading, figure/table/method/data extraction, evidence strength assessment, and upgrading abstract-level notes into deep-read notes.
+- Use `research-vault-retrieval` when the user asks what the vault knows, asks for vault-backed definitions, compares imported papers, checks existing evidence, or asks for conclusions grounded only in `知识库/`.
+- Use `research-vault-synthesis` for cross-paper comparisons, literature maps, MOCs, research projects, concept/method/dataset synthesis pages, and saved gap analyses.
+- Use `research-vault-lint` for broken links, duplicate pages, orphan notes, metadata gaps, index consistency, unsupported claims, workflow boilerplate, encoding damage, and graph/index cleanup.
+
+Do not force a vault skill for a normal explanatory answer that does not depend on vault files. For example, a general explanation of a concept, method, disease, tool, statistical model, or experimental technique can use the model's general knowledge and, when useful or required, web search.
+
+## Evidence Source Policy
+
+Always distinguish the evidence source behind an answer or saved note.
+
+### Vault Evidence
+
+Use vault evidence when the user says or implies:
+
+- "in this vault"
+- "our papers"
+- "based on the imported literature"
+- "compare these source notes"
+- "what have we collected"
+- "update/save this into Obsidian"
+
+Vault evidence includes `知识库/`, `工具库/converted/markdown/`, tracked metadata files, and raw/source files when explicitly inspected. If vault evidence is insufficient, write `Vault 中未找到足够依据`.
+
+### Model Knowledge
+
+Use model knowledge for stable, general background explanations when the user is not asking for vault-backed evidence or file updates. This is often appropriate for first-pass explanations of concepts and methods.
+
+When using model knowledge, do not present it as a conclusion from the vault. If saving it into the vault, label it as general background or external knowledge, and keep it separate from paper-backed claims.
+
+### Web Evidence
+
+Use web search when the user asks to search, verify, find latest/current information, provide links, or when the topic is likely to have changed. Also use web search for current software/tool behavior, current database documentation, recent papers, publisher/DOI verification, standards, guidelines, and recommendations.
+
+For scientific concepts or methods pages, web search can be better than vault retrieval when the user wants a general, up-to-date reference note rather than "what our imported papers say." Prefer primary or authoritative sources such as papers, official documentation, database documentation, publisher pages, or standards bodies. Clearly mark web-derived content as external evidence, not vault evidence.
+
+If a concept/method page mixes evidence types, separate them explicitly:
+
+- vault-backed claims from imported papers
+- general background from model knowledge
+- web-verified external references
+- unresolved gaps or conflicts
 
 ## Hard Rules
 
 - Use `D:\python\python.exe` for Python commands in this vault.
 - Read and write Markdown as UTF-8. In PowerShell, prefer `Get-Content -Encoding UTF8`.
-- Markdown 正文默认使用简体中文；frontmatter 键名、文件名、BibTeX/Zotero key、代码、路径、数据集编号、英文标题和必要原文术语保持原样。
-- 英文标题必须明确大小写：按可靠来源逐字保留原始 capitalization，不自动改成全小写、全大写或自行 Title Case；来源不一致时优先 DOI/出版社页面/论文首页，并在元数据缺口中记录不确定性。
 - Do not bulk-delete files or directories.
 - Do not use `del /s`, `rd /s`, `rmdir /s`, `Remove-Item -Recurse`, or `rm -rf`.
 - Delete only one explicitly named file at a time when deletion is truly required.
 - Treat `工具库/raw/` as source-of-truth input. Do not modify files under `工具库/raw/` unless the user explicitly asks.
+- Zotero is read-only by default. Unless the user explicitly asks to import or modify Zotero, only read Zotero metadata, BibTeX, full-text indexes, and attachment paths.
 - Do not invent paper claims, methods, metrics, datasets, author intent, or citations.
-- If vault evidence is insufficient, write `Vault 中未找到足够依据`.
-- Ask before high-impact changes: merging pages, renaming many notes, deleting notes, installing packages, or changing schema rules.
+- Ask before high-impact changes: merging pages, renaming many notes, deleting notes, installing packages, changing schema rules, or replacing a page taxonomy.
+- For Chinese-heavy scripts or batch rewrites, save a UTF-8 script file and run it. Avoid large Chinese PowerShell here-strings because they can corrupt text encoding.
+
+## Language And Writing Rules
+
+- User-facing Markdown body prose should default to Simplified Chinese.
+- Frontmatter keys, filenames, BibTeX/Zotero keys, code, paths, dataset accessions, English paper titles, stable identifiers, URLs, and necessary original terms should remain unchanged.
+- Avoid unnecessary Chinese-English mixing in body prose. Translate English phrases when Chinese is natural and precision is not lost.
+- For necessary English technical terms, prefer `中文（English）` on first appearance, then use Chinese or a stable abbreviation by context.
+- Exceptions: original paper titles, official method/software names, gene names, dataset IDs, stable abbreviations, code, paths, URLs, citation keys, and direct quotations.
+- Preserve exact capitalization for English titles. Use reliable sources such as DOI/publisher pages or the paper title page. Do not auto-normalize titles to lowercase, uppercase, or inferred Title Case.
+
+## Processing Depth
+
+Use explicit depth labels in reasoning and outputs:
+
+- `metadata-only`: only metadata, BibTeX, CSV, indexes, gaps, and source paths are reliable. Do not write paper conclusions.
+- `abstract-level`: abstract, title page, highlights, or converted text support conservative source-note conclusions. Do not write figure-level or mechanism-heavy conclusions.
+- `x-ray`: full text, methods, figures/tables, data/materials, limitations, and evidence chain have been inspected. Only this level supports strong paper-specific conclusions and cross-paper judgments.
+
+## Source Note Rules
+
+- Source note bodies must describe the paper itself.
+- Do not use workflow status as research content. Phrases such as "imported", "not written to Zotero", "batch processed", "converted by MarkItDown", "pending later review", and similar process notes belong in logs, reports, CSV files, field-gap pages, or frontmatter status fields.
+- Source-note bibliographic metadata belongs in YAML frontmatter, `工具库/metadata/papers.csv`, `工具库/references.bib`, and index files.
+- Do not create body `## 元数据` sections or field-value metadata tables that duplicate Obsidian properties.
+- Keep the preferred source-note order: `研究问题`, `结论`, then methods/evidence/findings/limitations/links.
+- If the note is only `abstract-level`, state that figure-level details remain unverified.
+
+## Local PDF And Metadata Rules
+
+- Local PDF ingest must verify evidence before generating claims.
+- PDF title page or converted text must be consistent with DOI/Crossref/publisher metadata.
+- Filename-derived clues must not contradict the selected metadata record.
+- Zotero/vault existing records must not point to a different paper.
+- If metadata conflicts with PDF evidence, stop before writing conclusions. Record the issue in `知识库/字段补全检查.md`, a report, or `知识库/wiki/log.md`.
 
 ## Directory Map
 
@@ -32,7 +126,7 @@ Skill location:
 AGENTS.md               # workspace-level Codex rules; keep at project root
 工具库/                  # workflows, tools, source material, and intermediate artifacts
   raw/                  # immutable source inbox
-    papers/             # PDFs and source packages
+    papers/             # non-Zotero PDFs and source packages
     preprints/          # bioRxiv/medRxiv/arXiv tracking material
     web/                # web clips and HTML captures
     imports/            # RIS, BibTeX, Zotero exports
@@ -61,33 +155,36 @@ AGENTS.md               # workspace-level Codex rules; keep at project root
     synthesis/          # cross-paper comparisons and reviews
 ```
 
-## Index Files
+## Retrieval Contract
 
-Read these first for retrieval and orientation:
+When answering from vault evidence:
 
-1. `知识库/文献索引.md`
-2. `知识库/研究主题索引.md`
-3. `知识库/研究方法索引.md`
-4. `知识库/字段补全检查.md`
-5. `知识库/wiki/index.md`
-
-Append important operations to `知识库/wiki/log.md`.
-
-## Default Retrieval Contract
-
-When the user asks what the vault knows, compare papers, define a concept, or assess evidence:
-
-1. Read the index files above, skipping missing files.
+1. Read these first when relevant, skipping missing files:
+   - `知识库/文献索引.md`
+   - `知识库/研究主题索引.md`
+   - `知识库/研究方法索引.md`
+   - `知识库/字段补全检查.md`
+   - `知识库/wiki/index.md`
 2. Use `rg` in `知识库/` to locate candidate Markdown notes.
 3. Read the most relevant evidence notes before answering.
-4. Base conclusions only on vault evidence.
-5. Default answer sections: `结论`, `支持文献`, `差异/争议`, `对我研究的启发`, and `证据缺口` when needed.
+4. Base vault-backed conclusions only on vault evidence.
+5. Use answer sections such as `结论`, `支持文献`, `差异/争议`, `对我研究的启发`, and `证据缺口` when useful.
+
+## Index And Log Rules
+
+- Append important operations to `知识库/wiki/log.md`.
+- Update `知识库/文献索引.md` when source notes change materially.
+- Update `知识库/研究主题索引.md` when concepts, projects, MOCs, or synthesis pages change materially.
+- Update `知识库/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.
+- Update `知识库/字段补全检查.md` for missing or conflicting DOI, URL, PDF, title capitalization, Zotero keys, BibTeX keys, datasets, or source evidence.
 
 ## Completion Standard
 
-For ingest, synthesis, or maintenance tasks, finish only after stating:
+For ingest, conversion, source-note, x-ray, synthesis, or maintenance tasks, finish only after stating:
 
 - files created or updated
 - indexes/logs updated or deliberately skipped
+- evidence source and processing depth
 - evidence gaps or metadata gaps
+- skipped steps and why
 - any action that still needs user confirmation

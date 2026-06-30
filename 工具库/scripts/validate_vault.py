@@ -171,6 +171,8 @@ def check_markdown(errors: list[str], warnings: list[str]) -> dict[str, dict]:
             for heading in OLD_ENGLISH_HEADINGS:
                 if heading in text:
                     warnings.append(f"{rel(path)}: old English heading remains: {heading}")
+        if in_knowledge and "??" in text:
+            errors.append(f"{rel(path)}: contains consecutive question marks, possible encoding or localization corruption")
 
     for dir_name in WIKI_CONTENT_DIRS:
         content_dir = KNOWLEDGE_ROOT / "wiki" / dir_name

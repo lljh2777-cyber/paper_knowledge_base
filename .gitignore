@@ -8,6 +8,13 @@
 工具库/metadata/
 工具库/references.bib
 
+# Local one-off maintenance/import scripts that may contain private paths or generated rewrite content
+工具库/scripts/batch_ingest_zotero.py
+工具库/scripts/ingest_local_pdfs.py
+工具库/scripts/localize_existing_vault_chinese.py
+工具库/scripts/rewrite_local_pdf_notes_from_evidence.py
+工具库/scripts/update_source_conclusions.py
+
 # Obsidian or assistant/plugin local state if folders are moved later
 .obsidian/
 .claudian/
