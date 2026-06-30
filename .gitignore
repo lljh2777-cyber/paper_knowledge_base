@@ -1,0 +1,28 @@
+# Local Obsidian vault and generated/private research content
+知识库/
+
+# Source assets, full-text conversions, generated outputs, and local metadata
+工具库/raw/
+工具库/converted/
+工具库/output/
+工具库/metadata/
+工具库/references.bib
+
+# Obsidian or assistant/plugin local state if folders are moved later
+.obsidian/
+.claudian/
+
+# Python/runtime noise
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
+*.swp
