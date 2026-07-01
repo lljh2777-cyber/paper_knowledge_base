@@ -20,6 +20,7 @@ Skill locations:
 %USERPROFILE%\.codex\skills\research-vault-xray\SKILL.md         # full-text paper deep reading
 %USERPROFILE%\.codex\skills\research-vault-retrieval\SKILL.md    # answer from vault evidence
 %USERPROFILE%\.codex\skills\research-vault-synthesis\SKILL.md    # synthesis, MOC, concept/project pages
+%USERPROFILE%\.codex\skills\research-vault-code\SKILL.md         # R/Python code project analysis and code notes
 %USERPROFILE%\.codex\skills\research-vault-lint\SKILL.md         # vault quality audit and repair
 ```
 
@@ -33,9 +34,32 @@ Use a skill when the task touches the vault workflow, files, metadata, source no
 - Use `research-vault-xray` for full-text paper reading, figure/table/method/data extraction, evidence strength assessment, and upgrading abstract-level notes into deep-read notes.
 - Use `research-vault-retrieval` when the user asks what the vault knows, asks for vault-backed definitions, compares imported papers, checks existing evidence, or asks for conclusions grounded only in `knowledge-base/`.
 - Use `research-vault-synthesis` for cross-paper comparisons, literature maps, MOCs, research projects, concept/method/dataset synthesis pages, and saved gap analyses.
+- Use `research-vault-code` for static analysis of R/Python code projects, script explanation, entrypoint/dependency/input-output mapping, and linked Markdown notes under `knowledge-base/wiki/code/`.
 - Use `research-vault-lint` for broken links, duplicate pages, orphan notes, metadata gaps, index consistency, unsupported claims, workflow boilerplate, encoding damage, and graph/index cleanup.
 
 Do not force a vault skill for a normal explanatory answer that does not depend on vault files. For example, a general explanation of a concept, method, disease, tool, statistical model, or experimental technique can use the model's general knowledge and, when useful or required, web search.
+
+## Skill Execution Boundaries
+
+Keep skill use lightweight and stage-owned. Use the router only to select the right stage, then let the focused child skill own concrete execution.
+
+- `research-vault` only routes broad or ambiguous requests and clarifies intent. It should not perform concrete file writes once a child skill clearly owns the task.
+- `research-vault-ingest` owns source identity, metadata, duplicate checks, evidence consistency, and metadata/index/log updates. It must not write paper conclusions.
+- `research-vault-convert` owns conversion to Markdown and conversion quality checks. It must not infer scientific conclusions beyond what the extracted text exposes.
+- `research-vault-source-note` owns `knowledge-base/wiki/sources/*.md` structure, body prose, frontmatter normalization, and source-note repair. It must not pretend abstract-level evidence is full-text deep reading.
+- `research-vault-xray` owns full-text deep reading, evidence chains, figure/table/method/data inspection, and upgrading source notes to `x-ray`.
+- `research-vault-retrieval` owns vault-grounded answers. It does not write files unless the user explicitly asks to save, update, or maintain results.
+- `research-vault-synthesis` owns cross-paper synthesis, MOCs, concept/method/dataset pages, and project pages. It must not do first-pass intake or conversion.
+- `research-vault-code` owns static R/Python code project analysis and `knowledge-base/wiki/code/` pages. Project pages own relationships and data flow; script pages should primarily use selected code snippets followed by explanation. It must not modify source code, run project code, install dependencies, or turn static reading into runtime claims unless the user explicitly asks for execution.
+- `research-vault-lint` owns audits and consistency repairs. It must report before high-impact fixes and must not bulk-delete files.
+
+Lightweight handoff rules:
+
+- `metadata-only` supports metadata, indexes, gaps, and source paths only; do not generate paper conclusions.
+- `abstract-level` supports conservative source-note claims only; do not write it as `x-ray`.
+- Mark or upgrade to `x-ray` only after full-text evidence, methods, figures/tables, data/materials, limitations, and evidence chain have been inspected.
+- File writes should be performed by the skill that owns that file type or workflow stage.
+- Normal background explanations do not require a vault skill unless the user asks for vault evidence or file updates.
 
 ## Evidence Source Policy
 
@@ -143,6 +167,7 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
   文献索引.md
   研究主题索引.md
   研究方法索引.md
+  代码项目索引.md
   字段补全检查.md
   wiki/
     sources/            # one note per paper/source
@@ -151,6 +176,9 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
     datasets/           # datasets, cohorts, benchmarks, corpora
     entities/           # people, labs, tools, genes, diseases, places
     projects/           # atomic research ideas and tasks
+    code/               # static code project and script notes
+      projects/         # one page per code project
+      scripts/          # script pages grouped by project slug
     mocs/               # research-area maps
     synthesis/          # cross-paper comparisons and reviews
 ```
@@ -176,15 +204,17 @@ When answering from vault evidence:
 - Update `knowledge-base/文献索引.md` when source notes change materially.
 - Update `knowledge-base/研究主题索引.md` when concepts, projects, MOCs, or synthesis pages change materially.
 - Update `knowledge-base/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.
+- Update `knowledge-base/代码项目索引.md` and `knowledge-base/wiki/code/index.md` when code project or script pages change materially.
 - Update `knowledge-base/字段补全检查.md` for missing or conflicting DOI, URL, PDF, title capitalization, Zotero keys, BibTeX keys, datasets, or source evidence.
 
 ## Completion Standard
 
-For ingest, conversion, source-note, x-ray, synthesis, or maintenance tasks, finish only after stating:
+For ingest, conversion, source-note, x-ray, synthesis, code analysis, or maintenance tasks, finish only after stating:
 
 - files created or updated
 - indexes/logs updated or deliberately skipped
 - evidence source and processing depth
 - evidence gaps or metadata gaps
+- code files inspected and whether code was only statically read
 - skipped steps and why
 - any action that still needs user confirmation
