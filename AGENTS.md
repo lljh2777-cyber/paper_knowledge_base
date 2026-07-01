@@ -10,6 +10,15 @@ This file is written for AI agents. User-facing Markdown content in the vault sh
 
 Use `research-vault` as the router only when the request is broad or ambiguous. For concrete execution, use the focused child skill that matches the current workflow stage.
 
+Project subagent prompts:
+
+```text
+.codex/agents/PaperXRay.md     # persistent prompt for PDF/full-text paper analysis subagents
+.codex/agents/CodeReader.md    # persistent prompt for static R/Python code analysis subagents
+```
+
+When the user asks to create or use these subagents, read the matching file first and pass its contents into the runtime subagent prompt. These project files are the source of truth for the subagent role and boundary; runtime subagents are temporary execution instances.
+
 Skill locations:
 
 ```text
@@ -148,6 +157,8 @@ Use explicit depth labels in reasoning and outputs:
 
 ```text
 AGENTS.md               # workspace-level Codex rules; keep at project root
+.codex/
+  agents/               # project-local persistent subagent prompts
 tool-library/                  # workflows, tools, source material, and intermediate artifacts
   raw/                  # immutable source inbox
     papers/             # non-Zotero PDFs and source packages
