@@ -13,8 +13,8 @@ except ImportError as exc:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TOOL_ROOT = PROJECT_ROOT / "工具库"
-KNOWLEDGE_ROOT = PROJECT_ROOT / "知识库"
+TOOL_ROOT = PROJECT_ROOT / "tool-library"
+KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge-base"
 
 REQUIRED_PROJECT_FILES = [
     "AGENTS.md",
@@ -124,16 +124,16 @@ def check_required_paths(errors: list[str]) -> None:
             errors.append(f"missing required file: {item}")
     for item in REQUIRED_TOOL_FILES:
         if not (TOOL_ROOT / item).exists():
-            errors.append(f"missing required tool file: 工具库/{item}")
+            errors.append(f"missing required tool file: tool-library/{item}")
     for item in REQUIRED_KNOWLEDGE_FILES:
         if not (KNOWLEDGE_ROOT / item).exists():
-            errors.append(f"missing required knowledge file: 知识库/{item}")
+            errors.append(f"missing required knowledge file: knowledge-base/{item}")
     for item in ["raw", "converted/markdown", "templates", "metadata", "scripts"]:
         if not (TOOL_ROOT / item).exists():
-            errors.append(f"missing required tool directory: 工具库/{item}")
+            errors.append(f"missing required tool directory: tool-library/{item}")
     for item in [".obsidian", "wiki/sources"]:
         if not (KNOWLEDGE_ROOT / item).exists():
-            errors.append(f"missing required knowledge directory: 知识库/{item}")
+            errors.append(f"missing required knowledge directory: knowledge-base/{item}")
 
 
 def check_graph(errors: list[str], warnings: list[str]) -> None:
@@ -241,16 +241,16 @@ def check_metadata(frontmatters: dict[str, dict], errors: list[str], warnings: l
     for row in rows:
         citekey = row.get("citekey", "").strip()
         if not citekey:
-            errors.append("工具库/metadata/papers.csv: row missing citekey")
+            errors.append("tool-library/metadata/papers.csv: row missing citekey")
             continue
         if citekey in seen_citekeys:
-            errors.append(f"工具库/metadata/papers.csv: duplicate citekey `{citekey}`")
+            errors.append(f"tool-library/metadata/papers.csv: duplicate citekey `{citekey}`")
         seen_citekeys.add(citekey)
 
         doi = row.get("doi", "").strip().lower()
         if doi:
             if doi in seen_dois:
-                errors.append(f"工具库/metadata/papers.csv: duplicate DOI `{doi}`")
+                errors.append(f"tool-library/metadata/papers.csv: duplicate DOI `{doi}`")
             seen_dois.add(doi)
 
         source_path = row.get("source_path", "").strip()
@@ -265,7 +265,7 @@ def check_metadata(frontmatters: dict[str, dict], errors: list[str], warnings: l
 
         bibtex_key = row.get("bibtex_key", "").strip()
         if bibtex_key and bibtex_key not in keys:
-            errors.append(f"{citekey}: BibTeX key `{bibtex_key}` missing from 工具库/references.bib")
+            errors.append(f"{citekey}: BibTeX key `{bibtex_key}` missing from tool-library/references.bib")
 
         note_path = f"wiki/sources/{citekey}.md"
         note = KNOWLEDGE_ROOT / note_path

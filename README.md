@@ -4,19 +4,19 @@
 
 ## Workspace Layout
 
-本地工作区采用“工具库 + 知识库”的双目录结构：
+本地工作区采用“tool-library + knowledge-base”的双目录结构：
 
 ```text
 AGENTS.md               # 项目级 AI 操作规则
 README.md
-工具库/                  # 可复用工具、模板、脚本和说明
-知识库/                  # Obsidian vault，本地知识内容，默认不提交
+tool-library/                  # 可复用工具、模板、脚本和说明
+knowledge-base/                  # Obsidian vault，本地知识内容，默认不提交
 ```
 
 推荐在 Obsidian 中只打开：
 
 ```text
-D:\Obsidian Vault\论文库\知识库
+D:\Obsidian Vault\paper-knowledge-base\knowledge-base
 ```
 
 这样 Obsidian 图谱主要展示处理后的知识文件，而不是工具、脚本、流程说明和中间产物。
@@ -27,18 +27,18 @@ D:\Obsidian Vault\论文库\知识库
 
 - `AGENTS.md`：当前工作区的 AI 操作约束、skill 路由、证据来源策略和目录规则。
 - `README.md`：仓库说明。
-- `工具库/docs/`：流程、工具和说明文档。
-- `工具库/scripts/`：适合公开复用的通用验证和维护脚本。
-- `工具库/templates/`：source note、研究项目和综合分析模板。
+- `tool-library/docs/`：流程、工具和说明文档。
+- `tool-library/scripts/`：适合公开复用的通用验证和维护脚本。
+- `tool-library/templates/`：source note、研究项目和综合分析模板。
 
 默认不提交：
 
-- `知识库/`：Obsidian vault、知识笔记、本地插件配置。
-- `工具库/raw/`：PDF、网页剪藏、导入包等原始材料。
-- `工具库/converted/`：PDF/HTML/TeX 转换得到的全文 Markdown。
-- `工具库/output/`：生成报告和临时输出。
-- `工具库/metadata/`：`papers.csv`、导入报告等本机处理记录。
-- `工具库/references.bib`：可能包含本机 Zotero key、PDF 路径或个人文献库信息。
+- `knowledge-base/`：Obsidian vault、知识笔记、本地插件配置。
+- `tool-library/raw/`：PDF、网页剪藏、导入包等原始材料。
+- `tool-library/converted/`：PDF/HTML/TeX 转换得到的全文 Markdown。
+- `tool-library/output/`：生成报告和临时输出。
+- `tool-library/metadata/`：`papers.csv`、导入报告等本机处理记录。
+- `tool-library/references.bib`：可能包含本机 Zotero key、PDF 路径或个人文献库信息。
 
 ## Skill Architecture
 
@@ -65,7 +65,7 @@ research-vault-lint             # 链接、重复、元数据、流程话术、u
 
 `AGENTS.md` 明确区分三种证据来源：
 
-- `Vault Evidence`：来自 `知识库/`、`工具库/converted/markdown/`、元数据记录和明确检查过的原始来源。
+- `Vault Evidence`：来自 `knowledge-base/`、`tool-library/converted/markdown/`、元数据记录和明确检查过的原始来源。
 - `Model Knowledge`：适合稳定的通用概念、方法、技术背景说明。
 - `Web Evidence`：适合当前信息、权威链接、数据库/工具文档、近期论文、标准和指南。
 
@@ -88,7 +88,7 @@ research-vault-lint             # 链接、重复、元数据、流程话术、u
 - 最终写入 Obsidian/vault 的 Markdown 正文默认使用简体中文。
 - 英文论文标题、路径、DOI、BibTeX/Zotero key、数据集编号、代码和 URL 保持原样。
 - Zotero 默认只读；除非明确要求，不向 Zotero 写入 PDF 或新条目。
-- `工具库/raw/` 视为原始输入，不主动修改。
+- `tool-library/raw/` 视为原始输入，不主动修改。
 - 禁止批量删除文件或目录。
 
 ## Scripts
@@ -96,7 +96,7 @@ research-vault-lint             # 链接、重复、元数据、流程话术、u
 当前提交到仓库的通用脚本包括：
 
 ```text
-工具库/scripts/validate_vault.py
+tool-library/scripts/validate_vault.py
 ```
 
 本地工作区可能还有一次性批处理脚本，例如 Zotero 批量导入、本地 PDF 导入、旧笔记修复或结论重排脚本。这些脚本可能包含本机路径、个人文献库信息或一次性改写内容，默认不作为公开仓库内容提交。
@@ -104,7 +104,7 @@ research-vault-lint             # 链接、重复、元数据、流程话术、u
 本地验证：
 
 ```powershell
-D:\python\python.exe 工具库\scripts\validate_vault.py
+D:\python\python.exe tool-library\scripts\validate_vault.py
 ```
 
 验证脚本会检查目录结构、source note 结构、frontmatter、索引覆盖、BibTeX/CSV 关系、Obsidian 图谱配置和常见流程污染。
@@ -112,7 +112,7 @@ D:\python\python.exe 工具库\scripts\validate_vault.py
 ## Typical Workflow
 
 1. Zotero 或本地 PDF 进入 `research-vault-ingest` 做查重、元数据和路径记录。
-2. 需要全文文本时，用 `research-vault-convert` 生成 `工具库/converted/markdown/`。
+2. 需要全文文本时，用 `research-vault-convert` 生成 `tool-library/converted/markdown/`。
 3. 生成或修复 source note 时，用 `research-vault-source-note`。
 4. 高价值论文需要真正用于研究判断时，用 `research-vault-xray` 做全文深读。
 5. 回答“我们的库里怎么看”时，用 `research-vault-retrieval`。
