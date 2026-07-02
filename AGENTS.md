@@ -10,14 +10,23 @@ This file is written for AI agents. User-facing Markdown content in the vault sh
 
 Use `research-vault` as the router only when the request is broad or ambiguous. For concrete execution, use the focused child skill that matches the current workflow stage.
 
-Project subagent prompts:
+Project custom subagents:
 
 ```text
-.codex/agents/PaperXRay.md     # persistent prompt for PDF/full-text paper analysis subagents
-.codex/agents/CodeReader.md    # persistent prompt for static R/Python code analysis subagents
+.codex/agents/paper_xray.toml      # standard custom agent for PDF/full-text paper analysis
+.codex/agents/code_reader.toml     # standard custom agent for static R/Python code analysis
+.codex/agents/PaperXRay.md         # human-readable reference for paper_xray
+.codex/agents/CodeReader.md        # human-readable reference for code_reader
 ```
 
-When the user asks to create or use these subagents, read the matching file first and pass its contents into the runtime subagent prompt. These project files are the source of truth for the subagent role and boundary; runtime subagents are temporary execution instances.
+When the user explicitly asks to use a subagent for paper/PDF analysis, spawn `paper_xray`. When the user explicitly asks to use a subagent for code project analysis, spawn `code_reader`. The `.toml` files are the standard Codex custom-agent definitions; the `.md` files are retained only as readable references. Runtime subagents are temporary execution instances.
+
+Skill authoring notes:
+
+- Standard repo-scoped skills live under `.agents/skills/<skill-name>/SKILL.md` when a skill should travel with the repository.
+- The current `research-vault*` skills are installed in `%USERPROFILE%\.codex\skills\` for this local Codex app. If they need to become team/repo skills later, copy or migrate them to `.agents/skills/` or package them as a plugin.
+- Keep `SKILL.md` frontmatter to `name` and `description`; put UI metadata in `agents/openai.yaml`.
+- Keep `SKILL.md` concise and move detailed rules, schemas, or long examples into one-level `references/` files.
 
 Skill locations:
 

@@ -1,0 +1,18 @@
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+web_search = "cached"
+model_reasoning_effort = "high"
+
+[windows]
+sandbox = "elevated"
+
+[sandbox_workspace_write]
+network_access = true
+
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 4
+max_depth = 1
+job_max_runtime_seconds = 3600
