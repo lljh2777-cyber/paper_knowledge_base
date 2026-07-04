@@ -67,9 +67,9 @@ Keep skill use lightweight and stage-owned. Use the router only to select the ri
 - `research-vault-source-note` owns `knowledge-base/wiki/sources/*.md` structure, body prose, frontmatter normalization, and source-note repair. It must not pretend abstract-level evidence is full-text deep reading.
 - `research-vault-xray` owns full-text deep reading, evidence chains, figure/table/method/data inspection, and upgrading source notes to `x-ray`.
 - `research-vault-retrieval` owns vault-grounded answers. It does not write files unless the user explicitly asks to save, update, or maintain results.
-- `research-vault-synthesis` owns cross-paper synthesis, MOCs, concept/method/dataset pages, and project pages. It must not do first-pass intake or conversion.
-- `research-vault-code` owns static R/Python code project analysis and `knowledge-base/wiki/code/` pages. Project pages own relationships and data flow; script pages should primarily use selected code snippets followed by explanation. It must not modify source code, run project code, install dependencies, or turn static reading into runtime claims unless the user explicitly asks for execution.
-- `research-vault-lint` owns audits and consistency repairs. It must report before high-impact fixes and must not bulk-delete files.
+- `research-vault-synthesis` owns cross-paper synthesis, MOCs, concept/method/dataset pages, and project pages. It also owns canonical method/concept hub pages created to connect existing source notes and code notes. It must not do first-pass intake or conversion.
+- `research-vault-code` owns static R/Python code project analysis and `knowledge-base/wiki/code/` pages. Project pages own relationships and data flow; script pages should primarily use selected code snippets followed by explanation. It should link recognized methods/tools to existing method/concept pages and record missing hub pages as handoff candidates, but it must not modify source code, run project code, install dependencies, or turn static reading into runtime claims unless the user explicitly asks for execution.
+- `research-vault-lint` owns audits and consistency repairs, including code-to-method links, orphan code/method pages, and plain-text method terms that should point to canonical pages. It must report before high-impact fixes and must not bulk-delete files.
 
 Lightweight handoff rules:
 
@@ -77,6 +77,7 @@ Lightweight handoff rules:
 - `abstract-level` supports conservative source-note claims only; do not write it as `x-ray`.
 - Mark or upgrade to `x-ray` only after full-text evidence, methods, figures/tables, data/materials, limitations, and evidence chain have been inspected.
 - File writes should be performed by the skill that owns that file type or workflow stage.
+- When code analysis discovers a recurring method or tool without a hub page, `research-vault-code` records the candidate, `research-vault-synthesis` creates or updates the canonical method/concept page, and `research-vault-lint` later audits missing backlinks or orphan notes.
 - Normal background explanations do not require a vault skill unless the user asks for vault evidence or file updates.
 
 ## Evidence Source Policy
@@ -225,6 +226,7 @@ When answering from vault evidence:
 - Update `knowledge-base/研究主题索引.md` when concepts, projects, MOCs, or synthesis pages change materially.
 - Update `knowledge-base/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.
 - Update `knowledge-base/代码项目索引.md` and `knowledge-base/wiki/code/index.md` when code project or script pages change materially.
+- When a method/concept page is created because code pages exposed a missing hub, link the relevant code project/script pages from that hub and replace obvious plain-text method mentions in project pages with canonical wikilinks when low-risk.
 - Update `knowledge-base/字段补全检查.md` for missing or conflicting DOI, URL, PDF, title capitalization, Zotero keys, BibTeX keys, datasets, or source evidence.
 
 ## Completion Standard

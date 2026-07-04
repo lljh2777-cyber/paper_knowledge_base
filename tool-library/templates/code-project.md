@@ -54,7 +54,8 @@ updated:
 
 ### 方法
 
--
+- [[wiki/methods/<method-slug>|<方法名>]]
+- <方法名>（待建方法页）
 
 ### 数据
 

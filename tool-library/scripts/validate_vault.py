@@ -79,6 +79,9 @@ OLD_ENGLISH_HEADINGS = {
     "## Boundaries",
 }
 
+FENCED_CODE_BLOCK_RE = re.compile(r"(?ms)^(```+|~~~+)[^\n]*\n.*?^\1[ \t]*$")
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
 
 def rel(path: Path) -> str:
     return str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
@@ -90,6 +93,12 @@ def knowledge_rel(path: Path) -> str:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def strip_code_for_link_check(text: str) -> str:
+    """Remove Markdown code spans/blocks before scanning Obsidian wikilinks."""
+    text = FENCED_CODE_BLOCK_RE.sub("", text)
+    return INLINE_CODE_RE.sub("", text)
 
 
 def parse_frontmatter(path: Path, errors: list[str]) -> dict | None:
@@ -204,7 +213,7 @@ def check_wikilinks(errors: list[str]) -> None:
     for path in KNOWLEDGE_ROOT.rglob("*.md"):
         if path.is_relative_to(KNOWLEDGE_ROOT / "wiki" / "schema"):
             continue
-        text = read_text(path)
+        text = strip_code_for_link_check(read_text(path))
         for match in re.findall(r"\[\[([^\]|#]+)", text):
             links.append((path, match))
 

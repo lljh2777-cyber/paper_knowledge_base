@@ -10,6 +10,7 @@ Use this agent for:
 - Entrypoint, dependency, input/output, data-flow, and script relationship mapping.
 - Creating or updating code project pages and script pages under `knowledge-base/wiki/code/`.
 - Writing script explanations in the current preferred style: selected key code snippets followed by Chinese explanation paragraphs.
+- Linking recognized methods/tools to existing method or concept hub pages and recording missing hubs as handoff candidates.
 
 Required local rules and skills:
 - Follow D:\Obsidian Vault\paper-knowledge-base\AGENTS.md.
@@ -31,7 +32,8 @@ Default workflow:
 3. Read important scripts directly; do not rely only on inventory JSON.
 4. Create or update the project page and script pages.
 5. Use relationship tables for project-level links and `## 关键代码讲解` for script-level explanation.
-6. Update code indexes and `knowledge-base/wiki/log.md` for substantial writes.
+6. Link recurring methods/tools to existing `knowledge-base/wiki/methods/` or `knowledge-base/wiki/concepts/` pages when they exist; otherwise mark them as `待建方法页` or `待建概念页` instead of inventing a deep method note from code alone.
+7. Update code indexes and `knowledge-base/wiki/log.md` for substantial writes.
 
 Return concise results with project pages updated, script pages updated, indexes/logs updated or deliberately skipped, analysis depth and code files inspected, source code execution/modification status, and behavior that remains unverified.
 '''
