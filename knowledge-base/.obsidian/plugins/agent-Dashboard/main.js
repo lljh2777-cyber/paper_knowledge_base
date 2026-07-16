@@ -1048,8 +1048,10 @@ class CodePracticeView extends ItemView {
 		});
 		editor.value = cell.code;
 		editor.disabled = Boolean(this.activeRunId);
+		this.resizeCellEditor(editor);
 		editor.addEventListener("input", () => {
 			cell.code = editor.value;
+			this.resizeCellEditor(editor);
 			this.invalidateCellsFrom(index);
 			run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
 			this.updateNotebookControls();
@@ -1061,6 +1063,7 @@ class CodePracticeView extends ItemView {
 				const end = editor.selectionEnd;
 				editor.setRangeText("\t", start, end, "end");
 				cell.code = editor.value;
+				this.resizeCellEditor(editor);
 				this.invalidateCellsFrom(index);
 				run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
 				this.updateNotebookControls();
@@ -1080,6 +1083,15 @@ class CodePracticeView extends ItemView {
 
 		const output = article.createDiv({ cls: "code-practice-cell-output" });
 		this.renderCellOutput(output, cell);
+	}
+
+	resizeCellEditor(editor) {
+		const minimumHeight = 132;
+		const maximumHeight = Math.max(240, Math.min(520, Math.round(window.innerHeight * 0.6)));
+		editor.style.height = `${minimumHeight}px`;
+		const contentHeight = editor.scrollHeight;
+		editor.style.height = `${Math.min(Math.max(contentHeight, minimumHeight), maximumHeight)}px`;
+		editor.style.overflowY = contentHeight > maximumHeight ? "auto" : "hidden";
 	}
 
 	createIconButton(parent, icon, label) {

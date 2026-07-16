@@ -1191,9 +1191,9 @@
 .code-practice-cell-editor {
 	box-sizing: border-box;
 	width: 100%;
-	min-height: 96px;
-	max-height: 42vh;
+	min-height: 132px;
 	padding: 10px;
+	overflow-y: hidden;
 	resize: vertical;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 4px;
@@ -1478,7 +1478,7 @@
 	}
 
 	.code-practice-cell-editor {
-		min-height: 112px;
+		min-height: 132px;
 	}
 
 	.code-practice-metrics {
