@@ -40,6 +40,7 @@ Skill locations:
 %USERPROFILE%\.codex\skills\research-vault-synthesis\SKILL.md    # synthesis, MOC, concept/project pages
 %USERPROFILE%\.codex\skills\research-vault-code\SKILL.md         # R/Python code project analysis and code notes
 %USERPROFILE%\.codex\skills\research-vault-lint\SKILL.md         # vault quality audit and repair
+.agents\skills\research-vault-r\SKILL.md                         # R packages, functions, concepts, and reusable recipes
 ```
 
 ## Skill Routing Policy
@@ -53,6 +54,7 @@ Use a skill when the task touches the vault workflow, files, metadata, source no
 - Use `research-vault-retrieval` when the user asks what the vault knows, asks for vault-backed definitions, compares imported papers, checks existing evidence, or asks for conclusions grounded only in `knowledge-base/`.
 - Use `research-vault-synthesis` for cross-paper comparisons, literature maps, MOCs, research projects, concept/method/dataset synthesis pages, and saved gap analyses.
 - Use `research-vault-code` for static analysis of R/Python code projects, script explanation, entrypoint/dependency/input-output mapping, and linked Markdown notes under `knowledge-base/wiki/code/`.
+- Use `research-vault-r` for R package notes, important function or function-family notes, task-oriented R recipes, R language concept notes, and the R knowledge indexes under `knowledge-base/wiki/r/`.
 - Use `research-vault-lint` for broken links, duplicate pages, orphan notes, metadata gaps, index consistency, unsupported claims, workflow boilerplate, encoding damage, and graph/index cleanup.
 
 Do not force a vault skill for a normal explanatory answer that does not depend on vault files. For example, a general explanation of a concept, method, disease, tool, statistical model, or experimental technique can use the model's general knowledge and, when useful or required, web search.
@@ -69,6 +71,7 @@ Keep skill use lightweight and stage-owned. Use the router only to select the ri
 - `research-vault-retrieval` owns vault-grounded answers. It does not write files unless the user explicitly asks to save, update, or maintain results.
 - `research-vault-synthesis` owns cross-paper synthesis, MOCs, concept/method/dataset pages, and project pages. It also owns canonical method/concept hub pages created to connect existing source notes and code notes. It must not do first-pass intake or conversion.
 - `research-vault-code` owns static R/Python code project analysis and `knowledge-base/wiki/code/` pages. Project pages own relationships and data flow; script pages should primarily use selected code snippets followed by explanation. It should link recognized methods/tools to existing method/concept pages and record missing hub pages as handoff candidates, but it must not modify source code, run project code, install dependencies, or turn static reading into runtime claims unless the user explicitly asks for execution.
+- `research-vault-r` owns `knowledge-base/wiki/r/` package, function, recipe, and R-language concept pages plus `R知识索引.md`. It should link existing code pages and method pages without duplicating their project-specific implementation or scientific-method content. It must distinguish documentation checks from locally executed examples and must not install R packages without user confirmation.
 - `research-vault-lint` owns audits and consistency repairs, including code-to-method links, orphan code/method pages, and plain-text method terms that should point to canonical pages. It must report before high-impact fixes and must not bulk-delete files.
 
 Lightweight handoff rules:
@@ -189,6 +192,7 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
   研究主题索引.md
   研究方法索引.md
   代码项目索引.md
+  R知识索引.md
   字段补全检查.md
   wiki/
     sources/            # one note per paper/source
@@ -200,6 +204,11 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
     code/               # static code project and script notes
       projects/         # one page per code project
       scripts/          # script pages grouped by project slug
+    r/                  # reusable R learning and practice notes
+      packages/         # one hub page per R package
+      functions/        # important functions or function families
+      recipes/          # task-oriented reusable examples
+      concepts/         # R language mechanisms and concepts
     mocs/               # research-area maps
     synthesis/          # cross-paper comparisons and reviews
 ```
@@ -226,12 +235,13 @@ When answering from vault evidence:
 - Update `knowledge-base/研究主题索引.md` when concepts, projects, MOCs, or synthesis pages change materially.
 - Update `knowledge-base/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.
 - Update `knowledge-base/代码项目索引.md` and `knowledge-base/wiki/code/index.md` when code project or script pages change materially.
+- Update `knowledge-base/R知识索引.md` and `knowledge-base/wiki/r/index.md` when R package, function, recipe, or R-language concept pages change materially.
 - When a method/concept page is created because code pages exposed a missing hub, link the relevant code project/script pages from that hub and replace obvious plain-text method mentions in project pages with canonical wikilinks when low-risk.
 - Update `knowledge-base/字段补全检查.md` for missing or conflicting DOI, URL, PDF, title capitalization, Zotero keys, BibTeX keys, datasets, or source evidence.
 
 ## Completion Standard
 
-For ingest, conversion, source-note, x-ray, synthesis, code analysis, or maintenance tasks, finish only after stating:
+For ingest, conversion, source-note, x-ray, synthesis, code analysis, R-note, or maintenance tasks, finish only after stating:
 
 - files created or updated
 - indexes/logs updated or deliberately skipped

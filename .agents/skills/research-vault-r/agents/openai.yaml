@@ -1,0 +1,4 @@
+interface:
+  display_name: "R 学习与实战"
+  short_description: "为研究知识库创建和维护可复用的 R 包、函数、概念与实战笔记"
+  default_prompt: "使用 $research-vault-r 在本知识库中创建经过来源标注和验证分级的 R 包、函数、概念或实战笔记。"

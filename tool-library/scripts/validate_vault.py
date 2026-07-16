@@ -15,6 +15,7 @@ except ImportError as exc:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOL_ROOT = PROJECT_ROOT / "tool-library"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge-base"
+IGNORED_KNOWLEDGE_DIRS = {".obsidian", ".verysync", ".trash", ".git"}
 
 REQUIRED_PROJECT_FILES = [
     "AGENTS.md",
@@ -95,6 +96,14 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def iter_knowledge_markdown() -> list[Path]:
+    return [
+        path
+        for path in KNOWLEDGE_ROOT.rglob("*.md")
+        if not any(part in IGNORED_KNOWLEDGE_DIRS for part in path.relative_to(KNOWLEDGE_ROOT).parts)
+    ]
+
+
 def strip_code_for_link_check(text: str) -> str:
     """Remove Markdown code spans/blocks before scanning Obsidian wikilinks."""
     text = FENCED_CODE_BLOCK_RE.sub("", text)
@@ -163,7 +172,7 @@ def check_graph(errors: list[str], warnings: list[str]) -> None:
 
 def check_markdown(errors: list[str], warnings: list[str]) -> dict[str, dict]:
     frontmatters: dict[str, dict] = {}
-    md_paths = list(KNOWLEDGE_ROOT.rglob("*.md"))
+    md_paths = iter_knowledge_markdown()
     if (TOOL_ROOT / "templates").exists():
         md_paths.extend((TOOL_ROOT / "templates").glob("*.md"))
     if (TOOL_ROOT / "docs").exists():
@@ -210,7 +219,7 @@ def check_markdown(errors: list[str], warnings: list[str]) -> dict[str, dict]:
 
 def check_wikilinks(errors: list[str]) -> None:
     links: list[tuple[Path, str]] = []
-    for path in KNOWLEDGE_ROOT.rglob("*.md"):
+    for path in iter_knowledge_markdown():
         if path.is_relative_to(KNOWLEDGE_ROOT / "wiki" / "schema"):
             continue
         text = strip_code_for_link_check(read_text(path))

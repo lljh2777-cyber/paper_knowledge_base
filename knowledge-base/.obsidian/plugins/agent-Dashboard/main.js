@@ -8,6 +8,7 @@ const {
 	PluginSettingTab,
 	Setting,
 	normalizePath,
+	setIcon,
 } = require("obsidian");
 
 const fs = require("fs");
@@ -15,10 +16,14 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const VIEW_TYPE = "agent-dashboard-research-vault";
+const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 const DEFAULT_SETTINGS = {
 	projectRoot: "",
 	codexExecutable: "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+	codexModel: "gpt-5.5",
 	pythonExecutable: "D:\\python\\python.exe",
+	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
+	codePracticeTimeoutSeconds: 30,
 	taskTimeoutMinutes: 60,
 };
 
@@ -54,6 +59,17 @@ const ACTIONS = [
 		enabled: true,
 	},
 	{
+		id: "code-practice",
+		label: "代码练习",
+		agent: "local-runtime",
+		description: "在独立视图中使用 Python/R 单元格。运行至当前单元格时会在新进程中累计重放前置代码，可逐格查看输出、停止任务并显式保存练习笔记。",
+		placeholder: "",
+		requiresInput: false,
+		writes: true,
+		enabled: true,
+		localView: true,
+	},
+	{
 		id: "vault-retrieval",
 		label: "知识库检索",
 		agent: "research-vault-retrieval",
@@ -77,21 +93,32 @@ const ACTIONS = [
 		id: "vault-lint",
 		label: "知识库体检",
 		agent: "research-vault-lint",
-		description: "运行现有 validate_vault.py，只读取并报告问题，不自动修复或删除文件。",
+		description: "执行分层只读审计：结构、属性、链接、孤立页、证据深度、source note 正文、代码关系、索引和 OKF 状态。完成后可在结果弹窗中选择由 AI 提出方案并修复。",
 		placeholder: "",
 		requiresInput: false,
 		writes: false,
 		enabled: true,
 	},
 	{
-		id: "okf-export",
-		label: "OKF 导出",
-		agent: "okf-export",
-		description: "确定性导出器尚未接入。当前按钮不会写文件。",
+		id: "vault-lint-fix",
+		label: "体检修复",
+		agent: "research-vault-lint",
+		description: "读取最新体检报告，由 AI 提出修复方案并执行低风险修复，随后重新体检。高影响项目只报告，不自动处理。",
 		placeholder: "",
 		requiresInput: false,
 		writes: true,
-		enabled: false,
+		enabled: true,
+		showInRail: false,
+	},
+	{
+		id: "okf-export",
+		label: "OKF 导出",
+		agent: "okf-export",
+		description: "预检 wiki 后生成 OKF v0.1 时间戳 bundle，转换 wikilink、补齐最低属性并保留旧导出。不会修改源笔记或复制附件。",
+		placeholder: "",
+		requiresInput: false,
+		writes: true,
+		enabled: true,
 	},
 ];
 
@@ -122,7 +149,16 @@ class DashboardDataService {
 		const knowledgeGaps = await this.computeKnowledgeGaps(records, sourceRecords);
 		const coverage = this.computeCoverage(methodRecords, synthesisRecords, knowledgeGaps);
 		const okf = this.computeOkfReadiness(records, linkReport, missingFrontmatter, coverage);
-		const healthScore = Math.max(0, Math.min(100, 100 - linkReport.broken.length * 2 - missingFrontmatter));
+		const lintStatus = this.plugin.getLintStatus();
+		const latestWikiMtime = records
+			.filter((record) => record.path.startsWith("wiki/"))
+			.reduce((latest, record) => Math.max(latest, record.mtime || 0), 0);
+		const lintGeneratedAt = lintStatus.latest ? new Date(lintStatus.latest.generated_at).getTime() : 0;
+		const lintFresh = Boolean(lintStatus.latest && Number.isFinite(lintGeneratedAt) && lintGeneratedAt >= latestWikiMtime);
+		const lintSummary = lintFresh ? lintStatus.latest.summary : null;
+		const healthScore = lintSummary
+			? Number(lintSummary.score)
+			: Math.max(0, Math.min(100, 100 - linkReport.broken.length * 2 - missingFrontmatter));
 		const now = new Date();
 
 		return {
@@ -140,7 +176,9 @@ class DashboardDataService {
 					value: String(healthScore),
 					unit: "",
 					tone: healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
-					detail: `${linkReport.broken.length} 个断链，${missingFrontmatter} 个缺失属性区`,
+					detail: lintSummary
+						? `${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告，${lintSummary.fixable} 个修复候选`
+						: `${linkReport.broken.length} 个断链，${missingFrontmatter} 个缺失属性区；体检报告待更新`,
 				},
 				{
 					label: "文献流程",
@@ -446,7 +484,18 @@ class DashboardDataService {
 		if (!records.some((record) => record.path.startsWith("wiki/methods/single-cell-rna-seq"))) {
 			gaps.push({ type: "method", title: "缺少 Single-cell RNA-seq 方法枢纽", severity: "high" });
 		}
-		gaps.push({ type: "okf", title: "OKF 导出尚未实现 wikilink 转换", severity: "medium" });
+		const okfStatus = this.plugin.getOkfExportStatus();
+		if (!okfStatus.exporterAvailable) {
+			gaps.push({ type: "okf", title: "OKF 导出器不可用", severity: "high" });
+		} else if (okfStatus.error) {
+			gaps.push({ type: "okf", title: "OKF 最近导出状态无法读取", severity: "high" });
+		} else if (!okfStatus.latest) {
+			gaps.push({ type: "okf", title: "尚未生成 OKF bundle", severity: "medium" });
+		} else if (!okfStatus.latest.conformant) {
+			gaps.push({ type: "okf", title: "最近的 OKF bundle 未通过 conformance", severity: "high" });
+		} else if (Number(okfStatus.latest.unresolved_link_count || 0) > 0) {
+			gaps.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium" });
+		}
 		return gaps.slice(0, 6);
 	}
 
@@ -471,25 +520,28 @@ class DashboardDataService {
 		const hasWikiIndex = records.some((record) => record.path === "wiki/index.md");
 		const hasWikiLog = records.some((record) => record.path === "wiki/log.md");
 		const hasWikilinks = linkReport.total > 0;
+		const exportStatus = this.plugin.getOkfExportStatus();
+		const latest = exportStatus.latest;
 		return {
 			readiness: [
 				{
-					label: `属性区映射 ${typePercent}%`,
-					state: typePercent >= 95 ? "ready" : "pending",
+					label: `源 type 覆盖 ${typePercent}%${typePercent < 100 ? "，导出时补齐" : ""}`,
+					state: exportStatus.exporterAvailable ? "ready" : "pending",
 				},
 				{
-					label: "index/log 已存在",
-					state: hasWikiIndex && hasWikiLog ? "ready" : "pending",
+					label: hasWikiIndex && hasWikiLog ? "index/log 生成规则就绪" : "导出时生成 index/log",
+					state: exportStatus.exporterAvailable ? "ready" : "pending",
 				},
 				{
-					label: "wikilink 转换待实现",
-					state: hasWikilinks ? "pending" : "ready",
+					label: hasWikilinks ? "wikilink 转换已接入" : "无需转换 wikilink",
+					state: exportStatus.exporterAvailable ? "ready" : "pending",
 				},
 				{
-					label: "bundle 导出待规划",
-					state: "planned",
+					label: latest ? `最近 bundle：${latest.concept_count || 0} 个概念` : "尚无导出 bundle",
+					state: latest && latest.conformant ? "ready" : "pending",
 				},
 			],
+			latestLabel: latest ? `最近导出 ${this.formatExportTime(latest.generated_at)}` : exportStatus.error ? "导出状态不可读" : "尚未导出",
 			maintenanceRisk: {
 				level: linkReport.broken.length > 0 || missingFrontmatter > 0 ? "watch" : "low",
 				items: [
@@ -499,6 +551,18 @@ class DashboardDataService {
 				],
 			},
 		};
+	}
+
+	formatExportTime(value) {
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return "时间未知";
+		return new Intl.DateTimeFormat("zh-CN", {
+			month: "2-digit",
+			day: "2-digit",
+			hour: "2-digit",
+			minute: "2-digit",
+			hour12: false,
+		}).format(date);
 	}
 
 	computeLinkReport(records) {
@@ -643,9 +707,11 @@ class ActionInputModal extends Modal {
 }
 
 class TaskResultModal extends Modal {
-	constructor(app, run) {
+	constructor(app, plugin, run, onRepair) {
 		super(app);
+		this.plugin = plugin;
 		this.run = run;
+		this.onRepair = onRepair;
 	}
 
 	onOpen() {
@@ -674,9 +740,32 @@ class TaskResultModal extends Modal {
 			await navigator.clipboard.writeText(output);
 			new Notice("任务结果已复制");
 		});
+		if (this.canRepair()) {
+			const repair = footer.createEl("button", {
+				cls: "mod-warning",
+				text: "提出方案并修复",
+				attr: {
+					title: "AI 将仅自动处理体检报告中的低风险修复候选，并在修改后重新体检",
+				},
+			});
+			repair.type = "button";
+			repair.addEventListener("click", () => {
+				this.close();
+				this.onRepair();
+			});
+		}
 		const close = footer.createEl("button", { cls: "mod-cta", text: "关闭" });
 		close.type = "button";
 		close.addEventListener("click", () => this.close());
+	}
+
+	canRepair() {
+		if (this.run.actionId !== "vault-lint" || this.run.status !== "done" || typeof this.onRepair !== "function") {
+			return false;
+		}
+		if (this.plugin.isActionRunning("vault-lint-fix")) return false;
+		const lintStatus = this.plugin.getLintStatus();
+		return Boolean(lintStatus.latest?.summary?.fixable > 0);
 	}
 
 	displayStatus(status) {
@@ -691,6 +780,554 @@ class TaskResultModal extends Modal {
 
 	onClose() {
 		this.contentEl.empty();
+	}
+}
+
+class PracticeNoteModal extends Modal {
+	constructor(app, defaultTitle, onSubmit) {
+		super(app);
+		this.defaultTitle = defaultTitle;
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.addClass("agent-dashboard-modal", "code-practice-save-modal");
+		this.setTitle("保存练习笔记");
+		const title = this.createField(contentEl, "标题", "text", this.defaultTitle);
+		const goal = this.createField(contentEl, "目标", "textarea", "");
+		const notes = this.createField(contentEl, "补充说明", "textarea", "");
+		const footer = contentEl.createDiv({ cls: "agent-dashboard-modal-actions" });
+		const cancel = footer.createEl("button", { text: "取消" });
+		const save = footer.createEl("button", { cls: "mod-cta", text: "保存" });
+		cancel.type = "button";
+		save.type = "button";
+		const submit = () => {
+			const value = title.value.trim();
+			if (!value) {
+				new Notice("请输入练习标题");
+				return;
+			}
+			this.close();
+			void this.onSubmit({ title: value, goal: goal.value.trim(), notes: notes.value.trim() });
+		};
+		cancel.addEventListener("click", () => this.close());
+		save.addEventListener("click", submit);
+		title.addEventListener("keydown", (event) => {
+			if (event.key === "Enter") submit();
+		});
+		window.setTimeout(() => title.focus(), 0);
+	}
+
+	createField(parent, labelText, type, value) {
+		const field = parent.createEl("label", { cls: "code-practice-modal-field" });
+		field.createSpan({ text: labelText });
+		if (type === "textarea") {
+			const textarea = field.createEl("textarea", { attr: { rows: "4" } });
+			textarea.value = value;
+			return textarea;
+		}
+		const input = field.createEl("input", { attr: { type: "text" } });
+		input.value = value;
+		return input;
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class CodePracticeView extends ItemView {
+	constructor(leaf, plugin) {
+		super(leaf);
+		this.plugin = plugin;
+		this.language = "python";
+		this.nextCellId = 1;
+		this.cellsByLanguage = {
+			python: this.createDefaultCells("python"),
+			r: this.createDefaultCells("r"),
+		};
+		this.activeRunId = "";
+		this.activeCellId = "";
+		this.stopRequested = false;
+		this.runningAll = false;
+		this.executionCounter = 0;
+		this.relatedNotePath = "";
+		this.notebookControls = null;
+	}
+
+	createCell(code = "", placeholder = "") {
+		return { id: `cell-${this.nextCellId++}`, code, placeholder, result: null, executionCount: null };
+	}
+
+	createDefaultCells(language) {
+		return language === "r"
+			? [this.createCell("", "values <- c(1, 2, 3, 4)"), this.createCell("", "mean(values)")]
+			: [this.createCell("", "values = [1, 2, 3, 4]"), this.createCell("", "sum(values) / len(values)")];
+	}
+
+	get cells() {
+		return this.cellsByLanguage[this.language];
+	}
+
+	getViewType() {
+		return CODE_PRACTICE_VIEW_TYPE;
+	}
+
+	getDisplayText() {
+		return "代码练习";
+	}
+
+	getIcon() {
+		return "square-code";
+	}
+
+	async onOpen() {
+		this.render();
+	}
+
+	async onClose() {
+		if (this.activeRunId) this.plugin.stopCodePractice(this.activeRunId);
+		this.contentEl.empty();
+	}
+
+	setRelatedNote(file) {
+		this.relatedNotePath = file?.extension === "md" ? file.path : "";
+		if (this.containerEl?.isConnected) this.render();
+	}
+
+	render() {
+		this.contentEl.empty();
+		this.contentEl.addClass("code-practice-view");
+		const shell = this.contentEl.createDiv({ cls: "code-practice-shell" });
+		this.renderHeader(shell);
+		this.renderRuntime(shell);
+		this.renderNotebook(shell);
+	}
+
+	renderHeader(parent) {
+		const header = parent.createEl("header", { cls: "code-practice-header" });
+		const title = header.createDiv({ cls: "code-practice-title" });
+		title.createEl("p", { cls: "agent-dashboard-eyebrow", text: "本地运行" });
+		title.createEl("h1", { text: "代码练习" });
+		const context = header.createDiv({ cls: "code-practice-context" });
+		context.createSpan({ cls: "code-practice-context-label", text: "关联笔记" });
+		context.createSpan({
+			cls: "code-practice-context-value",
+			text: this.relatedNotePath ? this.relatedNotePath.replace(/\.md$/i, "") : "未关联",
+			attr: { title: this.relatedNotePath || "打开练习视图前选中的 Markdown 笔记会显示在这里" },
+		});
+	}
+
+	renderRuntime(parent) {
+		const bar = parent.createDiv({ cls: "code-practice-runtime" });
+		const languages = bar.createDiv({ cls: "code-practice-language-switch", attr: { "aria-label": "运行语言" } });
+		[["python", "Python"], ["r", "R"]].forEach(([value, label]) => {
+			const button = languages.createEl("button", {
+				cls: value === this.language ? "is-active" : "",
+				text: label,
+				attr: { "aria-pressed": value === this.language ? "true" : "false" },
+			});
+			button.type = "button";
+			button.disabled = Boolean(this.activeRunId);
+			button.addEventListener("click", () => this.setLanguage(value));
+		});
+		const details = bar.createDiv({ cls: "code-practice-runtime-details" });
+		this.createRuntimeDetail(details, "解释器", this.currentInterpreter());
+		this.createRuntimeDetail(details, "工作目录", "tool-library/output/code-practice/figures/<run-id>");
+	}
+
+	createRuntimeDetail(parent, label, value) {
+		const detail = parent.createDiv({ cls: "code-practice-runtime-detail" });
+		detail.createSpan({ text: label });
+		detail.createEl("code", { text: value || "未配置", attr: { title: value || "未配置" } });
+	}
+
+	renderNotebook(parent) {
+		const section = parent.createEl("section", { cls: "code-practice-notebook" });
+		const toolbar = section.createDiv({ cls: "code-practice-toolbar" });
+		const heading = toolbar.createDiv({ cls: "code-practice-notebook-heading" });
+		heading.createEl("h2", { text: "练习单元格" });
+		heading.createSpan({ text: "运行至当前单元格时，会在新进程中静默重放前置单元格。" });
+		const commands = toolbar.createDiv({ cls: "code-practice-commands" });
+		const add = this.createCommandButton(commands, "plus", "新增单元格");
+		const run = this.createCommandButton(commands, "list-start", "全部运行", "mod-cta");
+		const stop = this.createCommandButton(commands, "square", "停止", "mod-warning");
+		const clear = this.createCommandButton(commands, "eraser", "清空输出");
+		const clearCode = this.createCommandButton(commands, "file-x-2", "清空代码");
+		const resetCells = this.createCommandButton(commands, "rows-2", "重置为两格");
+		const save = this.createCommandButton(commands, "save", "保存练习");
+		add.addEventListener("click", () => this.addCell(this.cells.length - 1));
+		run.addEventListener("click", () => void this.runAllCells());
+		stop.addEventListener("click", () => this.stopCode());
+		clear.addEventListener("click", () => {
+			this.cells.forEach((cell) => {
+				cell.result = null;
+				cell.executionCount = null;
+			});
+			this.render();
+		});
+		clearCode.addEventListener("click", () => this.clearAllCellCode());
+		resetCells.addEventListener("click", () => this.resetCellsToTwo());
+		save.addEventListener("click", () => this.openSaveModal());
+
+		const list = section.createDiv({ cls: "code-practice-cell-list" });
+		this.cells.forEach((cell, index) => this.renderCell(list, cell, index));
+		const addFooter = section.createEl("button", {
+			cls: "code-practice-add-cell",
+			attr: { title: "在末尾新增单元格", "aria-label": "在末尾新增单元格" },
+		});
+		addFooter.type = "button";
+		addFooter.disabled = Boolean(this.activeRunId);
+		setIcon(addFooter, "plus");
+		addFooter.createSpan({ text: "新增单元格" });
+		addFooter.addEventListener("click", () => this.addCell(this.cells.length - 1));
+		this.notebookControls = { add, run, stop, clear, clearCode, resetCells, save, addFooter };
+		this.updateNotebookControls();
+	}
+
+	updateNotebookControls() {
+		if (!this.notebookControls) return;
+		const busy = Boolean(this.activeRunId);
+		const { add, run, stop, clear, clearCode, resetCells, save, addFooter } = this.notebookControls;
+		add.disabled = busy;
+		addFooter.disabled = busy;
+		run.disabled = busy || !this.cells.some((cell) => cell.code.trim());
+		stop.disabled = !busy || this.stopRequested;
+		clear.disabled = busy || !this.cells.some((cell) => cell.result);
+		clearCode.disabled = busy || !this.cells.some((cell) => cell.code.trim());
+		resetCells.disabled = busy || (this.cells.length === 2 && !this.cells.some((cell) => cell.code.trim() || cell.result));
+		save.disabled = busy || !this.cells.some((cell) => cell.result && cell.result.status !== "running");
+	}
+
+	createCommandButton(parent, icon, label, className = "") {
+		const button = parent.createEl("button", {
+			cls: `code-practice-command ${className}`.trim(),
+			attr: { title: label, "aria-label": label },
+		});
+		button.type = "button";
+		setIcon(button, icon);
+		button.createSpan({ text: label });
+		return button;
+	}
+
+	renderCell(parent, cell, index) {
+		const article = parent.createEl("article", { cls: "code-practice-cell", attr: { "data-cell-id": cell.id } });
+		if (cell.id === this.activeCellId) article.addClass("is-running");
+		const inputRow = article.createDiv({ cls: "code-practice-cell-input-row" });
+		const prompt = inputRow.createDiv({ cls: "code-practice-cell-prompt" });
+		prompt.createSpan({ text: cell.id === this.activeCellId ? "In [*]:" : `In [${cell.executionCount ?? " "}]:` });
+		const run = this.createIconButton(prompt, "play", "运行至此（Ctrl+Enter）");
+		run.setAttribute("aria-keyshortcuts", "Control+Enter Meta+Enter");
+		run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
+		run.addEventListener("click", () => void this.runCell(cell.id));
+
+		const body = inputRow.createDiv({ cls: "code-practice-cell-body" });
+		const controls = body.createDiv({ cls: "code-practice-cell-controls" });
+		const up = this.createIconButton(controls, "arrow-up", "上移单元格");
+		const down = this.createIconButton(controls, "arrow-down", "下移单元格");
+		const add = this.createIconButton(controls, "plus", "在下方新增单元格");
+		const remove = this.createIconButton(controls, "trash-2", "删除单元格");
+		up.disabled = Boolean(this.activeRunId) || index === 0;
+		down.disabled = Boolean(this.activeRunId) || index === this.cells.length - 1;
+		add.disabled = Boolean(this.activeRunId);
+		remove.disabled = Boolean(this.activeRunId) || this.cells.length === 1;
+		up.addEventListener("click", () => this.moveCell(index, index - 1));
+		down.addEventListener("click", () => this.moveCell(index, index + 1));
+		add.addEventListener("click", () => this.addCell(index));
+		remove.addEventListener("click", () => this.removeCell(index));
+
+		const editor = body.createEl("textarea", {
+			cls: "code-practice-cell-editor",
+			attr: {
+				rows: "4",
+				spellcheck: "false",
+				placeholder: cell.placeholder || (this.language === "r" ? "# 在此输入 R 代码" : "# 在此输入 Python 代码"),
+				"aria-label": `${this.language === "python" ? "Python" : "R"} 单元格 ${index + 1}`,
+			},
+		});
+		editor.value = cell.code;
+		editor.disabled = Boolean(this.activeRunId);
+		editor.addEventListener("input", () => {
+			cell.code = editor.value;
+			this.invalidateCellsFrom(index);
+			run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
+			this.updateNotebookControls();
+		});
+		editor.addEventListener("keydown", (event) => {
+			if (event.key === "Tab") {
+				event.preventDefault();
+				const start = editor.selectionStart;
+				const end = editor.selectionEnd;
+				editor.setRangeText("\t", start, end, "end");
+				cell.code = editor.value;
+				this.invalidateCellsFrom(index);
+				run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
+				this.updateNotebookControls();
+				return;
+			}
+			if (event.key !== "Enter" || this.activeRunId) return;
+			if (event.ctrlKey || event.metaKey) {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.runCell(cell.id);
+			} else if (event.shiftKey) {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.runCell(cell.id, true);
+			}
+		});
+
+		const output = article.createDiv({ cls: "code-practice-cell-output" });
+		this.renderCellOutput(output, cell);
+	}
+
+	createIconButton(parent, icon, label) {
+		const button = parent.createEl("button", {
+			cls: "code-practice-icon-button",
+			attr: { title: label, "aria-label": label },
+		});
+		button.type = "button";
+		setIcon(button, icon);
+		return button;
+	}
+
+	renderCellOutput(parent, cell) {
+		if (!cell.result) return;
+		const row = parent.createDiv({ cls: "code-practice-cell-output-row" });
+		const prompt = row.createDiv({ cls: "code-practice-cell-prompt is-output" });
+		prompt.createSpan({ text: `Out [${cell.executionCount ?? " "}]:` });
+		const content = row.createDiv({ cls: "code-practice-cell-result" });
+		const heading = content.createDiv({ cls: "code-practice-output-heading" });
+		const status = cell.result.status || "idle";
+		heading.createSpan({ cls: `code-practice-status code-practice-status-${status}`, text: this.displayStatus(status) });
+		const summary = heading.createSpan({ cls: "code-practice-cell-summary" });
+		summary.setText(`${this.formatDuration(cell.result.duration_ms)} · 退出码 ${cell.result.exit_code ?? "-"}`);
+		if (cell.result.stdout) this.renderStream(content, "标准输出", cell.result.stdout);
+		if (cell.result.stderr) {
+			const stderr = this.stderrPresentation(status);
+			this.renderStream(content, stderr.title, cell.result.stderr, stderr.tone);
+		}
+		this.renderFigures(content, cell.result.figures || []);
+	}
+
+	stderrPresentation(status) {
+		if (["failed", "timeout"].includes(status)) return { title: "错误与诊断（stderr）", tone: "error" };
+		if (status === "stopped") return { title: "运行消息（stderr）", tone: "message" };
+		return { title: "消息与警告（stderr）", tone: "message" };
+	}
+
+	renderStream(parent, title, value, tone = "output") {
+		const block = parent.createDiv({ cls: `code-practice-stream is-${tone}` });
+		block.createEl("h3", { text: title });
+		block.createEl("pre", { text: value || "（无）" });
+	}
+
+	renderFigures(parent, figures) {
+		if (!figures.length) return;
+		const block = parent.createDiv({ cls: "code-practice-figures" });
+		block.createEl("h3", { text: "生成图片" });
+		const grid = block.createDiv({ cls: "code-practice-figure-grid" });
+		figures.forEach((figurePath) => {
+			const item = grid.createEl("figure");
+			const dataUrl = this.plugin.readPracticeFigure(figurePath);
+			if (dataUrl) item.createEl("img", { attr: { src: dataUrl, alt: path.basename(figurePath) } });
+			item.createEl("figcaption", { text: figurePath, attr: { title: figurePath } });
+		});
+	}
+
+	setLanguage(language) {
+		if (this.activeRunId || language === this.language) return;
+		this.language = language;
+		this.render();
+	}
+
+	currentInterpreter() {
+		return this.language === "python" ? this.plugin.settings.pythonExecutable : this.plugin.settings.rscriptExecutable;
+	}
+
+	invalidateCellsFrom(index) {
+		this.cells.slice(index).forEach((candidate) => {
+			candidate.result = null;
+			candidate.executionCount = null;
+			const output = this.contentEl.querySelector(`[data-cell-id="${candidate.id}"] .code-practice-cell-output`);
+			if (output) output.empty();
+		});
+	}
+
+	clearAllCellCode() {
+		if (this.activeRunId) return;
+		this.cells.forEach((cell) => {
+			cell.code = "";
+			cell.result = null;
+			cell.executionCount = null;
+		});
+		this.render();
+		new Notice("已清空当前语言的代码和输出");
+	}
+
+	resetCellsToTwo() {
+		if (this.activeRunId) return;
+		this.cellsByLanguage[this.language] = this.createDefaultCells(this.language);
+		this.render();
+		new Notice("已重置为两个空单元格");
+	}
+
+	addCell(afterIndex) {
+		if (this.activeRunId) return;
+		const cell = this.createCell("", this.language === "r" ? "# 在此输入 R 代码" : "# 在此输入 Python 代码");
+		this.cells.splice(afterIndex + 1, 0, cell);
+		this.render();
+		this.focusCell(cell.id);
+	}
+
+	removeCell(index) {
+		if (this.activeRunId || this.cells.length === 1) return;
+		this.cells.splice(index, 1);
+		this.invalidateCellsFrom(index);
+		this.render();
+		this.focusCell(this.cells[Math.min(index, this.cells.length - 1)].id);
+	}
+
+	moveCell(from, to) {
+		if (this.activeRunId || to < 0 || to >= this.cells.length) return;
+		const [cell] = this.cells.splice(from, 1);
+		this.cells.splice(to, 0, cell);
+		this.invalidateCellsFrom(Math.min(from, to));
+		this.render();
+		this.focusCell(cell.id);
+	}
+
+	focusCell(cellId) {
+		window.setTimeout(() => {
+			this.contentEl.querySelector(`[data-cell-id="${cellId}"] .code-practice-cell-editor`)?.focus();
+		}, 0);
+	}
+
+	async runCell(cellId, focusNext = false) {
+		if (this.activeRunId) return null;
+		const index = this.cells.findIndex((cell) => cell.id === cellId);
+		if (index < 0) return null;
+		const cell = this.cells[index];
+		const code = cell.code.trimEnd();
+		if (!code.trim()) {
+			new Notice("请输入代码");
+			return null;
+		}
+		const contextCode = this.cells
+			.slice(0, index)
+			.filter((candidate) => candidate.code.trim())
+			.map((candidate, contextIndex) => `# --- replayed cell ${contextIndex + 1} ---\n${candidate.code.trimEnd()}`)
+			.join("\n\n");
+		this.activeRunId = this.plugin.createPracticeRunId();
+		this.activeCellId = cell.id;
+		this.stopRequested = false;
+		cell.result = {
+			run_id: this.activeRunId,
+			status: "running",
+			language: this.language,
+			exit_code: null,
+			duration_ms: 0,
+			stdout: "",
+			stderr: "",
+			figures: [],
+		};
+		this.render();
+		try {
+			cell.result = await this.plugin.runCodePractice({
+				run_id: this.activeRunId,
+				language: this.language,
+				context_code: contextCode,
+				code,
+				working_directory: "tool-library/output/code-practice",
+				timeout_seconds: this.plugin.settings.codePracticeTimeoutSeconds,
+			});
+		} catch (error) {
+			cell.result = {
+				run_id: this.activeRunId,
+				status: "failed",
+				language: this.language,
+				exit_code: null,
+				duration_ms: 0,
+				stdout: "",
+				stderr: error instanceof Error ? error.message : String(error),
+				figures: [],
+			};
+		} finally {
+			this.executionCounter += 1;
+			cell.executionCount = this.executionCounter;
+			this.activeRunId = "";
+			this.activeCellId = "";
+			this.stopRequested = false;
+			this.render();
+			if (focusNext) {
+				if (index === this.cells.length - 1) this.addCell(index);
+				else this.focusCell(this.cells[index + 1].id);
+			}
+		}
+		return cell.result;
+	}
+
+	async runAllCells() {
+		if (this.activeRunId || this.runningAll) return;
+		this.runningAll = true;
+		try {
+			for (const cell of [...this.cells]) {
+				if (!cell.code.trim()) continue;
+				const result = await this.runCell(cell.id);
+				if (!result || result.status !== "success") break;
+			}
+		} finally {
+			this.runningAll = false;
+			this.render();
+		}
+	}
+
+	stopCode() {
+		if (!this.activeRunId || this.stopRequested) return;
+		this.stopRequested = true;
+		this.plugin.stopCodePractice(this.activeRunId);
+		new Notice("正在停止代码练习");
+		this.render();
+	}
+
+	openSaveModal() {
+		if (this.activeRunId || !this.cells.some((cell) => cell.result)) return;
+		const defaultTitle = `${this.language === "python" ? "Python" : "R"} 练习 ${new Date().toLocaleDateString("zh-CN")}`;
+		new PracticeNoteModal(this.app, defaultTitle, async (form) => {
+			try {
+				const file = await this.plugin.savePracticeNote({
+					...form,
+					language: this.language,
+					cells: this.cells.map((cell) => ({
+						code: cell.code,
+						result: cell.result,
+						executionCount: cell.executionCount,
+					})),
+					relatedNotePath: this.relatedNotePath,
+				});
+				new Notice(`已保存：${file.path}`);
+				await this.app.workspace.getLeaf(true).openFile(file);
+			} catch (error) {
+				new Notice(`保存失败：${error instanceof Error ? error.message : String(error)}`, 8000);
+			}
+		}).open();
+	}
+
+	displayStatus(status) {
+		return {
+			idle: "未运行",
+			running: this.stopRequested ? "正在停止" : "运行中",
+			success: "成功",
+			failed: "失败",
+			timeout: "已超时",
+			stopped: "已停止",
+		}[status] || status;
+	}
+
+	formatDuration(durationMs) {
+		if (!Number.isFinite(Number(durationMs))) return "-";
+		return Number(durationMs) < 1000 ? `${durationMs} ms` : `${(Number(durationMs) / 1000).toFixed(2)} s`;
 	}
 }
 
@@ -825,7 +1462,7 @@ class DashboardView extends ItemView {
 
 	renderActions(parent) {
 		const rail = parent.createEl("nav", { cls: "agent-dashboard-action-rail", attr: { "aria-label": "研究知识库操作" } });
-		this.data.actions.forEach((action) => {
+		this.data.actions.filter((action) => action.showInRail !== false).forEach((action) => {
 			const isRunning = this.plugin.isActionRunning(action.id);
 			const button = rail.createEl("button", {
 				cls: "agent-dashboard-action-button",
@@ -942,7 +1579,7 @@ class DashboardView extends ItemView {
 	}
 
 	renderOkfReadiness(parent) {
-		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度");
+		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度", this.data.okf.latestLabel);
 		this.renderOkfList(panel, this.data.okf);
 		this.renderRiskBox(panel, this.data.okf);
 	}
@@ -988,7 +1625,7 @@ class DashboardView extends ItemView {
 				row.setAttr("title", "查看任务输出");
 				this.registerDomEvent(row, "click", () => {
 					const taskRun = this.plugin.getTaskRun(run.runId);
-					if (taskRun) new TaskResultModal(this.app, taskRun).open();
+					if (taskRun) this.openTaskResult(taskRun);
 				});
 			}
 			row.createSpan({ cls: "agent-dashboard-row-type", text: `${run.agent} / ${run.time}` });
@@ -1058,6 +1695,10 @@ class DashboardView extends ItemView {
 			new Notice(`${action.label}正在运行`);
 			return;
 		}
+		if (action.localView) {
+			void this.plugin.activateCodePracticeView();
+			return;
+		}
 		if (action.requiresInput) {
 			new ActionInputModal(this.app, action, (value) => {
 				void this.executeAction(action, value);
@@ -1095,8 +1736,18 @@ class DashboardView extends ItemView {
 		}
 		await this.loadAndRender();
 		if (completedRun) {
-			new TaskResultModal(this.app, completedRun).open();
+			this.openTaskResult(completedRun);
 		}
+	}
+
+	openTaskResult(run) {
+		const onRepair = run.actionId === "vault-lint"
+			? () => {
+				const repairAction = ACTION_BY_ID.get("vault-lint-fix");
+				if (repairAction) void this.executeAction(repairAction, "");
+			}
+			: null;
+		new TaskResultModal(this.app, this.plugin, run, onRepair).open();
 	}
 
 	formatProcessOutput(result) {
@@ -1225,13 +1876,52 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Python 可执行文件")
-			.setDesc("用于统一 runner 和知识库体检脚本。")
+			.setDesc("用于统一 runner、知识库体检和 Python 代码练习。")
 			.addText((text) =>
 				text
 					.setPlaceholder("D:\\python\\python.exe")
 					.setValue(this.plugin.settings.pythonExecutable)
 					.onChange(async (value) => {
 						this.plugin.settings.pythonExecutable = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Rscript 可执行文件")
+			.setDesc("用于无状态 R 代码练习；不会自动安装 R 或 R 包。")
+			.addText((text) =>
+				text
+					.setPlaceholder("C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe")
+					.setValue(this.plugin.settings.rscriptExecutable)
+					.onChange(async (value) => {
+						this.plugin.settings.rscriptExecutable = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("代码练习超时（秒）")
+			.setDesc("每次 Python/R 练习的最长运行时间，范围 1-120 秒。")
+			.addText((text) =>
+				text
+					.setPlaceholder("30")
+					.setValue(String(this.plugin.settings.codePracticeTimeoutSeconds))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (Number.isFinite(parsed)) {
+							this.plugin.settings.codePracticeTimeoutSeconds = Math.max(1, Math.min(120, parsed));
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+		new Setting(containerEl)
+			.setName("Codex 模型")
+			.setDesc("仅用于 Dashboard 启动的 AI 任务；默认使用当前 CLI 支持的 gpt-5.5。")
+			.addText((text) =>
+				text
+					.setPlaceholder("gpt-5.5")
+					.setValue(this.plugin.settings.codexModel)
+					.onChange(async (value) => {
+						this.plugin.settings.codexModel = value.trim() || "gpt-5.5";
 						await this.plugin.saveSettings();
 					})
 			);
@@ -1265,8 +1955,15 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 module.exports = class AgentDashboardPlugin extends Plugin {
 	async onload() {
 		this.activeProcesses = new Map();
+		this.activePracticeRuns = new Map();
+		this.lastContextFile = this.app.workspace.getActiveFile();
 		await this.loadSettings();
+		this.recoverInterruptedPracticeRuns();
 		this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
+		this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
+		this.registerEvent(this.app.workspace.on("file-open", (file) => {
+			if (file?.extension === "md") this.lastContextFile = file;
+		}));
 		this.addRibbonIcon("layout-dashboard", "打开研究知识库控制台", () => {
 			this.activateDashboardView();
 		});
@@ -1278,14 +1975,242 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				this.activateDashboardView();
 			},
 		});
+		this.addCommand({
+			id: "open-code-practice",
+			name: "打开代码练习",
+			callback: () => {
+				this.activateCodePracticeView();
+			},
+		});
 		this.addSettingTab(new AgentDashboardSettingTab(this.app, this));
 	}
 
 	onunload() {
+		for (const runId of this.activePracticeRuns.keys()) {
+			this.stopCodePractice(runId);
+		}
 		for (const child of this.activeProcesses.values()) {
 			if (!child.killed) child.kill();
 		}
 		this.activeProcesses.clear();
+	}
+
+	createPracticeRunId() {
+		const now = new Date();
+		const pad = (value) => String(value).padStart(2, "0");
+		const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+		return `${stamp}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+	}
+
+	recoverInterruptedPracticeRuns() {
+		const runsDirectory = path.join(this.settings.projectRoot, "tool-library", "output", "code-practice", "runs");
+		if (!fs.existsSync(runsDirectory)) return;
+		for (const name of fs.readdirSync(runsDirectory)) {
+			if (!name.endsWith(".json")) continue;
+			const recordPath = path.join(runsDirectory, name);
+			try {
+				const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+				if (!["queued", "running"].includes(record.status)) continue;
+				record.status = "stopped";
+				record.finished_at = new Date().toISOString();
+				record.stderr = `${record.stderr || ""}\nExecution interrupted before the plugin restarted.`.trim();
+				fs.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
+			} catch (error) {
+				console.warn(`Could not recover code-practice record: ${recordPath}`, error);
+			}
+		}
+	}
+
+	runCodePractice(request) {
+		const projectRoot = this.settings.projectRoot;
+		const runner = path.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
+		if (!fs.existsSync(runner)) return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
+		const interpreter = request.language === "python" ? this.settings.pythonExecutable : this.settings.rscriptExecutable;
+		if (!interpreter || !fs.existsSync(interpreter)) return Promise.reject(new Error(`${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`));
+		const stopPath = path.join(projectRoot, "tool-library", "output", "code-practice", "stop", `${request.run_id}.stop`);
+		const args = [
+			runner,
+			"--project-root",
+			projectRoot,
+			"--python",
+			this.settings.pythonExecutable,
+			"--rscript",
+			this.settings.rscriptExecutable,
+		];
+
+		return new Promise((resolve, reject) => {
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			const child = spawn(this.settings.pythonExecutable, args, {
+				cwd: projectRoot,
+				shell: false,
+				windowsHide: true,
+				env: {
+					...process.env,
+					PYTHONUTF8: "1",
+					PYTHONIOENCODING: "utf-8",
+				},
+			});
+			this.activePracticeRuns.set(request.run_id, { child, stopPath });
+			const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-400000);
+			child.stdout.on("data", (chunk) => {
+				stdout = append(stdout, chunk);
+			});
+			child.stderr.on("data", (chunk) => {
+				stderr = append(stderr, chunk);
+			});
+			child.once("error", (error) => {
+				if (settled) return;
+				settled = true;
+				this.activePracticeRuns.delete(request.run_id);
+				reject(error);
+			});
+			child.once("close", () => {
+				if (settled) return;
+				settled = true;
+				this.activePracticeRuns.delete(request.run_id);
+				try {
+					const result = JSON.parse(stdout.trim());
+					if (stderr.trim()) result.runner_stderr = stderr.trim();
+					resolve(result);
+				} catch (error) {
+					reject(new Error(`无法读取代码练习结果：${stderr.trim() || stdout.trim() || error.message}`));
+				}
+			});
+			child.stdin.end(JSON.stringify(request), "utf8");
+		});
+	}
+
+	stopCodePractice(runId) {
+		const active = this.activePracticeRuns.get(runId);
+		if (!active) return false;
+		try {
+			fs.mkdirSync(path.dirname(active.stopPath), { recursive: true });
+			fs.writeFileSync(active.stopPath, "stop\n", "utf8");
+			return true;
+		} catch (error) {
+			console.error("Could not request code-practice stop", error);
+			return false;
+		}
+	}
+
+	readPracticeFigure(relativePath) {
+		const root = path.resolve(this.settings.projectRoot);
+		const outputRoot = path.join(root, "tool-library", "output", "code-practice", "figures");
+		const candidate = path.resolve(root, relativePath);
+		const relative = path.relative(outputRoot, candidate);
+		if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !fs.existsSync(candidate)) return "";
+		const stat = fs.statSync(candidate);
+		if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return "";
+		const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" }[path.extname(candidate).toLowerCase()];
+		if (!mime) return "";
+		return `data:${mime};base64,${fs.readFileSync(candidate).toString("base64")}`;
+	}
+
+	async savePracticeNote(payload) {
+		const folder = normalizePath("wiki/code/practice");
+		await this.ensureVaultFolder(folder);
+		const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
+		if (!cells.length) throw new Error("没有可保存的练习单元格");
+		const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || {};
+		const now = new Date();
+		const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+		const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
+		const fallback = `practice-${date.replaceAll("-", "")}-${lastResult.run_id?.slice(-6) || Date.now()}`;
+		let notePath = normalizePath(`${folder}/${slugBase || fallback}.md`);
+		if (this.app.vault.getAbstractFileByPath(notePath)) {
+			notePath = normalizePath(`${folder}/${slugBase || "practice"}-${lastResult.run_id?.slice(-6) || Date.now()}.md`);
+		}
+		if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
+
+		const languageLabel = payload.language === "r" ? "R" : "Python";
+		const relatedTarget = payload.relatedNotePath ? payload.relatedNotePath.replace(/\.md$/i, "") : "";
+		const relatedLink = relatedTarget ? `[[${relatedTarget}]]` : "";
+		const fence = (value) => String(value || "").includes("```") ? "````" : "```";
+		const cellSections = cells.flatMap((cell, index) => {
+			const result = cell.result;
+			const codeFence = fence(cell.code);
+			const outputFence = fence(result?.stdout);
+			const errorFence = fence(result?.stderr);
+			const lines = [
+				`### 单元格 ${index + 1}`,
+				"",
+				`执行编号：${cell.executionCount ?? "未运行"}  `,
+				`状态：${result?.status || "未运行"}`,
+				"",
+				`${codeFence}${payload.language === "r" ? "r" : "python"}`,
+				String(cell.code || ""),
+				codeFence,
+			];
+			if (!result) return [...lines, ""];
+			lines.push(
+				"",
+				`运行编号：${result.run_id || "-"}  `,
+				`耗时：${Number(result.duration_ms || 0) / 1000} 秒  `,
+				`退出码：${result.exit_code ?? "-"}`,
+				"",
+				"#### 标准输出",
+				"",
+				`${outputFence}text`,
+				result.stdout || "（无）",
+				outputFence,
+			);
+			if (result.stderr) {
+				const stderrTitle = ["failed", "timeout"].includes(result.status)
+					? "错误与诊断（stderr）"
+					: result.status === "stopped"
+						? "运行消息（stderr）"
+						: "消息与警告（stderr）";
+				lines.push("", `#### ${stderrTitle}`, "", `${errorFence}text`, result.stderr, errorFence);
+			}
+			if (result.figures?.length) {
+				lines.push("", "#### 生成图片", "", ...result.figures.map((value) => `- \`${value}\``));
+			}
+			return [...lines, ""];
+		});
+		const body = [
+			"---",
+			"type: code-practice",
+			`title: ${JSON.stringify(payload.title)}`,
+			`language: ${languageLabel}`,
+			`related_note: ${JSON.stringify(relatedLink)}`,
+			"execution_mode: stateless-replay",
+			`cell_count: ${cells.length}`,
+			`last_run_id: ${lastResult.run_id || ""}`,
+			`status: ${lastResult.status || "not-run"}`,
+			`created: ${date}`,
+			`updated: ${date}`,
+			"tags:",
+			"  - code-practice",
+			`  - ${languageLabel}`,
+			"---",
+			"",
+			"## 目标",
+			"",
+			payload.goal || "记录并验证本次代码练习。",
+			"",
+			"## 单元格",
+			"",
+			...cellSections,
+			"## 说明",
+			"",
+			payload.notes || "本页使用无状态累计重放：每次运行都会启动新进程，并在执行目标单元格前重放其前置单元格。",
+			"",
+			"## 关联",
+			"",
+			relatedLink ? `- 相关笔记：${relatedLink}` : "- 相关笔记：未关联",
+			"",
+		].join("\n");
+		return this.app.vault.create(notePath, body);
+	}
+
+	async ensureVaultFolder(folderPath) {
+		let current = "";
+		for (const segment of normalizePath(folderPath).split("/")) {
+			current = current ? `${current}/${segment}` : segment;
+			if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
+		}
 	}
 
 	async loadSettings() {
@@ -1339,7 +2264,10 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	}
 
 	isActionRunning(actionId) {
-		return this.taskRuns.some((run) => run.actionId === actionId && (run.status === "running" || run.status === "queued"));
+		const actionIds = ["vault-lint", "vault-lint-fix"].includes(actionId)
+			? new Set(["vault-lint", "vault-lint-fix"])
+			: new Set([actionId]);
+		return this.taskRuns.some((run) => actionIds.has(run.actionId) && (run.status === "running" || run.status === "queued"));
 	}
 
 	async startTaskRun(action, summary) {
@@ -1374,16 +2302,64 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		return this.taskRuns[index];
 	}
 
+	getOkfExportStatus() {
+		const projectRoot = this.settings.projectRoot;
+		const exporter = path.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+		const latestPath = path.join(projectRoot, "tool-library", "output", "okf", "latest.json");
+		let latest = null;
+		let error = "";
+		if (fs.existsSync(latestPath)) {
+			try {
+				latest = JSON.parse(fs.readFileSync(latestPath, "utf8"));
+			} catch (readError) {
+				error = readError instanceof Error ? readError.message : String(readError);
+			}
+		}
+		return {
+			exporterAvailable: fs.existsSync(exporter),
+			latest,
+			error,
+		};
+	}
+
+	getLintStatus() {
+		const projectRoot = this.settings.projectRoot;
+		const latestPath = path.join(projectRoot, "tool-library", "output", "lint", "latest.json");
+		let latest = null;
+		let error = "";
+		if (fs.existsSync(latestPath)) {
+			try {
+				latest = JSON.parse(fs.readFileSync(latestPath, "utf8"));
+			} catch (readError) {
+				error = readError instanceof Error ? readError.message : String(readError);
+			}
+		}
+		return { latest, error };
+	}
+
 	checkRuntime(action = null) {
 		const projectRoot = this.settings.projectRoot;
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
+		const practiceRunner = path.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
+		const exporter = path.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+		const lintScript = path.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
 		const checks = [
 			["项目根目录", fs.existsSync(projectRoot)],
 			["AGENTS.md", fs.existsSync(path.join(projectRoot, "AGENTS.md"))],
 			["Dashboard runner", fs.existsSync(runner)],
 			["Python", fs.existsSync(this.settings.pythonExecutable)],
 		];
-		if (!action || action.id !== "vault-lint") {
+		if (!action) {
+			checks.push(["Code practice runner", fs.existsSync(practiceRunner)]);
+			checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs.existsSync(this.settings.rscriptExecutable)]);
+		}
+		if (!action || action.id === "okf-export") {
+			checks.push(["OKF exporter", fs.existsSync(exporter)]);
+		}
+		if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id)) {
+			checks.push(["Vault lint", fs.existsSync(lintScript)]);
+		}
+		if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
 			checks.push(["Codex", fs.existsSync(this.settings.codexExecutable)]);
 		}
 		const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
@@ -1413,6 +2389,8 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			projectRoot,
 			"--codex",
 			this.settings.codexExecutable,
+			"--model",
+			this.settings.codexModel,
 			"--python",
 			this.settings.pythonExecutable,
 			"--timeout-seconds",
@@ -1475,6 +2453,17 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		if (!existing) {
 			await leaf.setViewState({ type: VIEW_TYPE, active: true });
 		}
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	async activateCodePracticeView() {
+		const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
+		const existing = this.app.workspace.getLeavesOfType(CODE_PRACTICE_VIEW_TYPE)[0];
+		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
+		if (!existing) {
+			await leaf.setViewState({ type: CODE_PRACTICE_VIEW_TYPE, active: true });
+		}
+		if (typeof leaf.view?.setRelatedNote === "function") leaf.view.setRelatedNote(contextFile);
 		await this.app.workspace.revealLeaf(leaf);
 	}
 };

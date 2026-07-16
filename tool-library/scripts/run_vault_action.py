@@ -19,6 +19,7 @@ from typing import Any
 
 DEFAULT_CODEX = r"C:\Users\Thomas Wade\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe"
 DEFAULT_PYTHON = r"D:\python\python.exe"
+DEFAULT_MODEL = "gpt-5.5"
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -99,10 +100,53 @@ stage. Do not perform first-pass source intake or conversion.
         "label": "知识库体检",
         "agent": "research-vault-lint",
         "kind": "validator",
+        "sandbox": "read-only",
         "input_required": False,
         "writes": False,
     },
+    "vault-lint-fix": {
+        "label": "体检修复",
+        "agent": "research-vault-lint",
+        "sandbox": "workspace-write",
+        "input_required": False,
+        "writes": True,
+        "post_validate": True,
+        "instructions": """
+Use the `research-vault-lint` skill. Read
+`tool-library/output/lint/latest.json` as the repair scope. Before editing,
+inspect every finding and form a concise repair plan. Apply only findings that
+are explicitly marked `fixable: true` and that remain low risk after direct
+inspection of the target file. Preserve scientific meaning, evidence depth,
+frontmatter schema, filenames, and page taxonomy.
+
+Do not delete files, merge pages, batch rename notes, change schema rules,
+invent missing metadata, rewrite scientific claims, run analyzed project code,
+or modify `tool-library/raw/`. For any ambiguous or high-impact finding, report
+the proposed repair but leave it unresolved. Keep edits within the file type
+owned by the relevant skill; use the lint skill only for consistency repairs.
+
+After applying safe fixes, run
+`D:\\python\\python.exe tool-library/scripts/lint_vault.py --report tool-library/output/lint/latest.json`
+and report the before/after score and finding counts. The final response must
+separate: repair plan, fixes applied, files changed, verification result, and
+deferred items requiring user confirmation.
+""",
+    },
+    "okf-export": {
+        "label": "OKF 导出",
+        "agent": "okf-export",
+        "kind": "exporter",
+        "sandbox": "workspace-write",
+        "input_required": False,
+        "writes": True,
+    },
 }
+
+
+def configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,6 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action", choices=sorted(ACTION_SPECS))
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--codex", default=DEFAULT_CODEX)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--dry-run", action="store_true")
@@ -177,8 +222,9 @@ def build_codex_command(
     codex: str,
     project_root: Path,
     spec: dict[str, Any],
+    model: str,
 ) -> list[str]:
-    return [
+    command = [
         codex,
         "exec",
         "--ephemeral",
@@ -188,10 +234,13 @@ def build_codex_command(
         str(project_root),
         "-s",
         str(spec["sandbox"]),
-        "-a",
-        "never",
-        "-",
+        "-c",
+        'approval_policy="never"',
     ]
+    if model.strip():
+        command.extend(["-m", model.strip()])
+    command.append("-")
+    return command
 
 
 def run_process(
@@ -236,32 +285,44 @@ def dry_run_payload(
     action: str,
     project_root: Path,
     codex_value: str,
+    model_value: str,
     python_value: str,
     user_input: str,
 ) -> dict[str, Any]:
     spec = ACTION_SPECS[action]
-    if spec.get("kind") == "validator":
+    kind = spec.get("kind", "codex")
+    if kind == "validator":
         command = [
             python_value,
-            str(project_root / "tool-library" / "scripts" / "validate_vault.py"),
+            str(project_root / "tool-library" / "scripts" / "lint_vault.py"),
+            "--report",
+            str(project_root / "tool-library" / "output" / "lint" / "latest.json"),
+        ]
+        prompt = ""
+    elif kind == "exporter":
+        command = [
+            python_value,
+            str(project_root / "tool-library" / "scripts" / "export_okf.py"),
         ]
         prompt = ""
     else:
-        command = build_codex_command(codex_value, project_root, spec)
+        command = build_codex_command(codex_value, project_root, spec, model_value)
         prompt = build_prompt(action, user_input, project_root)
     return {
         "action": action,
         "label": spec["label"],
         "agent": spec["agent"],
-        "kind": spec.get("kind", "codex"),
+        "kind": kind,
         "sandbox": spec.get("sandbox", "read-only"),
         "writes": spec["writes"],
+        "post_validate": bool(spec.get("post_validate")),
         "command": command,
         "prompt": prompt,
     }
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = parse_args()
     if args.list_actions:
         print(
@@ -291,6 +352,7 @@ def main() -> int:
                     args.action,
                     project_root,
                     args.codex,
+                    args.model,
                     args.python,
                     user_input,
                 ),
@@ -301,18 +363,45 @@ def main() -> int:
         return 0
 
     print(f"Starting dashboard action: {spec['label']}", file=sys.stderr)
-    if spec.get("kind") == "validator":
+    kind = spec.get("kind", "codex")
+    if kind in {"validator", "exporter"}:
         python = resolve_executable(args.python, "Python")
-        validator = project_root / "tool-library" / "scripts" / "validate_vault.py"
-        if not validator.is_file():
-            raise FileNotFoundError(f"Vault validator not found: {validator}")
-        command = [python, str(validator)]
+        script_name = "lint_vault.py" if kind == "validator" else "export_okf.py"
+        script = project_root / "tool-library" / "scripts" / script_name
+        if not script.is_file():
+            raise FileNotFoundError(f"Dashboard action script not found: {script}")
+        command = [python, str(script)]
+        if kind == "validator":
+            command.extend(
+                [
+                    "--report",
+                    str(project_root / "tool-library" / "output" / "lint" / "latest.json"),
+                ]
+            )
         return run_process(command, project_root, args.timeout_seconds)
 
     codex = resolve_executable(args.codex, "Codex")
     prompt = build_prompt(args.action, user_input, project_root)
-    command = build_codex_command(codex, project_root, spec)
-    return run_process(command, project_root, args.timeout_seconds, prompt)
+    command = build_codex_command(codex, project_root, spec, args.model)
+    result = run_process(command, project_root, args.timeout_seconds, prompt)
+    if result != 0 or not spec.get("post_validate"):
+        return result
+
+    python = resolve_executable(args.python, "Python")
+    lint_script = project_root / "tool-library" / "scripts" / "lint_vault.py"
+    if not lint_script.is_file():
+        raise FileNotFoundError(f"Post-repair validator not found: {lint_script}")
+    print("\nPost-repair vault lint:")
+    return run_process(
+        [
+            python,
+            str(lint_script),
+            "--report",
+            str(project_root / "tool-library" / "output" / "lint" / "latest.json"),
+        ],
+        project_root,
+        args.timeout_seconds,
+    )
 
 
 if __name__ == "__main__":
