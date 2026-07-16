@@ -19,7 +19,10 @@ from typing import Any
 
 DEFAULT_CODEX = r"C:\Users\Thomas Wade\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe"
 DEFAULT_PYTHON = r"D:\python\python.exe"
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-5.6-terra"
+DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_SERVICE_TIER = "default"
+FAST_SERVICE_MODELS = {"gpt-5.6-terra", "gpt-5.6-sol"}
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -157,6 +160,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--codex", default=DEFAULT_CODEX)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh"),
+        default=DEFAULT_REASONING_EFFORT,
+    )
+    parser.add_argument(
+        "--service-tier",
+        choices=("default", "fast"),
+        default=DEFAULT_SERVICE_TIER,
+    )
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--dry-run", action="store_true")
@@ -223,7 +236,12 @@ def build_codex_command(
     project_root: Path,
     spec: dict[str, Any],
     model: str,
+    reasoning_effort: str,
+    service_tier: str,
 ) -> list[str]:
+    effective_service_tier = (
+        "fast" if service_tier == "fast" and model in FAST_SERVICE_MODELS else "default"
+    )
     command = [
         codex,
         "exec",
@@ -236,6 +254,10 @@ def build_codex_command(
         str(spec["sandbox"]),
         "-c",
         'approval_policy="never"',
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort}"',
+        "-c",
+        f'service_tier="{effective_service_tier}"',
     ]
     if model.strip():
         command.extend(["-m", model.strip()])
@@ -286,11 +308,18 @@ def dry_run_payload(
     project_root: Path,
     codex_value: str,
     model_value: str,
+    reasoning_effort: str,
+    service_tier: str,
     python_value: str,
     user_input: str,
 ) -> dict[str, Any]:
     spec = ACTION_SPECS[action]
     kind = spec.get("kind", "codex")
+    effective_service_tier = (
+        "fast"
+        if service_tier == "fast" and model_value in FAST_SERVICE_MODELS
+        else "default"
+    )
     if kind == "validator":
         command = [
             python_value,
@@ -306,7 +335,14 @@ def dry_run_payload(
         ]
         prompt = ""
     else:
-        command = build_codex_command(codex_value, project_root, spec, model_value)
+        command = build_codex_command(
+            codex_value,
+            project_root,
+            spec,
+            model_value,
+            reasoning_effort,
+            effective_service_tier,
+        )
         prompt = build_prompt(action, user_input, project_root)
     return {
         "action": action,
@@ -316,6 +352,9 @@ def dry_run_payload(
         "sandbox": spec.get("sandbox", "read-only"),
         "writes": spec["writes"],
         "post_validate": bool(spec.get("post_validate")),
+        "model": model_value if kind == "codex" else None,
+        "reasoning_effort": reasoning_effort if kind == "codex" else None,
+        "service_tier": effective_service_tier if kind == "codex" else None,
         "command": command,
         "prompt": prompt,
     }
@@ -353,6 +392,8 @@ def main() -> int:
                     project_root,
                     args.codex,
                     args.model,
+                    args.reasoning_effort,
+                    args.service_tier,
                     args.python,
                     user_input,
                 ),
@@ -382,7 +423,14 @@ def main() -> int:
 
     codex = resolve_executable(args.codex, "Codex")
     prompt = build_prompt(args.action, user_input, project_root)
-    command = build_codex_command(codex, project_root, spec, args.model)
+    command = build_codex_command(
+        codex,
+        project_root,
+        spec,
+        args.model,
+        args.reasoning_effort,
+        args.service_tier,
+    )
     result = run_process(command, project_root, args.timeout_seconds, prompt)
     if result != 0 or not spec.get("post_validate"):
         return result

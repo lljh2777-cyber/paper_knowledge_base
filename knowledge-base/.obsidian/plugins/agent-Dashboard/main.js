@@ -17,10 +17,22 @@ const { spawn } = require("child_process");
 
 const VIEW_TYPE = "agent-dashboard-research-vault";
 const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
+const MODEL_OPTIONS = [
+	{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
+	{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
+	{ id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "快速代码模型", supportsFast: false },
+];
+const REASONING_OPTIONS = [
+	{ id: "low", label: "低" },
+	{ id: "medium", label: "中" },
+	{ id: "high", label: "高" },
+	{ id: "xhigh", label: "极高" },
+];
 const DEFAULT_SETTINGS = {
 	projectRoot: "",
 	codexExecutable: "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
-	codexModel: "gpt-5.5",
+	codexModel: "gpt-5.6-terra",
+	codexReasoningEffort: "medium",
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
 	codePracticeTimeoutSeconds: 30,
@@ -37,6 +49,8 @@ const ACTIONS = [
 		requiresInput: true,
 		writes: true,
 		enabled: true,
+		ai: true,
+		reasoningEffort: "high",
 	},
 	{
 		id: "pdf-xray",
@@ -47,6 +61,9 @@ const ACTIONS = [
 		requiresInput: true,
 		writes: true,
 		enabled: true,
+		ai: true,
+		model: "gpt-5.6-sol",
+		reasoningEffort: "high",
 	},
 	{
 		id: "code-analysis",
@@ -57,6 +74,9 @@ const ACTIONS = [
 		requiresInput: true,
 		writes: true,
 		enabled: true,
+		ai: true,
+		model: "gpt-5.6-sol",
+		reasoningEffort: "medium",
 	},
 	{
 		id: "code-practice",
@@ -78,6 +98,8 @@ const ACTIONS = [
 		requiresInput: true,
 		writes: false,
 		enabled: true,
+		ai: true,
+		reasoningEffort: "medium",
 	},
 	{
 		id: "synthesis",
@@ -88,6 +110,9 @@ const ACTIONS = [
 		requiresInput: true,
 		writes: true,
 		enabled: true,
+		ai: true,
+		model: "gpt-5.6-sol",
+		reasoningEffort: "high",
 	},
 	{
 		id: "vault-lint",
@@ -109,6 +134,8 @@ const ACTIONS = [
 		writes: true,
 		enabled: true,
 		showInRail: false,
+		ai: true,
+		reasoningEffort: "high",
 	},
 	{
 		id: "okf-export",
@@ -642,8 +669,9 @@ class DashboardDataService {
 }
 
 class ActionInputModal extends Modal {
-	constructor(app, action, onSubmit) {
+	constructor(app, plugin, action, onSubmit) {
 		super(app);
+		this.plugin = plugin;
 		this.action = action;
 		this.onSubmit = onSubmit;
 	}
@@ -662,14 +690,19 @@ class ActionInputModal extends Modal {
 				text: "运行后，Codex 可在该 skill 拥有的范围内更新项目文件。提交此表单即确认本次写入授权。",
 			});
 		}
-		const input = contentEl.createEl("textarea", {
-			cls: "agent-dashboard-modal-input",
-			attr: {
-				placeholder: this.action.placeholder,
-				rows: "8",
-				"aria-label": `${this.action.label}任务说明`,
-			},
-		});
+		let input = null;
+		if (this.action.requiresInput) {
+			input = contentEl.createEl("textarea", {
+				cls: "agent-dashboard-modal-input",
+				attr: {
+					placeholder: this.action.placeholder,
+					rows: "8",
+					"aria-label": `${this.action.label}任务说明`,
+				},
+			});
+		}
+
+		const controls = this.action.ai ? this.renderExecutionControls(contentEl) : null;
 		const footer = contentEl.createDiv({ cls: "agent-dashboard-modal-actions" });
 		const cancel = footer.createEl("button", { text: "取消" });
 		cancel.type = "button";
@@ -681,24 +714,133 @@ class ActionInputModal extends Modal {
 		submit.disabled = this.action.requiresInput;
 
 		const syncSubmitState = () => {
-			submit.disabled = this.action.requiresInput && input.value.trim().length === 0;
+			submit.disabled = this.action.requiresInput && (!input || input.value.trim().length === 0);
 		};
 		const submitAction = () => {
-			const value = input.value.trim();
+			const value = input ? input.value.trim() : "";
 			if (this.action.requiresInput && !value) return;
 			this.close();
-			this.onSubmit(value);
+			this.onSubmit({
+				input: value,
+				overrides: controls ? controls.getOverrides() : {},
+			});
 		};
-		input.addEventListener("input", syncSubmitState);
-		input.addEventListener("keydown", (event) => {
-			if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-				event.preventDefault();
-				submitAction();
-			}
-		});
+		if (input) {
+			input.addEventListener("input", syncSubmitState);
+			input.addEventListener("keydown", (event) => {
+				if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+					event.preventDefault();
+					submitAction();
+				}
+			});
+		}
 		cancel.addEventListener("click", () => this.close());
 		submit.addEventListener("click", submitAction);
-		window.setTimeout(() => input.focus(), 0);
+		window.setTimeout(() => (input || submit).focus(), 0);
+	}
+
+	renderExecutionControls(parent) {
+		const actionDefault = this.plugin.resolveActionExecutionConfig(this.action);
+		const section = parent.createEl("section", {
+			cls: "agent-dashboard-run-config",
+			attr: { "aria-label": "本次运行配置" },
+		});
+		const heading = section.createDiv({ cls: "agent-dashboard-run-config-heading" });
+		heading.createSpan({ text: "运行配置" });
+		const summary = heading.createSpan({ cls: "agent-dashboard-run-config-summary" });
+
+		const modelSelect = this.createSelectField(section, "模型", "运行模型");
+		modelSelect.createEl("option", {
+			text: `使用按钮默认 · ${this.plugin.getModelLabel(actionDefault.model)}`,
+			attr: { value: "" },
+		});
+		const modelOptions = [...MODEL_OPTIONS];
+		if (!modelOptions.some((option) => option.id === this.plugin.settings.codexModel)) {
+			modelOptions.unshift({ id: this.plugin.settings.codexModel, label: this.plugin.settings.codexModel });
+		}
+		modelOptions.forEach((option) => {
+			modelSelect.createEl("option", {
+				text: option.description ? `${option.label} · ${option.description}` : option.label,
+				attr: { value: option.id },
+			});
+		});
+
+		const reasoningSelect = this.createSelectField(section, "推理强度", "运行推理强度");
+		reasoningSelect.createEl("option", {
+			text: `使用按钮默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`,
+			attr: { value: "" },
+		});
+		REASONING_OPTIONS.forEach((option) => {
+			reasoningSelect.createEl("option", { text: option.label, attr: { value: option.id } });
+		});
+
+		const speedField = section.createDiv({ cls: "agent-dashboard-run-config-field" });
+		speedField.createSpan({ cls: "agent-dashboard-run-config-label", text: "速度" });
+		const speedControl = speedField.createDiv({
+			cls: "agent-dashboard-speed-control",
+			attr: { role: "group", "aria-label": "运行速度" },
+		});
+		let serviceTier = "default";
+		const speedButtons = [
+			["default", "标准", "默认速度"],
+			["fast", "快速", "约 1.5 倍速度，用量更多"],
+		].map(([value, label, title]) => {
+			const button = speedControl.createEl("button", {
+				cls: value === serviceTier ? "agent-dashboard-speed-option is-active" : "agent-dashboard-speed-option",
+				text: label,
+				attr: { type: "button", title, "aria-pressed": value === serviceTier ? "true" : "false" },
+			});
+			button.addEventListener("click", () => {
+				if (button.disabled) return;
+				serviceTier = value;
+				syncSpeedControl();
+				updateSummary();
+			});
+			button.dataset.value = value;
+			return button;
+		});
+
+		const getOverrides = () => ({
+			model: modelSelect.value,
+			reasoningEffort: reasoningSelect.value,
+			serviceTier,
+		});
+		const syncSpeedControl = () => {
+			const selectedModel = modelSelect.value || actionDefault.model;
+			const supportsFast = this.plugin.supportsFast(selectedModel);
+			if (!supportsFast) serviceTier = "default";
+			speedButtons.forEach((item) => {
+				const isFast = item.dataset.value === "fast";
+				const active = item.dataset.value === serviceTier;
+				item.disabled = isFast && !supportsFast;
+				item.toggleClass("is-active", active);
+				item.setAttr("aria-pressed", active ? "true" : "false");
+				if (isFast) {
+					item.setAttr("title", supportsFast ? "约 1.5 倍速度，用量更多" : "当前模型不支持 Fast 速度");
+				}
+			});
+		};
+		const updateSummary = () => {
+			const effective = this.plugin.resolveActionExecutionConfig(this.action, getOverrides());
+			summary.setText(`${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`);
+		};
+		modelSelect.addEventListener("change", () => {
+			syncSpeedControl();
+			updateSummary();
+		});
+		reasoningSelect.addEventListener("change", updateSummary);
+		syncSpeedControl();
+		updateSummary();
+		return { getOverrides };
+	}
+
+	createSelectField(parent, label, ariaLabel) {
+		const field = parent.createDiv({ cls: "agent-dashboard-run-config-field" });
+		field.createSpan({ cls: "agent-dashboard-run-config-label", text: label });
+		return field.createEl("select", {
+			cls: "agent-dashboard-run-config-select",
+			attr: { "aria-label": ariaLabel },
+		});
 	}
 
 	onClose() {
@@ -722,6 +864,18 @@ class TaskResultModal extends Modal {
 			cls: "agent-dashboard-modal-description",
 			text: `${this.run.agent} · ${new Date(this.run.startedAt).toLocaleString("zh-CN")}`,
 		});
+		if (this.run.executionConfig) {
+			const config = contentEl.createDiv({ cls: "agent-dashboard-result-config" });
+			[
+				["模型", this.plugin.getModelLabel(this.run.executionConfig.model)],
+				["推理强度", this.plugin.getReasoningLabel(this.run.executionConfig.reasoningEffort)],
+				["速度", this.run.executionConfig.serviceTier === "fast" ? "快速" : "标准"],
+			].forEach(([label, value]) => {
+				const item = config.createDiv({ cls: "agent-dashboard-result-config-item" });
+				item.createSpan({ text: label });
+				item.createEl("strong", { text: value });
+			});
+		}
 		if (this.run.summary) {
 			contentEl.createEl("p", {
 				cls: "agent-dashboard-result-summary",
@@ -1711,22 +1865,25 @@ class DashboardView extends ItemView {
 			void this.plugin.activateCodePracticeView();
 			return;
 		}
-		if (action.requiresInput) {
-			new ActionInputModal(this.app, action, (value) => {
-				void this.executeAction(action, value);
+		if (action.ai || action.requiresInput) {
+			new ActionInputModal(this.app, this.plugin, action, ({ input, overrides }) => {
+				void this.executeAction(action, input, overrides);
 			}).open();
 			return;
 		}
 		void this.executeAction(action, "");
 	}
 
-	async executeAction(action, input) {
+	async executeAction(action, input, executionOverrides = {}) {
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
-		const run = await this.plugin.startTaskRun(action, summary);
+		const executionConfig = action.ai
+			? this.plugin.resolveActionExecutionConfig(action, executionOverrides)
+			: null;
+		const run = await this.plugin.startTaskRun(action, summary, executionConfig);
 		await this.loadAndRender();
 		let completedRun;
 		try {
-			const result = await this.plugin.runVaultAction(run.id, action, input);
+			const result = await this.plugin.runVaultAction(run.id, action, input, executionConfig);
 			const output = this.formatProcessOutput(result);
 			const status = result.exitCode === 0 ? "done" : "failed";
 			completedRun = await this.plugin.finishTaskRun(run.id, {
@@ -1756,7 +1913,7 @@ class DashboardView extends ItemView {
 		const onRepair = run.actionId === "vault-lint"
 			? () => {
 				const repairAction = ACTION_BY_ID.get("vault-lint-fix");
-				if (repairAction) void this.executeAction(repairAction, "");
+				if (repairAction) this.openAction(repairAction);
 			}
 			: null;
 		new TaskResultModal(this.app, this.plugin, run, onRepair).open();
@@ -1926,17 +2083,29 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 					})
 			);
 		new Setting(containerEl)
-			.setName("Codex 模型")
-			.setDesc("仅用于 Dashboard 启动的 AI 任务；默认使用当前 CLI 支持的 gpt-5.5。")
+			.setName("全局默认模型")
+			.setDesc("没有按钮级模型配置的 Dashboard AI 任务使用该模型。")
 			.addText((text) =>
 				text
-					.setPlaceholder("gpt-5.5")
+					.setPlaceholder("gpt-5.6-terra")
 					.setValue(this.plugin.settings.codexModel)
 					.onChange(async (value) => {
-						this.plugin.settings.codexModel = value.trim() || "gpt-5.5";
+						this.plugin.settings.codexModel = value.trim() || "gpt-5.6-terra";
 						await this.plugin.saveSettings();
 					})
 			);
+		new Setting(containerEl)
+			.setName("全局默认推理强度")
+			.setDesc("仅在按钮没有指定推理强度时使用；按钮默认值和本次运行覆盖优先。")
+			.addDropdown((dropdown) => {
+				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+				dropdown
+					.setValue(this.plugin.settings.codexReasoningEffort)
+					.onChange(async (value) => {
+						this.plugin.settings.codexReasoningEffort = value;
+						await this.plugin.saveSettings();
+					});
+			});
 		new Setting(containerEl)
 			.setName("任务超时（分钟）")
 			.setDesc("单个本地脚本或 Codex 任务的最长运行时间，范围 1-240 分钟。")
@@ -2234,6 +2403,14 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			this.settings.projectRoot = this.inferProjectRoot();
 		}
 		let changed = false;
+		if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
+			this.settings.codexModel = "gpt-5.6-terra";
+			changed = true;
+		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.codexReasoningEffort)) {
+			this.settings.codexReasoningEffort = DEFAULT_SETTINGS.codexReasoningEffort;
+			changed = true;
+		}
 		this.taskRuns = this.taskRuns.map((run) => {
 			if (run.status !== "running" && run.status !== "queued") return run;
 			changed = true;
@@ -2282,7 +2459,38 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		return this.taskRuns.some((run) => actionIds.has(run.actionId) && (run.status === "running" || run.status === "queued"));
 	}
 
-	async startTaskRun(action, summary) {
+	getModelLabel(model) {
+		return MODEL_OPTIONS.find((option) => option.id === model)?.label || model;
+	}
+
+	getReasoningLabel(reasoningEffort) {
+		return REASONING_OPTIONS.find((option) => option.id === reasoningEffort)?.label || reasoningEffort;
+	}
+
+	supportsFast(model) {
+		return MODEL_OPTIONS.find((option) => option.id === model)?.supportsFast === true;
+	}
+
+	resolveActionExecutionConfig(action, overrides = {}) {
+		const buttonModel = action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel;
+		const buttonReasoning = action.reasoningEffort
+			|| this.settings.codexReasoningEffort
+			|| DEFAULT_SETTINGS.codexReasoningEffort;
+		const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
+		const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
+		const reasoningEffort = REASONING_OPTIONS.some((option) => option.id === requestedReasoning)
+			? requestedReasoning
+			: buttonReasoning;
+		return {
+			model: requestedModel || buttonModel,
+			reasoningEffort,
+			serviceTier: overrides.serviceTier === "fast" && this.supportsFast(requestedModel || buttonModel) ? "fast" : "default",
+			modelSource: requestedModel ? "本次覆盖" : action.model ? "按钮默认" : "全局默认",
+			reasoningSource: requestedReasoning ? "本次覆盖" : action.reasoningEffort ? "按钮默认" : "全局默认",
+		};
+	}
+
+	async startTaskRun(action, summary, executionConfig = null) {
 		const now = new Date().toISOString();
 		const run = {
 			id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -2290,6 +2498,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			label: action.label,
 			agent: action.agent,
 			summary,
+			executionConfig,
 			status: "running",
 			startedAt: now,
 			finishedAt: "",
@@ -2381,7 +2590,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	runVaultAction(runId, action, input) {
+	runVaultAction(runId, action, input, executionConfig = null) {
 		const registered = ACTION_BY_ID.get(action.id);
 		if (!registered || !registered.enabled) {
 			return Promise.reject(new Error(`操作尚未启用：${action.label}`));
@@ -2393,6 +2602,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		const projectRoot = this.settings.projectRoot;
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
 		const timeoutSeconds = Math.max(60, Math.min(14400, Number(this.settings.taskTimeoutMinutes) * 60 || 3600));
+		const effectiveConfig = executionConfig || this.resolveActionExecutionConfig(action);
 		const args = [
 			runner,
 			"--action",
@@ -2402,7 +2612,11 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			"--codex",
 			this.settings.codexExecutable,
 			"--model",
-			this.settings.codexModel,
+			effectiveConfig.model,
+			"--reasoning-effort",
+			effectiveConfig.reasoningEffort,
+			"--service-tier",
+			effectiveConfig.serviceTier,
 			"--python",
 			this.settings.pythonExecutable,
 			"--timeout-seconds",
