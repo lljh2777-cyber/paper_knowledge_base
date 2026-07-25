@@ -48,6 +48,7 @@ WIKI_CONTENT_DIRS = {
 
 REQUIRED_FRONTMATTER = ["title", "type", "sources", "tags", "created", "updated"]
 SOURCE_FRONTMATTER = [
+    "title_zh",
     "doi",
     "url",
     "zotero_key",
@@ -211,6 +212,14 @@ def check_markdown(errors: list[str], warnings: list[str]) -> dict[str, dict]:
                 for field in SOURCE_FRONTMATTER:
                     if field not in fm:
                         errors.append(f"{key}: missing source frontmatter field `{field}`")
+                    elif field == "title_zh":
+                        title_zh = str(fm.get(field) or "").strip()
+                        if not title_zh:
+                            errors.append(f"{key}: source frontmatter field `title_zh` is empty")
+                        elif not re.search(r"[\u3400-\u9fff]", title_zh):
+                            errors.append(
+                                f"{key}: source frontmatter field `title_zh` has no Chinese characters"
+                            )
                 h1 = first_h1(path)
                 if h1 and fm.get("title") and h1 != fm["title"]:
                     errors.append(f"{key}: H1 title does not match frontmatter title")

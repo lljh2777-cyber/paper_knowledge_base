@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Agentic Research Vault · 项目介绍</title>
+	<style>
+		:root {
+			--ink: #07090b;
+			--ink-2: #0d1115;
+			--panel: #11171c;
+			--panel-2: #171e24;
+			--line: #2b363e;
+			--line-strong: #52616b;
+			--text: #f4f7f8;
+			--muted: #9ba8b0;
+			--cyan: #27d7e7;
+			--red: #ff4f51;
+			--lime: #c9f04b;
+			--amber: #f7c85b;
+			--blue: #5b8cff;
+			--slide-w: 1600px;
+			--slide-h: 900px;
+			--scale: 1;
+			--ease: cubic-bezier(.2, .76, .2, 1);
+		}
+
+		* { box-sizing: border-box; letter-spacing: 0; }
+		html, body { width: 100%; height: 100%; overflow: hidden; }
+		body {
+			margin: 0;
+			background: #020304;
+			color: var(--text);
+			font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+		}
+		button { font: inherit; }
+		button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+
+		.presentation-shell {
+			position: fixed;
+			inset: 0;
+			display: grid;
+			place-items: center;
+			overflow: hidden;
+			background:
+				radial-gradient(circle at 50% 50%, #17212a 0, #050709 45%, #020304 76%);
+		}
+
+		.stage-wrap {
+			position: relative;
+			width: calc(var(--slide-w) * var(--scale));
+			height: calc(var(--slide-h) * var(--scale));
+		}
+
+		.stage {
+			position: absolute;
+			left: 0;
+			top: 0;
+			width: var(--slide-w);
+			height: var(--slide-h);
+			overflow: hidden;
+			transform: scale(var(--scale));
+			transform-origin: top left;
+			background: var(--ink);
+			box-shadow: 0 42px 120px rgb(0 0 0 / 70%);
+		}
+
+		.stage::before {
+			position: absolute;
+			inset: 0;
+			z-index: 50;
+			pointer-events: none;
+			background: linear-gradient(90deg, rgb(255 255 255 / 1%) 1px, transparent 1px), linear-gradient(rgb(255 255 255 / 1%) 1px, transparent 1px);
+			background-size: 40px 40px;
+			content: "";
+		}
+
+		.slide {
+			position: absolute;
+			inset: 0;
+			z-index: 0;
+			display: grid;
+			grid-template-rows: auto 1fr auto;
+			padding: 58px 84px 72px;
+			overflow: hidden;
+			opacity: 0;
+			visibility: hidden;
+			transform: translateX(70px) scale(.985);
+			transition: opacity .55s var(--ease), transform .75s var(--ease), visibility .55s;
+		}
+
+		.slide.is-active {
+			z-index: 2;
+			opacity: 1;
+			visibility: visible;
+			transform: translateX(0) scale(1);
+		}
+
+		.slide.is-before { transform: translateX(-70px) scale(.985); }
+
+		.slide::after {
+			position: absolute;
+			right: -180px;
+			bottom: -180px;
+			width: 580px;
+			height: 580px;
+			border: 1px solid rgb(39 215 231 / 8%);
+			border-radius: 50%;
+			box-shadow: 0 0 0 90px rgb(39 215 231 / 2%), 0 0 0 180px rgb(255 79 81 / 2%);
+			content: "";
+		}
+
+		.slide-head {
+			position: relative;
+			z-index: 3;
+			display: flex;
+			align-items: flex-start;
+			justify-content: space-between;
+			min-height: 118px;
+			border-top: 1px solid var(--line-strong);
+			padding-top: 18px;
+		}
+
+		.slide-index {
+			color: var(--cyan);
+			font-family: "Cascadia Code", Consolas, monospace;
+			font-size: 18px;
+			font-weight: 650;
+		}
+
+		.slide-title-wrap { max-width: 1080px; }
+		.slide-title {
+			margin: 0;
+			font-size: 54px;
+			font-weight: 720;
+			line-height: 1.04;
+		}
+
+		.slide-lead {
+			max-width: 880px;
+			margin: 14px 0 0;
+			color: var(--muted);
+			font-size: 21px;
+			line-height: 1.55;
+		}
+
+		.slide-body {
+			position: relative;
+			z-index: 3;
+			align-self: stretch;
+			min-height: 0;
+		}
+
+		.slide-foot {
+			position: relative;
+			z-index: 3;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding-top: 18px;
+			border-top: 1px solid var(--line);
+			color: #6f7d85;
+			font-family: "Cascadia Code", Consolas, monospace;
+			font-size: 13px;
+		}
+
+		.reveal {
+			opacity: 0;
+			transform: translateY(24px);
+			transition: opacity .65s var(--ease), transform .8s var(--ease);
+			transition-delay: calc(var(--d, 0) * 90ms + 180ms);
+		}
+
+		.is-active .reveal { opacity: 1; transform: translateY(0); }
+		.icon { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+		.icon-sm { width: 18px; height: 18px; }
+		.mono { font-family: "Cascadia Code", Consolas, monospace; }
+		.cyan { color: var(--cyan); }
+		.red { color: var(--red); }
+		.lime { color: var(--lime); }
+		.amber { color: var(--amber); }
+
+		/* Cover */
+		.cover {
+			grid-template-rows: 1fr auto;
+			padding: 70px 84px 64px;
+			background: #05080a url("assets/agentic-vault-hero.png") center / cover no-repeat;
+		}
+
+		.cover::before {
+			position: absolute;
+			inset: 0;
+			z-index: 1;
+			background: linear-gradient(90deg, #05080a 0%, rgb(5 8 10 / 96%) 26%, rgb(5 8 10 / 58%) 50%, rgb(5 8 10 / 4%) 76%), linear-gradient(0deg, #05080a 0%, transparent 28%);
+			content: "";
+		}
+
+		.cover::after { display: none; }
+		.cover-main {
+			position: relative;
+			z-index: 3;
+			display: flex;
+			flex-direction: column;
+			justify-content: center;
+			max-width: 870px;
+		}
+
+		.cover-mark {
+			display: inline-flex;
+			align-items: center;
+			gap: 12px;
+			width: fit-content;
+			margin-bottom: 34px;
+			color: var(--cyan);
+			font-family: "Cascadia Code", Consolas, monospace;
+			font-size: 17px;
+			font-weight: 650;
+		}
+
+		.cover-mark::before { width: 42px; height: 2px; background: var(--red); content: ""; }
+		.cover h1 {
+			max-width: 900px;
+			margin: 0;
+			font-size: 92px;
+			font-weight: 760;
+			line-height: .98;
+		}
+
+		.cover-copy {
+			max-width: 720px;
+			margin: 26px 0 0;
+			color: #c4cdd2;
+			font-size: 25px;
+			line-height: 1.5;
+		}
+
+		.cover-stats {
+			position: relative;
+			z-index: 3;
+			display: grid;
+			grid-template-columns: repeat(3, 190px) 1fr;
+			gap: 26px;
+			align-items: end;
+			padding-top: 30px;
+			border-top: 1px solid rgb(255 255 255 / 24%);
+		}
+
+		.cover-stat strong { display: block; font-size: 42px; line-height: 1; }
+		.cover-stat span { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+		.cover-meta { justify-self: end; color: #7f8d95; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+
+		/* Problem */
+		.friction-layout {
+			display: grid;
+			grid-template-columns: .85fr 1.45fr;
+			gap: 70px;
+			height: 100%;
+			align-items: center;
+		}
+
+		.big-thesis {
+			margin: 0;
+			font-size: 58px;
+			font-weight: 700;
+			line-height: 1.12;
+		}
+
+		.big-thesis em { color: var(--red); font-style: normal; }
+		.friction-list { display: grid; gap: 1px; border: 1px solid var(--line); background: var(--line); }
+		.friction-row {
+			display: grid;
+			grid-template-columns: 62px 210px 1fr;
+			align-items: center;
+			min-height: 92px;
+			padding: 0 28px;
+			background: var(--ink-2);
+		}
+		.friction-row .icon { color: var(--cyan); }
+		.friction-row strong { font-size: 22px; }
+		.friction-row span { color: var(--muted); font-size: 17px; line-height: 1.45; }
+
+		/* Architecture */
+		.architecture {
+			display: grid;
+			grid-template-columns: 1.1fr .9fr;
+			gap: 44px;
+			height: 100%;
+			align-items: center;
+		}
+
+		.layer-stack { position: relative; display: grid; gap: 10px; }
+		.layer {
+			position: relative;
+			display: grid;
+			grid-template-columns: 180px 1fr 110px;
+			align-items: center;
+			min-height: 78px;
+			padding: 0 24px;
+			border: 1px solid var(--line);
+			background: linear-gradient(90deg, var(--panel) 0%, #0c1115 100%);
+			overflow: hidden;
+		}
+		.layer::before { position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--layer-color); content: ""; }
+		.layer-index { color: var(--layer-color); font-family: "Cascadia Code", Consolas, monospace; font-size: 14px; }
+		.layer strong { font-size: 22px; }
+		.layer span { color: var(--muted); font-size: 15px; }
+		.layer svg { justify-self: end; color: var(--layer-color); }
+		.arch-rule { padding: 38px 40px; border-left: 4px solid var(--lime); background: #0d1316; }
+		.arch-rule .quote { margin: 0 0 28px; font-size: 34px; font-weight: 680; line-height: 1.28; }
+		.arch-rule ul { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; }
+		.arch-rule li { display: flex; gap: 12px; color: var(--muted); font-size: 17px; line-height: 1.45; }
+		.arch-rule li::before { color: var(--lime); content: "→"; }
+
+		/* Action matrix */
+		.action-layout { display: grid; grid-template-columns: 1.4fr .6fr; gap: 36px; height: 100%; align-items: center; }
+		.action-matrix { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+		.action-tile {
+			position: relative;
+			display: grid;
+			align-content: space-between;
+			min-height: 180px;
+			padding: 22px;
+			border: 1px solid var(--line);
+			background: var(--panel);
+			overflow: hidden;
+		}
+		.action-tile::after { position: absolute; right: -26px; bottom: -26px; width: 90px; height: 90px; border: 1px solid currentColor; border-radius: 50%; opacity: .12; content: ""; }
+		.action-tile .icon { width: 30px; height: 30px; }
+		.action-tile strong { display: block; margin-top: 26px; font-size: 21px; }
+		.action-tile small { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.4; }
+		.action-tile.ai { color: var(--cyan); }
+		.action-tile.local { color: var(--lime); }
+		.action-tile.context { color: var(--red); }
+		.execution-legend { display: grid; gap: 18px; }
+		.execution-number { padding: 28px 0; border-top: 1px solid var(--line-strong); }
+		.execution-number strong { display: block; font-size: 74px; line-height: 1; }
+		.execution-number span { display: block; margin-top: 10px; color: var(--muted); font-size: 17px; }
+		.legend-row { display: grid; grid-template-columns: 16px 1fr; gap: 13px; align-items: start; }
+		.legend-dot { width: 10px; height: 10px; margin-top: 7px; border-radius: 50%; background: currentColor; }
+		.legend-row strong { display: block; font-size: 17px; }
+		.legend-row span { display: block; margin-top: 4px; color: var(--muted); font-size: 14px; line-height: 1.4; }
+
+		/* Model routing */
+		.model-layout { display: grid; grid-template-columns: .85fr 1.15fr; gap: 54px; height: 100%; align-items: center; }
+		.model-levels { display: grid; gap: 12px; }
+		.model-level {
+			display: grid;
+			grid-template-columns: 76px 1fr;
+			gap: 20px;
+			align-items: center;
+			min-height: 118px;
+			padding: 20px 24px;
+			border: 1px solid var(--line);
+			background: #0c1115;
+		}
+		.model-level-num { display: grid; place-items: center; width: 54px; height: 54px; border: 1px solid currentColor; border-radius: 50%; font-family: "Cascadia Code", Consolas, monospace; }
+		.model-level strong { font-size: 22px; }
+		.model-level p { margin: 8px 0 0; color: var(--muted); font-size: 15px; }
+		.model-table { border-top: 1px solid var(--line-strong); }
+		.model-row { display: grid; grid-template-columns: 230px 1fr 120px; align-items: center; min-height: 82px; border-bottom: 1px solid var(--line); }
+		.model-row strong { font-size: 19px; }
+		.model-row span { color: var(--muted); font-size: 15px; }
+		.model-row code { justify-self: end; color: var(--cyan); font-family: "Cascadia Code", Consolas, monospace; font-size: 14px; }
+		.speed-line { display: flex; align-items: center; gap: 14px; margin-top: 26px; color: var(--muted); font-size: 15px; }
+		.speed-track { position: relative; width: 220px; height: 8px; background: var(--line); }
+		.speed-track::before { position: absolute; inset: 0 50% 0 0; background: var(--cyan); content: ""; animation: pulse-width 2.2s ease-in-out infinite; }
+
+		/* Gap workflow */
+		.gap-layout { display: grid; grid-template-rows: auto 1fr; gap: 36px; height: 100%; padding-top: 12px; }
+		.gap-example { display: grid; grid-template-columns: 120px 1fr 90px 126px; gap: 16px; align-items: center; padding: 20px 24px; border: 1px solid var(--line-strong); background: #10161a; }
+		.gap-type { color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; }
+		.gap-title { font-size: 22px; }
+		.severity { display: inline-flex; justify-content: center; padding: 5px 10px; border: 1px solid var(--amber); color: var(--amber); font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+		.process-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; border: 1px solid var(--cyan); background: rgb(39 215 231 / 9%); color: var(--cyan); font-weight: 650; }
+		.flow-line { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; align-items: stretch; }
+		.flow-node { position: relative; display: grid; align-content: center; min-height: 224px; padding: 24px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: linear-gradient(180deg, #10161a, #0b0f12); }
+		.flow-node + .flow-node { border-left: 1px solid var(--line); }
+		.flow-node::after { position: absolute; right: -10px; top: 50%; z-index: 2; width: 18px; height: 18px; border-top: 2px solid var(--cyan); border-right: 2px solid var(--cyan); transform: rotate(45deg) translateY(-50%); background: var(--ink); content: ""; }
+		.flow-node:last-child::after { display: none; }
+		.flow-node .icon { color: var(--cyan); }
+		.flow-node strong { display: block; margin-top: 22px; font-size: 19px; }
+		.flow-node span { display: block; margin-top: 10px; color: var(--muted); font-size: 14px; line-height: 1.45; }
+
+		/* Notebook */
+		.notebook-layout { display: grid; grid-template-columns: 1.15fr .85fr; gap: 44px; height: 100%; align-items: center; }
+		.notebook { border: 1px solid var(--line-strong); background: #f5f6f7; color: #15191c; box-shadow: 0 26px 70px rgb(0 0 0 / 45%); }
+		.notebook-top { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 18px; border-bottom: 1px solid #ced4d8; background: #e9edf0; }
+		.notebook-top strong { font-size: 14px; }
+		.runtime-dots { display: flex; gap: 6px; }
+		.runtime-dots span { width: 9px; height: 9px; border-radius: 50%; background: #aab4ba; }
+		.runtime-dots span:first-child { background: #34b97b; }
+		.cell { display: grid; grid-template-columns: 80px 1fr; border-bottom: 1px solid #dfe3e5; }
+		.cell-prompt { padding: 20px 12px; color: #6758ee; font-family: "Cascadia Code", Consolas, monospace; font-size: 14px; text-align: right; }
+		.cell-main { padding: 18px 20px; background: white; }
+		.cell-main pre { margin: 0; font-family: "Cascadia Code", Consolas, monospace; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
+		.cell-output { margin-top: 10px; padding-top: 10px; border-top: 1px solid #edf0f1; color: #47535b; }
+		.notebook-features { display: grid; gap: 2px; }
+		.notebook-feature { display: grid; grid-template-columns: 52px 1fr; gap: 16px; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--line); }
+		.notebook-feature .icon { color: var(--lime); }
+		.notebook-feature strong { display: block; font-size: 20px; }
+		.notebook-feature span { display: block; margin-top: 5px; color: var(--muted); font-size: 14px; line-height: 1.4; }
+
+		/* Quality */
+		.quality-layout { display: grid; grid-template-columns: 430px 1fr; gap: 64px; height: 100%; align-items: center; }
+		.score-ring { position: relative; display: grid; place-items: center; width: 360px; height: 360px; border-radius: 50%; background: conic-gradient(var(--lime) 0 349deg, var(--line) 349deg 360deg); box-shadow: 0 0 70px rgb(201 240 75 / 10%); }
+		.score-ring::before { position: absolute; width: 280px; height: 280px; border-radius: 50%; background: var(--ink); content: ""; }
+		.score-value { position: relative; text-align: center; }
+		.score-value strong { display: block; font-size: 104px; line-height: .9; }
+		.score-value span { display: block; margin-top: 14px; color: var(--muted); font-size: 17px; }
+		.quality-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+		.quality-metric { padding: 24px 0; border-top: 2px solid var(--metric-color); }
+		.quality-metric strong { display: block; font-size: 44px; line-height: 1; }
+		.quality-metric span { display: block; margin-top: 9px; color: var(--muted); font-size: 14px; }
+		.coverage-bars { display: grid; gap: 18px; margin-top: 36px; }
+		.coverage-row { display: grid; grid-template-columns: 160px 1fr 90px; gap: 18px; align-items: center; }
+		.coverage-row span { color: var(--muted); font-size: 15px; }
+		.coverage-row strong { text-align: right; font-family: "Cascadia Code", Consolas, monospace; }
+		.bar { height: 10px; background: var(--line); overflow: hidden; }
+		.bar > i { display: block; width: var(--w); height: 100%; background: var(--bar-color); transform-origin: left; animation: grow-bar 1.5s var(--ease) both; }
+
+		/* OKF */
+		.okf-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; height: 100%; align-items: center; }
+		.okf-statement { font-size: 58px; font-weight: 720; line-height: 1.14; }
+		.okf-statement span { color: var(--cyan); }
+		.okf-copy { max-width: 620px; margin-top: 24px; color: var(--muted); font-size: 19px; line-height: 1.55; }
+		.okf-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 36px; }
+		.okf-stat { padding: 20px 0; border-top: 1px solid var(--line-strong); }
+		.okf-stat strong { display: block; font-size: 40px; }
+		.okf-stat span { color: var(--muted); font-size: 13px; }
+		.export-map { position: relative; min-height: 450px; border: 1px solid var(--line); background: #0b1013; overflow: hidden; }
+		.export-map::before { position: absolute; inset: 0; background: linear-gradient(90deg, rgb(255 255 255 / 2%) 1px, transparent 1px), linear-gradient(rgb(255 255 255 / 2%) 1px, transparent 1px); background-size: 32px 32px; content: ""; }
+		.export-core { position: absolute; left: 50%; top: 50%; display: grid; place-items: center; width: 150px; height: 150px; border: 1px solid var(--cyan); transform: translate(-50%, -50%) rotate(45deg); background: rgb(39 215 231 / 8%); }
+		.export-core span { transform: rotate(-45deg); font-family: "Cascadia Code", Consolas, monospace; font-size: 28px; font-weight: 700; }
+		.export-node { position: absolute; display: grid; place-items: center; width: 130px; height: 62px; border: 1px solid var(--line-strong); background: var(--panel); color: var(--muted); font-size: 14px; }
+		.export-node::after { position: absolute; width: 130px; height: 1px; background: linear-gradient(90deg, var(--cyan), transparent); content: ""; }
+		.export-node.n1 { left: 60px; top: 76px; }
+		.export-node.n1::after { left: 100px; top: 82px; transform: rotate(25deg); }
+		.export-node.n2 { right: 58px; top: 72px; }
+		.export-node.n2::after { right: 102px; top: 82px; transform: rotate(155deg); }
+		.export-node.n3 { left: 60px; bottom: 70px; }
+		.export-node.n3::after { left: 100px; bottom: 78px; transform: rotate(-25deg); }
+		.export-node.n4 { right: 58px; bottom: 70px; }
+		.export-node.n4::after { right: 102px; bottom: 78px; transform: rotate(205deg); }
+
+		/* Finale */
+		.final-slide { grid-template-rows: 1fr auto; padding: 70px 84px 64px; background: #05080a url("assets/agentic-vault-hero.png") center / cover no-repeat; }
+		.final-slide::before { position: absolute; inset: 0; z-index: 1; background: linear-gradient(90deg, #05080a 0, rgb(5 8 10 / 90%) 42%, rgb(5 8 10 / 40%) 72%), linear-gradient(0deg, #05080a 0, transparent 34%); content: ""; }
+		.final-slide::after { display: none; }
+		.final-main { position: relative; z-index: 3; display: grid; align-content: center; max-width: 880px; }
+		.final-main h2 { margin: 0; font-size: 76px; line-height: 1.03; }
+		.final-main p { max-width: 760px; margin: 28px 0 0; color: #c4cdd2; font-size: 23px; line-height: 1.55; }
+		.roadmap { display: flex; gap: 12px; margin-top: 38px; }
+		.roadmap-item { min-width: 190px; padding: 17px 20px; border-left: 3px solid var(--roadmap-color); background: rgb(7 10 12 / 78%); }
+		.roadmap-item strong { display: block; font-size: 16px; }
+		.roadmap-item span { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; }
+		.final-foot { position: relative; z-index: 3; display: flex; align-items: end; justify-content: space-between; padding-top: 28px; border-top: 1px solid rgb(255 255 255 / 24%); }
+		.final-foot strong { font-size: 26px; }
+		.final-foot span { color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+
+		/* Presentation chrome */
+		.presentation-controls {
+			position: fixed;
+			right: 28px;
+			bottom: 24px;
+			z-index: 100;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+		.control-button {
+			display: grid;
+			place-items: center;
+			width: 42px;
+			height: 42px;
+			padding: 0;
+			border: 1px solid #44515a;
+			border-radius: 4px;
+			background: rgb(10 14 17 / 88%);
+			color: var(--text);
+			cursor: pointer;
+			backdrop-filter: blur(12px);
+			transition: border-color .2s, background .2s, color .2s;
+		}
+		.control-button:hover { border-color: var(--cyan); background: #111a20; color: var(--cyan); }
+		.control-button:disabled { opacity: .3; cursor: default; }
+		.page-counter { min-width: 72px; color: #b4bfc5; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; text-align: center; }
+		.progress-track { position: fixed; left: 0; bottom: 0; z-index: 110; width: 100%; height: 3px; background: #151c21; }
+		.progress-bar { width: 0; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--lime), var(--red)); transition: width .55s var(--ease); }
+		.key-hint { position: fixed; left: 26px; bottom: 22px; z-index: 100; color: #66747c; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
+
+		@keyframes grow-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+		@keyframes pulse-width { 0%, 100% { right: 54%; } 50% { right: 20%; } }
+		@media (prefers-reduced-motion: reduce) {
+			*, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+		}
+	</style>
+</head>
+<body>
+	<svg aria-hidden="true" width="0" height="0" style="position:absolute">
+		<symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+		<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+		<symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+		<symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></symbol>
+		<symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6M14.5 4l-5 16"/></symbol>
+		<symbol id="i-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M12 8v4m0 0H5v4m7-4h7v4"/></symbol>
+		<symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M8 12h8"/></symbol>
+		<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+		<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></symbol>
+		<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3v8Z"/><path d="m9 12 2 2 4-4"/></symbol>
+		<symbol id="i-package" viewBox="0 0 24 24"><path d="m7.5 4.3 9 5.2M3.3 7l8.7 5 8.7-5M12 22V12M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/></symbol>
+		<symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+		<symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9V3Z"/></symbol>
+		<symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5-5l2.1 2.1-3.4 3.4-2.1-2.1a4 4 0 0 0 5 5l-7.4 7.4a2.1 2.1 0 0 0 3 3l7.4-7.4a4 4 0 0 0 5-5l-2.1 2.1-3.4-3.4 2.1-2.1Z"/></symbol>
+		<symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></symbol>
+		<symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.5 4A2.5 2.5 0 0 1 12 6.5V20a2 2 0 0 1-4 0v-1a3 3 0 0 1-2.8-4A3 3 0 0 1 5 9a3 3 0 0 1 4.5-5ZM14.5 4A2.5 2.5 0 0 0 12 6.5V20a2 2 0 0 0 4 0v-1a3 3 0 0 0 2.8-4A3 3 0 0 0 19 9a3 3 0 0 0-4.5-5Z"/></symbol>
+		<symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v9a3 3 0 0 0 3 3h6M18 9v6M9 6h6"/></symbol>
+		<symbol id="i-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+		<symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M7 17h10"/></symbol>
+		<symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+		<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8M20 4v4h-4"/></symbol>
+	</svg>
+
+	<div class="presentation-shell">
+		<div class="stage-wrap" id="stageWrap">
+			<main class="stage" id="stage" aria-live="polite">
+				<section class="slide cover is-active" data-title="封面">
+					<div class="cover-main">
+						<div class="cover-mark reveal" style="--d:0">AGENTIC RESEARCH VAULT</div>
+						<h1 class="reveal" style="--d:1">让论文、代码与证据<br>在本地持续协作</h1>
+						<p class="cover-copy reveal" style="--d:2">一个以 Obsidian 为知识界面、Codex 为执行引擎、Skill 为边界协议的科学研究操作中心。</p>
+					</div>
+					<div class="cover-stats">
+						<div class="cover-stat reveal" style="--d:3"><strong class="cyan">167</strong><span>Markdown 知识资产</span></div>
+						<div class="cover-stat reveal" style="--d:4"><strong class="lime">993</strong><span>Wikilink 连接</span></div>
+						<div class="cover-stat reveal" style="--d:5"><strong class="red">97</strong><span>知识库健康分</span></div>
+						<div class="cover-meta reveal" style="--d:6">LOCAL-FIRST · EVIDENCE-AWARE · ACTIONABLE</div>
+					</div>
+				</section>
+
+				<section class="slide" data-title="为什么需要操作中心">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">01 / WHY</div><div class="slide-title-wrap"><h2 class="slide-title">研究工作的问题，不是信息少，而是上下文断裂</h2><p class="slide-lead">论文、代码、笔记、任务与证据分散在不同工具里，真正昂贵的是反复恢复上下文。</p></div></header>
+					<div class="slide-body friction-layout">
+						<p class="big-thesis reveal" style="--d:1">把“找资料、读论文、解释代码、维护笔记”从零散动作，变成一条<em>可追踪执行链</em>。</p>
+						<div class="friction-list">
+							<div class="friction-row reveal" style="--d:2"><svg class="icon"><use href="#i-file"/></svg><strong>论文孤岛</strong><span>元数据、全文、结论和图表证据缺少统一深度标记。</span></div>
+							<div class="friction-row reveal" style="--d:3"><svg class="icon"><use href="#i-code"/></svg><strong>脚本孤岛</strong><span>多个脚本属于同一项目，却没有入口、依赖和数据流关系。</span></div>
+							<div class="friction-row reveal" style="--d:4"><svg class="icon"><use href="#i-network"/></svg><strong>知识孤岛</strong><span>新加入的代码节点，无法自动发现缺失的方法与概念枢纽。</span></div>
+							<div class="friction-row reveal" style="--d:5"><svg class="icon"><use href="#i-shield"/></svg><strong>维护盲区</strong><span>断链、孤立页、证据深度与导出状态需要持续检查。</span></div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>AGENT DASHBOARD</span><span>从信息管理走向研究执行</span></footer>
+				</section>
+
+				<section class="slide" data-title="分层架构">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">02 / ARCHITECTURE</div><div class="slide-title-wrap"><h2 class="slide-title">本地优先，分层拥有，Skill 负责边界</h2><p class="slide-lead">每种文件由明确阶段拥有：路由只选路，执行由专门 Skill 完成。</p></div></header>
+					<div class="slide-body architecture">
+						<div class="layer-stack">
+							<div class="layer reveal" style="--d:1;--layer-color:var(--red)"><span class="layer-index">L5 · CONTROL</span><strong>Agent Dashboard</strong><span>状态、任务、缺口、模型</span><svg class="icon"><use href="#i-scan"/></svg></div>
+							<div class="layer reveal" style="--d:2;--layer-color:var(--cyan)"><span class="layer-index">L4 · EXECUTION</span><strong>Codex + Skills</strong><span>路由、边界、交接</span><svg class="icon"><use href="#i-brain"/></svg></div>
+							<div class="layer reveal" style="--d:3;--layer-color:var(--blue)"><span class="layer-index">L3 · KNOWLEDGE</span><strong>Obsidian Wiki</strong><span>source / method / code / synthesis</span><svg class="icon"><use href="#i-network"/></svg></div>
+							<div class="layer reveal" style="--d:4;--layer-color:var(--lime)"><span class="layer-index">L2 · TOOLING</span><strong>Tool Library</strong><span>模板、脚本、转换、报告</span><svg class="icon"><use href="#i-terminal"/></svg></div>
+							<div class="layer reveal" style="--d:5;--layer-color:var(--amber)"><span class="layer-index">L1 · SOURCE</span><strong>Raw Evidence</strong><span>PDF、网页、BibTeX、数据</span><svg class="icon"><use href="#i-database"/></svg></div>
+						</div>
+						<aside class="arch-rule reveal" style="--d:3">
+							<p class="quote">“写入应由拥有该文件类型的 Skill 执行。”</p>
+							<ul><li>metadata-only 不生成论文结论</li><li>abstract-level 不冒充全文深读</li><li>只有完整证据检查才能标记 x-ray</li><li>高影响修复先报告，不批量删除</li></ul>
+						</aside>
+					</div>
+					<footer class="slide-foot"><span>BOUNDARY-DRIVEN DESIGN</span><span>目录结构就是执行协议</span></footer>
+				</section>
+
+				<section class="slide" data-title="操作入口">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">03 / ACTIONS</div><div class="slide-title-wrap"><h2 class="slide-title">8 个入口，统一成一个研究操作平面</h2><p class="slide-lead">AI 工作、本地确定性检查和交互式练习共享任务状态、运行日志与结果回看。</p></div></header>
+					<div class="slide-body action-layout">
+						<div class="action-matrix">
+							<div class="action-tile ai reveal" style="--d:1"><svg class="icon"><use href="#i-file"/></svg><div><strong>文献入库</strong><small>身份、元数据、去重</small></div></div>
+							<div class="action-tile ai reveal" style="--d:2"><svg class="icon"><use href="#i-scan"/></svg><div><strong>PDF 深读</strong><small>全文、图表、证据链</small></div></div>
+							<div class="action-tile ai reveal" style="--d:3"><svg class="icon"><use href="#i-code"/></svg><div><strong>代码分析</strong><small>入口、依赖、数据流</small></div></div>
+							<div class="action-tile local reveal" style="--d:4"><svg class="icon"><use href="#i-terminal"/></svg><div><strong>代码练习</strong><small>Python / R 单元格</small></div></div>
+							<div class="action-tile ai reveal" style="--d:2"><svg class="icon"><use href="#i-search"/></svg><div><strong>知识库检索</strong><small>只读、vault-grounded</small></div></div>
+							<div class="action-tile ai reveal" style="--d:3"><svg class="icon"><use href="#i-layers"/></svg><div><strong>综合分析</strong><small>方法、概念、MOC</small></div></div>
+							<div class="action-tile local reveal" style="--d:4"><svg class="icon"><use href="#i-shield"/></svg><div><strong>知识库体检</strong><small>确定性审计 + AI 修复</small></div></div>
+							<div class="action-tile local reveal" style="--d:5"><svg class="icon"><use href="#i-package"/></svg><div><strong>OKF 导出</strong><small>开放知识包</small></div></div>
+						</div>
+						<div class="execution-legend">
+							<div class="execution-number reveal" style="--d:1"><strong>8<span class="red">+1</span></strong><span>可见操作 + 上下文修复</span></div>
+							<div class="legend-row cyan reveal" style="--d:2"><i class="legend-dot"></i><div><strong>AI 任务</strong><span>调用 Skill，在边界内读写或回答。</span></div></div>
+							<div class="legend-row lime reveal" style="--d:3"><i class="legend-dot"></i><div><strong>本地任务</strong><span>Python/R 确定性执行，不消耗模型。</span></div></div>
+							<div class="legend-row red reveal" style="--d:4"><i class="legend-dot"></i><div><strong>上下文动作</strong><span>体检结果与知识缺口直接转为任务。</span></div></div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>ONE CONTROL PLANE</span><span>操作可执行，结果可回看</span></footer>
+				</section>
+
+				<section class="slide" data-title="模型路由">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">04 / MODEL ROUTING</div><div class="slide-title-wrap"><h2 class="slide-title">模型不是全局开关，而是三层运行策略</h2><p class="slide-lead">能力、推理强度与速度分开配置，既保持默认稳定，也允许单次任务覆盖。</p></div></header>
+					<div class="slide-body model-layout">
+						<div class="model-levels">
+							<div class="model-level cyan reveal" style="--d:1"><span class="model-level-num">01</span><div><strong>全局默认</strong><p>未单独配置的动作继承 Terra。</p></div></div>
+							<div class="model-level lime reveal" style="--d:2"><span class="model-level-num">02</span><div><strong>按钮默认</strong><p>PDF 深读、代码分析、综合分析使用 Sol。</p></div></div>
+							<div class="model-level red reveal" style="--d:3"><span class="model-level-num">03</span><div><strong>运行时覆盖</strong><p>仅影响本次任务，不污染持久配置。</p></div></div>
+						</div>
+						<div>
+							<div class="model-table reveal" style="--d:2">
+								<div class="model-row"><strong>GPT-5.6-Terra</strong><span>均衡 / 检索 / 修复</span><code>global</code></div>
+								<div class="model-row"><strong>GPT-5.6-Sol</strong><span>深读 / 综合 / 高性能代码</span><code>high ability</code></div>
+								<div class="model-row"><strong>GPT-5.3-Codex-Spark</strong><span>快速代码任务</span><code>fast code</code></div>
+							</div>
+							<div class="speed-line reveal" style="--d:4"><span>推理：low → medium → high → xhigh</span><div class="speed-track"></div><span>速度：标准 / 快速</span></div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>MODEL-AWARE EXECUTION</span><span>复杂度决定能力，任务决定成本</span></footer>
+				</section>
+
+				<section class="slide" data-title="知识缺口闭环">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">05 / KNOWLEDGE LOOP</div><div class="slide-title-wrap"><h2 class="slide-title">知识缺口不再是提醒，而是下一步操作</h2><p class="slide-lead">系统从代码页、来源笔记和导出状态中识别缺口，再自动对接拥有该文件类型的操作。</p></div></header>
+					<div class="slide-body gap-layout">
+						<div class="gap-example reveal" style="--d:1"><span class="gap-type">方法</span><strong class="gap-title">待建方法页：marker 基因可视化</strong><span class="severity">中</span><button class="process-button" type="button" tabindex="-1"><svg class="icon icon-sm"><use href="#i-arrow-right"/></svg>处理</button></div>
+						<div class="flow-line">
+							<div class="flow-node reveal" style="--d:2"><svg class="icon"><use href="#i-search"/></svg><strong>识别缺口</strong><span>缺少方法枢纽、待 x-ray、OKF 过期</span></div>
+							<div class="flow-node reveal" style="--d:3"><svg class="icon"><use href="#i-play"/></svg><strong>点击处理</strong><span>自动选择综合分析、PDF 深读或导出</span></div>
+							<div class="flow-node reveal" style="--d:4"><svg class="icon"><use href="#i-brain"/></svg><strong>选择配置</strong><span>模型、推理强度、标准/快速</span></div>
+							<div class="flow-node reveal" style="--d:5"><svg class="icon"><use href="#i-layers"/></svg><strong>Skill 执行</strong><span>按文件所有权写入方法页或 source note</span></div>
+							<div class="flow-node reveal" style="--d:6"><svg class="icon"><use href="#i-git"/></svg><strong>同步关系</strong><span>更新索引、反链、日志和证据标签</span></div>
+							<div class="flow-node reveal" style="--d:7"><svg class="icon"><use href="#i-check"/></svg><strong>缺口消失</strong><span>下一次扫描自动反映完成状态</span></div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>DETECT → ROUTE → WRITE → VERIFY</span><span>让知识图谱持续自我连接</span></footer>
+				</section>
+
+				<section class="slide" data-title="代码练习">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">06 / CODE PRACTICE</div><div class="slide-title-wrap"><h2 class="slide-title">像 Notebook 一样逐格练习，但每次运行都可解释</h2><p class="slide-lead">Python / R 单元格采用无状态累计重放：新进程执行前置代码，结果逐格呈现并可保存为知识笔记。</p></div></header>
+					<div class="slide-body notebook-layout">
+						<div class="notebook reveal" style="--d:1">
+							<div class="notebook-top"><strong>R 练习 · marker expression</strong><div class="runtime-dots"><span></span><span></span><span></span></div></div>
+							<div class="cell"><div class="cell-prompt">In [1]:</div><div class="cell-main"><pre>values &lt;- c(1.2, 3.8, 2.6, 4.4)</pre></div></div>
+							<div class="cell"><div class="cell-prompt">In [2]:</div><div class="cell-main"><pre>mean(values)</pre><pre class="cell-output">[1] 3</pre></div></div>
+							<div class="cell"><div class="cell-prompt">In [3]:</div><div class="cell-main"><pre>plot(values, type = "b", col = "#27d7e7")</pre><pre class="cell-output">✓ 图形输出已捕获</pre></div></div>
+						</div>
+						<div class="notebook-features">
+							<div class="notebook-feature reveal" style="--d:2"><svg class="icon"><use href="#i-refresh"/></svg><div><strong>无状态累计重放</strong><span>避免隐藏会话状态，让单元格依赖更清楚。</span></div></div>
+							<div class="notebook-feature reveal" style="--d:3"><svg class="icon"><use href="#i-keyboard"/></svg><div><strong>Ctrl + Enter</strong><span>运行当前单元格，支持新增、排序与删除。</span></div></div>
+							<div class="notebook-feature reveal" style="--d:4"><svg class="icon"><use href="#i-terminal"/></svg><div><strong>Python + R</strong><span>标准输出、标准错误、退出码和耗时分开显示。</span></div></div>
+							<div class="notebook-feature reveal" style="--d:5"><svg class="icon"><use href="#i-save"/></svg><div><strong>保存为笔记</strong><span>练习目标、代码、输出与关联页面进入 vault。</span></div></div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>REPLAYABLE · EXPLAINABLE · SAVEABLE</span><span>从一次练习到可复用知识</span></footer>
+				</section>
+
+				<section class="slide" data-title="质量治理">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">07 / QUALITY</div><div class="slide-title-wrap"><h2 class="slide-title">确定性体检守住结构，AI 只处理需要判断的部分</h2><p class="slide-lead">体检先给出可复现报告；用户确认后，AI 才提出方案并执行低风险修复。</p></div></header>
+					<div class="slide-body quality-layout">
+						<div class="score-ring reveal" style="--d:1"><div class="score-value"><strong>97</strong><span>VAULT HEALTH</span></div></div>
+						<div>
+							<div class="quality-metrics">
+								<div class="quality-metric reveal" style="--d:2;--metric-color:var(--lime)"><strong>0</strong><span>错误</span></div>
+								<div class="quality-metric reveal" style="--d:3;--metric-color:var(--amber)"><strong>2</strong><span>警告</span></div>
+								<div class="quality-metric reveal" style="--d:4;--metric-color:var(--cyan)"><strong>6</strong><span>信息项</span></div>
+							</div>
+							<div class="coverage-bars">
+								<div class="coverage-row reveal" style="--d:3"><span>来源笔记</span><div class="bar"><i style="--w:100%;--bar-color:var(--cyan)"></i></div><strong>67</strong></div>
+								<div class="coverage-row reveal" style="--d:4"><span>x-ray 深读</span><div class="bar"><i style="--w:45%;--bar-color:var(--red)"></i></div><strong>30</strong></div>
+								<div class="coverage-row reveal" style="--d:5"><span>代码说明页</span><div class="bar"><i style="--w:46%;--bar-color:var(--lime)"></i></div><strong>31</strong></div>
+								<div class="coverage-row reveal" style="--d:6"><span>Wikilink</span><div class="bar"><i style="--w:88%;--bar-color:var(--amber)"></i></div><strong>993</strong></div>
+							</div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>LINT FIRST · REPAIR WITH CONSENT</span><span>高影响项目只报告，不自动处理</span></footer>
+				</section>
+
+				<section class="slide" data-title="开放知识格式">
+					<header class="slide-head reveal" style="--d:0"><div class="slide-index">08 / INTEROPERABILITY</div><div class="slide-title-wrap"><h2 class="slide-title">知识库不是封闭助手记忆，而是可导出的研究资产</h2><p class="slide-lead">OKF 导出把本地 wikilink、属性和概念节点转换为可交换的开放知识包。</p></div></header>
+					<div class="slide-body okf-layout">
+						<div>
+							<div class="okf-statement reveal" style="--d:1">本地可控，<br><span>外部可交换。</span></div>
+							<p class="okf-copy reveal" style="--d:2">源笔记继续由 Obsidian 管理；导出器生成时间戳 bundle，不修改原始页面，不复制附件，并保留一致性检查结果。</p>
+							<div class="okf-stats">
+								<div class="okf-stat reveal" style="--d:3"><strong class="lime">PASS</strong><span>Conformance</span></div>
+								<div class="okf-stat reveal" style="--d:4"><strong>144</strong><span>导出概念</span></div>
+								<div class="okf-stat reveal" style="--d:5"><strong class="cyan">0</strong><span>未解析链接</span></div>
+							</div>
+						</div>
+						<div class="export-map reveal" style="--d:2">
+							<div class="export-core"><span>OKF</span></div>
+							<div class="export-node n1">source notes</div><div class="export-node n2">methods</div><div class="export-node n3">code pages</div><div class="export-node n4">synthesis</div>
+						</div>
+					</div>
+					<footer class="slide-foot"><span>OPEN KNOWLEDGE FORMAT</span><span>Obsidian 是工作界面，OKF 是交换接口</span></footer>
+				</section>
+
+				<section class="slide final-slide" data-title="结语">
+					<div class="final-main">
+						<h2 class="reveal" style="--d:0">从“保存笔记”<br>走向“运行知识库”</h2>
+						<p class="reveal" style="--d:1">这套系统的核心不是更多按钮，而是让证据、代码、方法和维护工作进入同一套可追踪、可审计、可扩展的执行协议。</p>
+						<div class="roadmap">
+							<div class="roadmap-item reveal" style="--d:2;--roadmap-color:var(--cyan)"><strong>更深的证据</strong><span>全文图表与来源链</span></div>
+							<div class="roadmap-item reveal" style="--d:3;--roadmap-color:var(--lime)"><strong>更强的关联</strong><span>缺口驱动知识闭环</span></div>
+							<div class="roadmap-item reveal" style="--d:4;--roadmap-color:var(--red)"><strong>更开放的资产</strong><span>OKF 与外部协作</span></div>
+						</div>
+					</div>
+					<div class="final-foot reveal" style="--d:5"><strong>Agentic Research Vault</strong><span>OBSIDIAN × CODEX × SKILLS</span></div>
+				</section>
+			</main>
+		</div>
+	</div>
+
+	<div class="key-hint">← → 翻页 · F 全屏</div>
+	<nav class="presentation-controls" aria-label="演示控制">
+		<button class="control-button" id="prev" type="button" title="上一页" aria-label="上一页"><svg class="icon"><use href="#i-arrow-left"/></svg></button>
+		<div class="page-counter" id="counter">01 / 09</div>
+		<button class="control-button" id="next" type="button" title="下一页" aria-label="下一页"><svg class="icon"><use href="#i-arrow-right"/></svg></button>
+		<button class="control-button" id="fullscreen" type="button" title="全屏播放" aria-label="全屏播放"><svg class="icon"><use href="#i-maximize"/></svg></button>
+	</nav>
+	<div class="progress-track"><div class="progress-bar" id="progress"></div></div>
+
+	<script>
+		(() => {
+			const DESIGN_W = 1600;
+			const DESIGN_H = 900;
+			const slides = [...document.querySelectorAll('.slide')];
+			const counter = document.querySelector('#counter');
+			const progress = document.querySelector('#progress');
+			const prev = document.querySelector('#prev');
+			const next = document.querySelector('#next');
+			const fullscreen = document.querySelector('#fullscreen');
+			let index = 0;
+			let pointerStart = null;
+
+			function fitStage() {
+				const scale = Math.min(window.innerWidth / DESIGN_W, window.innerHeight / DESIGN_H);
+				document.documentElement.style.setProperty('--scale', String(scale));
+			}
+
+			function showSlide(nextIndex, updateHash = true) {
+				index = Math.max(0, Math.min(slides.length - 1, nextIndex));
+				slides.forEach((slide, slideIndex) => {
+					slide.classList.toggle('is-active', slideIndex === index);
+					slide.classList.toggle('is-before', slideIndex < index);
+					slide.setAttribute('aria-hidden', slideIndex === index ? 'false' : 'true');
+				});
+				counter.textContent = `${String(index + 1).padStart(2, '0')} / ${String(slides.length).padStart(2, '0')}`;
+				progress.style.width = `${((index + 1) / slides.length) * 100}%`;
+				prev.disabled = index === 0;
+				next.disabled = index === slides.length - 1;
+				document.title = `${slides[index].dataset.title} · Agentic Research Vault`;
+				if (updateHash) history.replaceState(null, '', `#${index + 1}`);
+			}
+
+			function step(delta) { showSlide(index + delta); }
+			prev.addEventListener('click', () => step(-1));
+			next.addEventListener('click', () => step(1));
+			fullscreen.addEventListener('click', async () => {
+				try {
+					if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+					else await document.exitFullscreen();
+				} catch (error) {
+					console.warn('Fullscreen is not available in this browser context.', error);
+				}
+			});
+
+			document.addEventListener('keydown', (event) => {
+				if (['ArrowRight', 'PageDown', ' '].includes(event.key)) { event.preventDefault(); step(1); }
+				if (['ArrowLeft', 'PageUp'].includes(event.key)) { event.preventDefault(); step(-1); }
+				if (event.key === 'Home') { event.preventDefault(); showSlide(0); }
+				if (event.key === 'End') { event.preventDefault(); showSlide(slides.length - 1); }
+				if (event.key.toLowerCase() === 'f') fullscreen.click();
+			});
+
+			document.addEventListener('pointerdown', (event) => { pointerStart = { x: event.clientX, y: event.clientY }; });
+			document.addEventListener('pointerup', (event) => {
+				if (!pointerStart) return;
+				const dx = event.clientX - pointerStart.x;
+				const dy = event.clientY - pointerStart.y;
+				pointerStart = null;
+				if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy)) step(dx < 0 ? 1 : -1);
+			});
+
+			window.addEventListener('resize', fitStage);
+			window.addEventListener('hashchange', () => {
+				const hashIndex = Number(location.hash.slice(1)) - 1;
+				if (Number.isInteger(hashIndex)) showSlide(hashIndex, false);
+			});
+
+			fitStage();
+			const initial = Number(location.hash.slice(1)) - 1;
+			showSlide(Number.isInteger(initial) ? initial : 0, false);
+		})();
+	</script>
+</body>
+</html>

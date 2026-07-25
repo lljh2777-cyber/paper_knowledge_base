@@ -117,10 +117,20 @@ stage. Do not perform first-pass source intake or conversion.
         "instructions": """
 Use the `research-vault-lint` skill. Read
 `tool-library/output/lint/latest.json` as the repair scope. Before editing,
-inspect every finding and form a concise repair plan. Apply only findings that
-are explicitly marked `fixable: true` and that remain low risk after direct
-inspection of the target file. Preserve scientific meaning, evidence depth,
-frontmatter schema, filenames, and page taxonomy.
+inspect every finding and form a concise repair plan. Treat `fixable: true` as
+a deterministic auto-fix hint, not as the authorization boundary for this AI
+repair action. A finding marked `fixable: false` may still be repaired when
+direct inspection proves that the change is local, reversible, structural, and
+low risk. Preserve scientific meaning, evidence depth, frontmatter schema,
+filenames, and page taxonomy.
+
+Examples of permitted low-risk repairs include adding a required frontmatter
+key with an empty value when the true value is unknown, adding an existing page
+to a missing index using that index's current format, and replacing a broken
+wikilink with the verified canonical target without changing its meaning.
+Never invent a metadata value merely to clear a finding. Synchronize conflicting
+status or evidence-depth fields only when inspected vault evidence establishes
+which value is authoritative; otherwise defer the finding.
 
 Do not delete files, merge pages, batch rename notes, change schema rules,
 invent missing metadata, rewrite scientific claims, run analyzed project code,

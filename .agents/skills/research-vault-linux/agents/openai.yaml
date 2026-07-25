@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linux 与命令行"
+  short_description: "维护易懂且示例完整的 Linux、Shell 与生信工具知识笔记"
+  default_prompt: "使用 $research-vault-linux 创建一篇术语解释清楚、完整展示输入与输出并标注验证等级的 Linux 与命令行笔记。"

@@ -17,6 +17,46 @@ const { spawn } = require("child_process");
 
 const VIEW_TYPE = "agent-dashboard-research-vault";
 const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
+const LEGACY_CODEX_EXECUTABLE = "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
+const MANAGED_CODEX_BIN_ROOT = path.join(process.env.LOCALAPPDATA || "", "OpenAI", "Codex", "bin");
+
+function findPreferredCodexExecutable() {
+	const candidates = new Set();
+	if (process.env.CODEX_CLI_PATH) candidates.add(process.env.CODEX_CLI_PATH);
+	if (fs.existsSync(MANAGED_CODEX_BIN_ROOT)) {
+		const direct = path.join(MANAGED_CODEX_BIN_ROOT, "codex.exe");
+		if (fs.existsSync(direct)) candidates.add(direct);
+		try {
+			fs.readdirSync(MANAGED_CODEX_BIN_ROOT, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory())
+				.forEach((entry) => {
+					const executable = path.join(MANAGED_CODEX_BIN_ROOT, entry.name, "codex.exe");
+					if (fs.existsSync(executable)) candidates.add(executable);
+				});
+		} catch (error) {
+			console.warn("Agent Dashboard could not scan the managed Codex CLI directory", error);
+		}
+	}
+	if (fs.existsSync(LEGACY_CODEX_EXECUTABLE)) candidates.add(LEGACY_CODEX_EXECUTABLE);
+	return [...candidates]
+		.map((executable) => {
+			try {
+				return { executable, mtime: fs.statSync(executable).mtimeMs };
+			} catch {
+				return { executable, mtime: 0 };
+			}
+		})
+		.sort((a, b) => b.mtime - a.mtime)[0]?.executable || LEGACY_CODEX_EXECUTABLE;
+}
+
+function isManagedCodexExecutable(executable) {
+	if (!executable) return false;
+	const normalized = path.resolve(executable).toLowerCase();
+	const legacy = path.resolve(LEGACY_CODEX_EXECUTABLE).toLowerCase();
+	const managedRoot = path.resolve(MANAGED_CODEX_BIN_ROOT).toLowerCase();
+	return normalized === legacy || normalized === managedRoot || normalized.startsWith(`${managedRoot}${path.sep}`);
+}
+
 const MODEL_OPTIONS = [
 	{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
 	{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
@@ -30,7 +70,7 @@ const REASONING_OPTIONS = [
 ];
 const DEFAULT_SETTINGS = {
 	projectRoot: "",
-	codexExecutable: "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+	codexExecutable: findPreferredCodexExecutable(),
 	codexModel: "gpt-5.6-terra",
 	codexReasoningEffort: "medium",
 	pythonExecutable: "D:\\python\\python.exe",
@@ -204,7 +244,7 @@ class DashboardDataService {
 					unit: "",
 					tone: healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
 					detail: lintSummary
-						? `${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告，${lintSummary.fixable} 个修复候选`
+						? `${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告，${Number(lintSummary.errors || 0) + Number(lintSummary.warnings || 0)} 个待处理项`
 						: `${linkReport.broken.length} 个断链，${missingFrontmatter} 个缺失属性区；体检报告待更新`,
 				},
 				{
@@ -495,7 +535,13 @@ class DashboardDataService {
 			}
 		}
 		for (const title of Array.from(methodCandidates).slice(0, 4)) {
-			gaps.push({ type: "method", title: `待建方法页：${title}`, severity: "medium" });
+			gaps.push({
+				type: "method",
+				title: `待建方法页：${title}`,
+				severity: "medium",
+				actionId: "synthesis",
+				actionInput: this.buildMethodGapInput(title),
+			});
 		}
 		const needXray = sourceRecords
 			.filter((record) => {
@@ -506,24 +552,54 @@ class DashboardDataService {
 			.sort((a, b) => b.mtime - a.mtime)
 			.slice(0, 3);
 		for (const record of needXray) {
-			gaps.push({ type: "paper", title: `待 x-ray 深读：${record.frontmatter.title || record.name}`, severity: "high" });
+			const title = record.frontmatter.title || record.name;
+			gaps.push({
+				type: "paper",
+				title: `待 x-ray 深读：${title}`,
+				severity: "high",
+				actionId: "pdf-xray",
+				actionInput: this.buildPaperGapInput(record, title),
+			});
 		}
 		if (!records.some((record) => record.path.startsWith("wiki/methods/single-cell-rna-seq"))) {
-			gaps.push({ type: "method", title: "缺少 Single-cell RNA-seq 方法枢纽", severity: "high" });
+			const title = "Single-cell RNA-seq";
+			gaps.push({
+				type: "method",
+				title: `缺少 ${title} 方法枢纽`,
+				severity: "high",
+				actionId: "synthesis",
+				actionInput: this.buildMethodGapInput(title),
+			});
 		}
 		const okfStatus = this.plugin.getOkfExportStatus();
 		if (!okfStatus.exporterAvailable) {
-			gaps.push({ type: "okf", title: "OKF 导出器不可用", severity: "high" });
+			gaps.push({ type: "okf", title: "OKF 导出器不可用", severity: "high", actionId: "okf-export" });
 		} else if (okfStatus.error) {
-			gaps.push({ type: "okf", title: "OKF 最近导出状态无法读取", severity: "high" });
+			gaps.push({ type: "okf", title: "OKF 最近导出状态无法读取", severity: "high", actionId: "okf-export" });
 		} else if (!okfStatus.latest) {
-			gaps.push({ type: "okf", title: "尚未生成 OKF bundle", severity: "medium" });
+			gaps.push({ type: "okf", title: "尚未生成 OKF bundle", severity: "medium", actionId: "okf-export" });
 		} else if (!okfStatus.latest.conformant) {
-			gaps.push({ type: "okf", title: "最近的 OKF bundle 未通过 conformance", severity: "high" });
+			gaps.push({ type: "okf", title: "最近的 OKF bundle 未通过 conformance", severity: "high", actionId: "okf-export" });
 		} else if (Number(okfStatus.latest.unresolved_link_count || 0) > 0) {
-			gaps.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium" });
+			gaps.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium", actionId: "okf-export" });
 		}
 		return gaps.slice(0, 6);
+	}
+
+	buildMethodGapInput(title) {
+		return [
+			`处理知识缺口：创建或更新“${title}”方法页。`,
+			"请使用 research-vault-synthesis 检查现有 source note、代码笔记、方法页和索引，基于已有证据建立规范的方法枢纽。",
+			"关联相关文献与代码页面，区分 vault 证据、一般背景和未解决缺口；同步更新研究方法索引与日志。",
+		].join("\n");
+	}
+
+	buildPaperGapInput(record, title) {
+		return [
+			`处理知识缺口：对“${title}”执行全文 x-ray 深读。`,
+			`Source note：knowledge-base/${record.path}`,
+			"请定位对应 PDF 或全文，检查方法、图表、数据/材料、关键结论、局限性和证据链。只有完成全文证据检查后才能升级为 x-ray；若全文不可用，请记录证据缺口并保持当前深度。",
+		].join("\n");
 	}
 
 	computeCoverage(methodRecords, synthesisRecords, knowledgeGaps) {
@@ -669,11 +745,12 @@ class DashboardDataService {
 }
 
 class ActionInputModal extends Modal {
-	constructor(app, plugin, action, onSubmit) {
+	constructor(app, plugin, action, onSubmit, options = {}) {
 		super(app);
 		this.plugin = plugin;
 		this.action = action;
 		this.onSubmit = onSubmit;
+		this.initialInput = typeof options.initialInput === "string" ? options.initialInput : "";
 	}
 
 	onOpen() {
@@ -700,6 +777,7 @@ class ActionInputModal extends Modal {
 					"aria-label": `${this.action.label}任务说明`,
 				},
 			});
+			input.value = this.initialInput;
 		}
 
 		const controls = this.action.ai ? this.renderExecutionControls(contentEl) : null;
@@ -711,7 +789,7 @@ class ActionInputModal extends Modal {
 			text: "开始执行",
 		});
 		submit.type = "button";
-		submit.disabled = this.action.requiresInput;
+		submit.disabled = this.action.requiresInput && !this.initialInput.trim();
 
 		const syncSubmitState = () => {
 			submit.disabled = this.action.requiresInput && (!input || input.value.trim().length === 0);
@@ -899,7 +977,7 @@ class TaskResultModal extends Modal {
 				cls: "mod-warning",
 				text: "提出方案并修复",
 				attr: {
-					title: "AI 将仅自动处理体检报告中的低风险修复候选，并在修改后重新体检",
+					title: "AI 将逐项核验体检结果，处理确认属于低风险的结构问题，并在修改后重新体检",
 				},
 			});
 			repair.type = "button";
@@ -914,12 +992,20 @@ class TaskResultModal extends Modal {
 	}
 
 	canRepair() {
-		if (this.run.actionId !== "vault-lint" || this.run.status !== "done" || typeof this.onRepair !== "function") {
+		if (this.run.actionId !== "vault-lint" || typeof this.onRepair !== "function") {
 			return false;
 		}
+		const completedWithReport = this.run.status === "done"
+			|| (
+				this.run.status === "failed"
+				&& this.run.exitCode === 1
+				&& String(this.run.output || "").includes("Vault lint: score")
+			);
+		if (!completedWithReport) return false;
 		if (this.plugin.isActionRunning("vault-lint-fix")) return false;
 		const lintStatus = this.plugin.getLintStatus();
-		return Boolean(lintStatus.latest?.summary?.fixable > 0);
+		const summary = lintStatus.latest?.summary;
+		return Boolean(summary && (Number(summary.errors || 0) + Number(summary.warnings || 0) > 0));
 	}
 
 	displayStatus(status) {
@@ -1802,11 +1888,40 @@ class DashboardView extends ItemView {
 
 	renderKnowledgeGapsList(parent) {
 		parent.empty();
-		this.data.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap)).forEach((gap) => {
-			const row = parent.createEl("article", { cls: "agent-dashboard-data-row" });
+		const visibleGaps = this.data.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
+		if (visibleGaps.length === 0) {
+			parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有待处理的知识缺口。" });
+			return;
+		}
+		visibleGaps.forEach((gap) => {
+			const row = parent.createEl("article", { cls: "agent-dashboard-data-row agent-dashboard-gap-row" });
 			row.createSpan({ cls: "agent-dashboard-row-type", text: this.displayGapType(gap.type) });
 			row.createSpan({ cls: "agent-dashboard-row-title", text: gap.title });
 			row.createSpan({ cls: `agent-dashboard-severity-badge agent-dashboard-severity-${gap.severity}`, text: this.displaySeverity(gap.severity) });
+			this.renderKnowledgeGapAction(row, gap);
+		});
+	}
+
+	renderKnowledgeGapAction(parent, gap) {
+		const action = ACTION_BY_ID.get(gap.actionId);
+		const button = parent.createEl("button", {
+			cls: "agent-dashboard-gap-action",
+			attr: {
+				"aria-label": action ? `处理知识缺口：${gap.title}，使用${action.label}` : `无法处理知识缺口：${gap.title}`,
+				title: action ? `使用“${action.label}”处理` : "尚未配置对应操作",
+			},
+		});
+		button.type = "button";
+		button.disabled = !action || !action.enabled || this.plugin.isActionRunning(action.id);
+		if (action && this.plugin.isActionRunning(action.id)) button.addClass("is-running");
+		setIcon(button.createSpan({ cls: "agent-dashboard-gap-action-icon" }), action?.id === "okf-export" ? "package-open" : "arrow-right");
+		button.createSpan({ text: action && this.plugin.isActionRunning(action.id) ? "处理中" : "处理" });
+		this.registerDomEvent(button, "click", () => {
+			if (!action) {
+				new Notice("该知识缺口尚未配置对应操作");
+				return;
+			}
+			this.openAction(action, { initialInput: gap.actionInput || "" });
 		});
 	}
 
@@ -1852,7 +1967,7 @@ class DashboardView extends ItemView {
 		}, 900);
 	}
 
-	openAction(action) {
+	openAction(action, options = {}) {
 		if (!action.enabled) {
 			new Notice(`${action.label}将在后续阶段接入`);
 			return;
@@ -1868,7 +1983,7 @@ class DashboardView extends ItemView {
 		if (action.ai || action.requiresInput) {
 			new ActionInputModal(this.app, this.plugin, action, ({ input, overrides }) => {
 				void this.executeAction(action, input, overrides);
-			}).open();
+			}, options).open();
 			return;
 		}
 		void this.executeAction(action, "");
@@ -1885,14 +2000,27 @@ class DashboardView extends ItemView {
 		try {
 			const result = await this.plugin.runVaultAction(run.id, action, input, executionConfig);
 			const output = this.formatProcessOutput(result);
-			const status = result.exitCode === 0 ? "done" : "failed";
+			const lintCompletedWithFindings = action.id === "vault-lint"
+				&& result.exitCode === 1
+				&& result.stdout.includes("Vault lint: score");
+			const repairCompletedWithFindings = action.id === "vault-lint-fix"
+				&& result.exitCode === 1
+				&& result.stdout.includes("Post-repair vault lint:");
+			const status = result.exitCode === 0 || lintCompletedWithFindings || repairCompletedWithFindings
+				? "done"
+				: "failed";
 			completedRun = await this.plugin.finishTaskRun(run.id, {
 				status,
 				exitCode: result.exitCode,
 				output,
 				error: status === "failed" ? `进程退出码：${result.exitCode}` : "",
 			});
-			new Notice(status === "done" ? `${action.label}已完成` : `${action.label}执行失败`);
+			const completionMessage = lintCompletedWithFindings
+				? "知识库体检已完成，发现待处理项"
+				: repairCompletedWithFindings
+					? "体检修复已完成，仍有待处理项"
+					: `${action.label}已完成`;
+			new Notice(status === "done" ? completionMessage : `${action.label}执行失败`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			completedRun = await this.plugin.finishTaskRun(run.id, {
@@ -2033,7 +2161,7 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Codex 可执行文件")
-			.setDesc("用于文献、代码、检索和综合任务。插件使用参数数组启动，不经过 shell。")
+			.setDesc("用于文献、代码、检索和综合任务。默认自动选择当前 Codex 应用携带的最新 CLI；手动填写的外部路径会保留。")
 			.addText((text) =>
 				text
 					.setPlaceholder("codex.exe")
@@ -2403,6 +2531,18 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			this.settings.projectRoot = this.inferProjectRoot();
 		}
 		let changed = false;
+		const preferredCodexExecutable = findPreferredCodexExecutable();
+		const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
+		if (
+			!configuredCodexExecutable
+			|| !fs.existsSync(configuredCodexExecutable)
+			|| isManagedCodexExecutable(configuredCodexExecutable)
+		) {
+			if (configuredCodexExecutable !== preferredCodexExecutable) {
+				this.settings.codexExecutable = preferredCodexExecutable;
+				changed = true;
+			}
+		}
 		if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
 			this.settings.codexModel = "gpt-5.6-terra";
 			changed = true;
@@ -2412,6 +2552,15 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			changed = true;
 		}
 		this.taskRuns = this.taskRuns.map((run) => {
+			if (
+				run.actionId === "vault-lint"
+				&& run.status === "failed"
+				&& run.exitCode === 1
+				&& String(run.output || "").includes("Vault lint: score")
+			) {
+				changed = true;
+				return { ...run, status: "done", error: "" };
+			}
 			if (run.status !== "running" && run.status !== "queued") return run;
 			changed = true;
 			return {

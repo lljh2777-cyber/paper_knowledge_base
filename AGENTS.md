@@ -36,11 +36,13 @@ Skill locations:
 %USERPROFILE%\.codex\skills\research-vault-convert\SKILL.md      # PDF/HTML/TeX/OCR to Markdown
 %USERPROFILE%\.codex\skills\research-vault-source-note\SKILL.md  # source note writing and repair
 %USERPROFILE%\.codex\skills\research-vault-xray\SKILL.md         # full-text paper deep reading
+%USERPROFILE%\.codex\skills\analyze-paper-figures\SKILL.md       # focused multi-panel figure evidence analysis
 %USERPROFILE%\.codex\skills\research-vault-retrieval\SKILL.md    # answer from vault evidence
 %USERPROFILE%\.codex\skills\research-vault-synthesis\SKILL.md    # synthesis, MOC, concept/project pages
 %USERPROFILE%\.codex\skills\research-vault-code\SKILL.md         # R/Python code project analysis and code notes
 %USERPROFILE%\.codex\skills\research-vault-lint\SKILL.md         # vault quality audit and repair
 .agents\skills\research-vault-r\SKILL.md                         # R packages, functions, concepts, and reusable recipes
+.agents\skills\research-vault-linux\SKILL.md                     # Linux commands, Shell, CLI recipes, bioinformatics software, and formats
 ```
 
 ## Skill Routing Policy
@@ -51,10 +53,12 @@ Use a skill when the task touches the vault workflow, files, metadata, source no
 - Use `research-vault-convert` for PDF/HTML/TeX/OCR conversion, MarkItDown/PyMuPDF extraction, converted Markdown creation, and conversion quality checks.
 - Use `research-vault-source-note` for creating, rewriting, normalizing, or repairing `knowledge-base/wiki/sources/*.md` source notes.
 - Use `research-vault-xray` for full-text paper reading, figure/table/method/data extraction, evidence strength assessment, and upgrading abstract-level notes into deep-read notes.
+- Use `analyze-paper-figures` within or alongside `research-vault-xray` when the user requests a dedicated figure explanation, or when a central multi-panel figure needs original-resolution inspection, logical panel grouping, or caption/text/method reconciliation.
 - Use `research-vault-retrieval` when the user asks what the vault knows, asks for vault-backed definitions, compares imported papers, checks existing evidence, or asks for conclusions grounded only in `knowledge-base/`.
 - Use `research-vault-synthesis` for cross-paper comparisons, literature maps, MOCs, research projects, concept/method/dataset synthesis pages, and saved gap analyses.
 - Use `research-vault-code` for static analysis of R/Python code projects, script explanation, entrypoint/dependency/input-output mapping, and linked Markdown notes under `knowledge-base/wiki/code/`.
 - Use `research-vault-r` for R package notes, important function or function-family notes, task-oriented R recipes, R language concept notes, and the R knowledge indexes under `knowledge-base/wiki/r/`.
+- Use `research-vault-linux` for Unix command notes, Shell language and execution concepts, command-line recipes, bioinformatics software, operational file formats, and the Linux knowledge indexes under `knowledge-base/wiki/linux/`.
 - Use `research-vault-lint` for broken links, duplicate pages, orphan notes, metadata gaps, index consistency, unsupported claims, workflow boilerplate, encoding damage, and graph/index cleanup.
 
 Do not force a vault skill for a normal explanatory answer that does not depend on vault files. For example, a general explanation of a concept, method, disease, tool, statistical model, or experimental technique can use the model's general knowledge and, when useful or required, web search.
@@ -67,11 +71,13 @@ Keep skill use lightweight and stage-owned. Use the router only to select the ri
 - `research-vault-ingest` owns source identity, metadata, duplicate checks, evidence consistency, and metadata/index/log updates. It must not write paper conclusions.
 - `research-vault-convert` owns conversion to Markdown and conversion quality checks. It must not infer scientific conclusions beyond what the extracted text exposes.
 - `research-vault-source-note` owns `knowledge-base/wiki/sources/*.md` structure, body prose, frontmatter normalization, and source-note repair. It must not pretend abstract-level evidence is full-text deep reading.
-- `research-vault-xray` owns full-text deep reading, evidence chains, figure/table/method/data inspection, and upgrading source notes to `x-ray`.
+- `research-vault-xray` owns full-text deep reading, evidence chains, figure/table/method/data inspection, upgrading source notes to `x-ray`, and embedding claim-bearing main figures into the corresponding source-note sections.
+- `analyze-paper-figures` owns focused figure evidence packets, whole-figure interpretation, logical panel grouping, and requested crop/report assets. It must not independently upgrade a source note to `x-ray` or treat a caption-only reading as figure verification.
 - `research-vault-retrieval` owns vault-grounded answers. It does not write files unless the user explicitly asks to save, update, or maintain results.
 - `research-vault-synthesis` owns cross-paper synthesis, MOCs, concept/method/dataset pages, and project pages. It also owns canonical method/concept hub pages created to connect existing source notes and code notes. It must not do first-pass intake or conversion.
 - `research-vault-code` owns static R/Python code project analysis and `knowledge-base/wiki/code/` pages. Project pages own relationships and data flow; script pages should primarily use selected code snippets followed by explanation. It should link recognized methods/tools to existing method/concept pages and record missing hub pages as handoff candidates, but it must not modify source code, run project code, install dependencies, or turn static reading into runtime claims unless the user explicitly asks for execution.
 - `research-vault-r` owns `knowledge-base/wiki/r/` package, function, recipe, and R-language concept pages plus `R知识索引.md`. It should link existing code pages and method pages without duplicating their project-specific implementation or scientific-method content. It must distinguish documentation checks from locally executed examples and must not install R packages without user confirmation.
+- `research-vault-linux` owns `knowledge-base/wiki/linux/` command, Shell, recipe, software, and format pages plus `Linux与命令行索引.md`. It should link code, method, and R pages without duplicating project-specific implementation or scientific-method content. It must distinguish POSIX/GNU/BSD/BusyBox and Shell environments, record documentation checks separately from local execution, and must not install software or run destructive commands without user confirmation.
 - `research-vault-lint` owns audits and consistency repairs, including code-to-method links, orphan code/method pages, and plain-text method terms that should point to canonical pages. It must report before high-impact fixes and must not bulk-delete files.
 
 Lightweight handoff rules:
@@ -79,8 +85,12 @@ Lightweight handoff rules:
 - `metadata-only` supports metadata, indexes, gaps, and source paths only; do not generate paper conclusions.
 - `abstract-level` supports conservative source-note claims only; do not write it as `x-ray`.
 - Mark or upgrade to `x-ray` only after full-text evidence, methods, figures/tables, data/materials, limitations, and evidence chain have been inspected.
+- For X-Ray work, visually inspect every main claim-bearing figure at usable resolution. For central, complex, or ambiguous multi-panel figures, combine the original figure, full caption, citing paragraphs, and relevant methods; distinguish direct visual observation, author-reported results, and inference.
+- When X-Ray work creates or upgrades a source note, save the claim-bearing main-figure assets under `knowledge-base/wiki/assets/figures/<citekey>/` and embed each image next to its figure-specific explanation. Keep the paper's argumentative order; do not collect all figures into an end-of-note gallery. Extended-data or supplementary figures may remain text-only unless they carry evidence needed for the note's main conclusions.
+- `research-vault-xray` owns the paper-level conclusion and source-note status. `analyze-paper-figures` hands back figure-level findings and owns standalone figure reports or crops only when those outputs are requested or needed to resolve a key evidence ambiguity.
 - File writes should be performed by the skill that owns that file type or workflow stage.
-- When code analysis discovers a recurring method or tool without a hub page, `research-vault-code` records the candidate, `research-vault-synthesis` creates or updates the canonical method/concept page, and `research-vault-lint` later audits missing backlinks or orphan notes.
+- When code analysis discovers a recurring scientific method or concept without a hub page, `research-vault-code` records the candidate, `research-vault-synthesis` creates or updates the canonical method/concept page, and `research-vault-lint` later audits missing backlinks or orphan notes.
+- When code analysis discovers a reusable command, Shell mechanism, command-line software interface, or file-format contract without a hub page, `research-vault-code` records the candidate, `research-vault-linux` creates or updates the canonical Linux page, and `research-vault-lint` later audits missing backlinks or orphan notes.
 - Normal background explanations do not require a vault skill unless the user asks for vault evidence or file updates.
 
 ## Evidence Source Policy
@@ -140,6 +150,7 @@ If a concept/method page mixes evidence types, separate them explicitly:
 - For necessary English technical terms, prefer `中文（English）` on first appearance, then use Chinese or a stable abbreviation by context.
 - Exceptions: original paper titles, official method/software names, gene names, dataset IDs, stable abbreviations, code, paths, URLs, citation keys, and direct quotations.
 - Preserve exact capitalization for English titles. Use reliable sources such as DOI/publisher pages or the paper title page. Do not auto-normalize titles to lowercase, uppercase, or inferred Title Case.
+- Every `knowledge-base/wiki/sources/*.md` note must keep the original paper title in `title` and a reviewed Simplified Chinese translation in `title_zh`. Do not replace `title` or the H1 with the translation. Preserve official method, software, gene, dataset, and model names inside `title_zh` when translation would reduce precision.
 
 ## Processing Depth
 
@@ -154,6 +165,7 @@ Use explicit depth labels in reasoning and outputs:
 - Source note bodies must describe the paper itself.
 - Do not use workflow status as research content. Phrases such as "imported", "not written to Zotero", "batch processed", "converted by MarkItDown", "pending later review", and similar process notes belong in logs, reports, CSV files, field-gap pages, or frontmatter status fields.
 - Source-note bibliographic metadata belongs in YAML frontmatter, `tool-library/metadata/papers.csv`, `tool-library/references.bib`, and index files.
+- Source-note frontmatter requires both `title` and non-empty `title_zh`; place `title_zh` immediately after `title`.
 - Do not create body `## 元数据` sections or field-value metadata tables that duplicate Obsidian properties.
 - Keep the preferred source-note order: `研究问题`, `结论`, then methods/evidence/findings/limitations/links.
 - If the note is only `abstract-level`, state that figure-level details remain unverified.
@@ -193,8 +205,11 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
   研究方法索引.md
   代码项目索引.md
   R知识索引.md
+  Linux与命令行索引.md
   字段补全检查.md
   wiki/
+    assets/
+      figures/           # per-paper figure assets embedded into X-Ray source notes
     sources/            # one note per paper/source
     concepts/           # theories, mechanisms, constructs
     methods/            # methods, models, protocols, statistics
@@ -209,6 +224,12 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
       functions/        # important functions or function families
       recipes/          # task-oriented reusable examples
       concepts/         # R language mechanisms and concepts
+    linux/              # reusable Linux, Shell, CLI, software, and file-format notes
+      commands/         # Unix commands, small languages, and command families
+      shell/            # Shell syntax and execution mechanisms
+      recipes/          # task-oriented command-line workflows
+      software/         # bioinformatics and upstream/downstream CLI software
+      formats/          # operational file-format contracts
     mocs/               # research-area maps
     synthesis/          # cross-paper comparisons and reviews
 ```
@@ -236,12 +257,13 @@ When answering from vault evidence:
 - Update `knowledge-base/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.
 - Update `knowledge-base/代码项目索引.md` and `knowledge-base/wiki/code/index.md` when code project or script pages change materially.
 - Update `knowledge-base/R知识索引.md` and `knowledge-base/wiki/r/index.md` when R package, function, recipe, or R-language concept pages change materially.
+- Update `knowledge-base/Linux与命令行索引.md`, `knowledge-base/wiki/linux/index.md`, and the Linux section of `knowledge-base/wiki/index.md` when command, Shell, recipe, software, or format pages change materially.
 - When a method/concept page is created because code pages exposed a missing hub, link the relevant code project/script pages from that hub and replace obvious plain-text method mentions in project pages with canonical wikilinks when low-risk.
 - Update `knowledge-base/字段补全检查.md` for missing or conflicting DOI, URL, PDF, title capitalization, Zotero keys, BibTeX keys, datasets, or source evidence.
 
 ## Completion Standard
 
-For ingest, conversion, source-note, x-ray, synthesis, code analysis, R-note, or maintenance tasks, finish only after stating:
+For ingest, conversion, source-note, x-ray, synthesis, code analysis, R-note, Linux-note, or maintenance tasks, finish only after stating:
 
 - files created or updated
 - indexes/logs updated or deliberately skipped
