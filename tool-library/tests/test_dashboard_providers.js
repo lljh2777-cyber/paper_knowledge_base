@@ -91,6 +91,36 @@ async function main() {
 		pluginSource.includes('event.key !== "Enter" || event.isComposing'),
 		"provider name Enter handling should preserve IME composition",
 	);
+	assert.ok(pluginSource.includes('.setName("视觉输入")'));
+	assert.ok(pluginSource.includes("visionConfigured"));
+	const migrationPlugin = Object.create(AgentDashboardPlugin.prototype);
+	migrationPlugin.loadData = async () => ({
+		settings: {
+			projectRoot: path.resolve(__dirname, "../.."),
+			providerProfiles: [{
+				id: "provider-qwen",
+				name: "Qwen3.7-Plus",
+				type: "openai-compatible",
+				baseUrl: "https://api.example.test/v1",
+				model: "qwen3.7-plus",
+				capabilities: { streaming: true, pdf: false, vision: false },
+				lastTest: { ok: true },
+			}],
+		},
+		querySessions: [],
+		taskRuns: [],
+	});
+	migrationPlugin.saveData = async () => {};
+	await migrationPlugin.loadSettings();
+	assert.strictEqual(
+		migrationPlugin.settings.providerProfiles[0].capabilities.vision,
+		true,
+		"known Qwen3.7 profiles should migrate to visual input support",
+	);
+	assert.strictEqual(
+		migrationPlugin.settings.providerProfiles[0].capabilities.visionConfigured,
+		false,
+	);
 
 	const profile = {
 		id: "provider-openai",

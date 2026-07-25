@@ -122,6 +122,48 @@ async function testDirectApiQuery() {
 	assert.ok(directRequest.messages.at(-1).content.includes("wiki/methods/example.md"));
 	assert.strictEqual(plugin.directQueryRuns.size, 0);
 
+	profile.name = "Qwen3.7-Plus";
+	profile.model = "qwen3.7-plus";
+	profile.capabilities.vision = true;
+	profile.lastTest.streamingVerified = false;
+	let visionRequest = null;
+	plugin.createLLMProvider = () => ({
+		complete: async (request) => {
+			visionRequest = request;
+			return { text: "图像回答" };
+		},
+	});
+	const imagePath = "wiki/assets/figures/li_cellular_2026/figure-1.png";
+	const visionResult = await plugin.runDirectVaultQuery(
+		"run-vision",
+		profile.id,
+		"分析这张图",
+		[],
+		"vault",
+		{},
+		[{ path: imagePath, name: "figure-1.png" }],
+	);
+	assert.strictEqual(visionResult.stdout, "图像回答");
+	const visionContent = visionRequest.messages.at(-1).content;
+	assert.ok(Array.isArray(visionContent));
+	assert.strictEqual(visionContent[0].type, "image_url");
+	assert.ok(visionContent[0].image_url.url.startsWith("data:image/png;base64,"));
+	assert.strictEqual(visionContent.at(-1).type, "text");
+	assert.ok(visionContent.at(-1).text.includes("实际检查图片像素"));
+	const normalizedVisionSession = plugin.normalizeQuerySession({
+		messages: [{
+			role: "user",
+			content: "分析这张图",
+			attachments: [{ path: imagePath, name: "figure-1.png" }],
+		}],
+	});
+	assert.strictEqual(normalizedVisionSession.messages[0].attachments[0].path, imagePath);
+	assert.ok(!JSON.stringify(normalizedVisionSession).includes("base64"));
+	assert.throws(
+		() => plugin.readVaultImageData({ path: "../outside.png" }),
+		(error) => /超出当前 Vault/.test(error.message),
+	);
+
 	await assert.rejects(
 		() => plugin.runDirectVaultQuery(
 			"run-web",
@@ -220,6 +262,56 @@ async function testDirectApiQuery() {
 	assert.ok(fallbackEvents.some(
 		(event) => event.type === "status" && event.stage === "stream-fallback",
 	));
+
+	const figurePath = "wiki/assets/figures/example/figure-1.png";
+	const unreferencedPath = "wiki/assets/figures/example/figure-2.png";
+	const sourceNote = {
+		path: "wiki/sources/example.md",
+		basename: "example",
+	};
+	const methodNote = {
+		path: "wiki/methods/example-method.md",
+		basename: "example-method",
+	};
+	const filesByPath = new Map([
+		[sourceNote.path, sourceNote],
+		[methodNote.path, methodNote],
+	]);
+	plugin.app = {
+		vault: {
+			getAbstractFileByPath: (value) => filesByPath.get(value) || null,
+			getMarkdownFiles: () => [sourceNote, methodNote],
+		},
+		metadataCache: {
+			resolvedLinks: {
+				[sourceNote.path]: { [figurePath]: 2 },
+			},
+			getFileCache: (file) => {
+				if (file.path === sourceNote.path) {
+					return {
+						frontmatter: { title_zh: "示例论文" },
+						embeds: [{ link: figurePath }, { link: figurePath }],
+					};
+				}
+				return {
+					frontmatter: { title: "Example method" },
+					embeds: [{ link: figurePath }],
+				};
+			},
+			getFirstLinkpathDest: (link) => (
+				link === figurePath ? { path: figurePath } : null
+			),
+		},
+	};
+	const referenceIndex = plugin.buildVaultImageReferenceIndex([
+		{ path: figurePath },
+		{ path: unreferencedPath },
+	]);
+	assert.deepStrictEqual(referenceIndex.get(figurePath), [
+		{ path: sourceNote.path, title: "示例论文", count: 2 },
+		{ path: methodNote.path, title: "Example method", count: 1 },
+	]);
+	assert.deepStrictEqual(referenceIndex.get(unreferencedPath), []);
 }
 
 testDirectApiQuery()
