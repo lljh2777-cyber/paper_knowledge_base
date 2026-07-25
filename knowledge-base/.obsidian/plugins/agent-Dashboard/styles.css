@@ -1465,7 +1465,8 @@
 }
 
 .query-wiki-message-mode,
-.query-wiki-message-backend {
+.query-wiki-message-backend,
+.query-wiki-message-retrieval {
 	display: inline-flex;
 	min-height: 18px;
 	padding: 1px 5px;
@@ -1475,6 +1476,13 @@
 	color: var(--query-faint);
 	font-size: 8px;
 	line-height: 1;
+}
+
+.query-wiki-message-retrieval {
+	border-color: color-mix(in srgb, var(--interactive-accent), transparent 68%);
+	background: color-mix(in srgb, var(--interactive-accent), transparent 92%);
+	color: var(--text-accent);
+	font-family: var(--font-monospace);
 }
 
 .query-wiki-message-mode.is-web {
@@ -1575,6 +1583,14 @@
 	min-height: 28px;
 	color: var(--query-muted);
 	font-size: 12px;
+}
+
+.query-wiki-stream-content {
+	margin-top: 10px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	color: var(--text-normal);
+	line-height: 1.7;
 }
 
 .query-wiki-progress-indicator {

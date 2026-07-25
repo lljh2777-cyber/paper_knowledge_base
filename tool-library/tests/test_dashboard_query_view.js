@@ -132,6 +132,94 @@ async function testDirectApiQuery() {
 		),
 		(error) => /仅支持知识库证据/.test(error.message),
 	);
+
+	const expansionCalls = [];
+	plugin.runVaultRetrievalPreflight = async (_runId, _question, expandedTerms = []) => {
+		expansionCalls.push(expandedTerms);
+		return expandedTerms.length
+			? {
+				...trace,
+				stage: "llm-keyword+ppr",
+				retrieval_label: "LLM+PPR",
+				keyword_expansion: { used: true, terms: expandedTerms },
+			}
+			: {
+				stage: "no-match-fallback",
+				retrieval_label: "NoMatch+Index",
+				lexical_seeds: [],
+				graph_expansion: [],
+				fallback: { used: true, paths: [] },
+				candidate_paths: [],
+			};
+	};
+	let expansionCompletion = 0;
+	plugin.createLLMProvider = () => ({
+		complete: async () => {
+			expansionCompletion += 1;
+			return expansionCompletion === 1
+				? { text: "{\"keywords\":[\"SingleR annotation\",\"cell type annotation\"]}" }
+				: { text: "扩展检索回答" };
+		},
+	});
+	const expanded = await plugin.runDirectVaultQuery(
+		"run-expansion",
+		profile.id,
+		"细胞身份判定",
+		[],
+		"vault",
+	);
+	assert.strictEqual(expanded.stdout, "扩展检索回答");
+	assert.deepStrictEqual(expansionCalls[1], ["SingleR annotation", "cell type annotation"]);
+	assert.strictEqual(expanded.events[0].payload.retrieval_label, "LLM+PPR");
+
+	plugin.runVaultRetrievalPreflight = async () => trace;
+	profile.lastTest.streamingVerified = true;
+	const streamEvents = [];
+	plugin.createLLMProvider = () => ({
+		stream: async (_request, onDelta) => {
+			onDelta("流式");
+			onDelta("回答");
+			return { text: "流式回答" };
+		},
+		complete: async () => {
+			throw new Error("streaming should avoid non-streaming completion");
+		},
+	});
+	const streamed = await plugin.runDirectVaultQuery(
+		"run-stream",
+		profile.id,
+		"流式测试",
+		[],
+		"vault",
+		{ onEvent: (event) => streamEvents.push(event) },
+	);
+	assert.strictEqual(streamed.stdout, "流式回答");
+	assert.deepStrictEqual(
+		streamEvents.filter((event) => event.type === "assistant-delta").map((event) => event.delta),
+		["流式", "回答"],
+	);
+
+	plugin.createLLMProvider = () => ({
+		stream: async (_request, onDelta) => {
+			onDelta("不完整");
+			throw new Error("stream disconnected");
+		},
+		complete: async () => ({ text: "回退回答" }),
+	});
+	const fallbackEvents = [];
+	const fallbackResult = await plugin.runDirectVaultQuery(
+		"run-stream-fallback",
+		profile.id,
+		"回退测试",
+		[],
+		"vault",
+		{ onEvent: (event) => fallbackEvents.push(event) },
+	);
+	assert.strictEqual(fallbackResult.stdout, "回退回答");
+	assert.ok(fallbackEvents.some((event) => event.type === "assistant-reset"));
+	assert.ok(fallbackEvents.some(
+		(event) => event.type === "status" && event.stage === "stream-fallback",
+	));
 }
 
 testDirectApiQuery()

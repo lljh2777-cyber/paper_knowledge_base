@@ -2,6 +2,7 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const http = require("http");
 const Module = require("module");
 const path = require("path");
 
@@ -214,6 +215,34 @@ async function main() {
 		() => plugin.listProviderModels("provider-ollama"),
 		(error) => plugin.normalizeProviderError(error).type === "local-service-offline",
 	);
+
+	const streamServer = http.createServer((request, response) => {
+		response.writeHead(200, { "Content-Type": "text/event-stream" });
+		response.write('data: {"delta":"A"}\n\n');
+		setTimeout(() => {
+			response.end('data: {"delta":"B"}\n\ndata: [DONE]\n\n');
+		}, 10);
+	});
+	await new Promise((resolve) => streamServer.listen(0, "127.0.0.1", resolve));
+	const streamEvents = [];
+	try {
+		const address = streamServer.address();
+		await plugin.providerHttpStream({
+			url: `http://127.0.0.1:${address.port}/stream`,
+			method: "POST",
+			body: { stream: true },
+			format: "sse",
+			timeoutMs: 1000,
+			onEvent: (event) => streamEvents.push(event),
+		});
+	} finally {
+		await new Promise((resolve) => streamServer.close(resolve));
+	}
+	assert.deepStrictEqual(streamEvents, [
+		'{"delta":"A"}',
+		'{"delta":"B"}',
+		"[DONE]",
+	]);
 
 	console.log("DASHBOARD_PROVIDER_TEST_OK");
 }

@@ -123,6 +123,13 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
 
+    def test_keyword_payload_parser_accepts_json_and_deduplicates(self) -> None:
+        keywords = run_vault_action.parse_keyword_payload(
+            '```json\n{"keywords":["SingleR","细胞注释","singler",""]}\n```'
+        )
+
+        self.assertEqual(keywords, ["SingleR", "细胞注释"])
+
 
 if __name__ == "__main__":
     unittest.main()

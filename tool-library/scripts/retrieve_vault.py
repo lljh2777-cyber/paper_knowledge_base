@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build a transparent, read-only retrieval cascade for the research vault.
 
-The script discovers lexical seed notes, expands one hop through Obsidian
-wikilinks and backlinks, and falls back to orientation indexes when no lexical
-seed is reliable. It prints JSON to stdout and never writes vault files.
+The script discovers lexical seed notes, expands them with personalized
+PageRank over Obsidian wikilinks, and falls back to orientation indexes when no
+seed is reliable. Optional externally generated keywords can be supplied for a
+second retrieval pass. It prints JSON to stdout and never writes vault files.
 """
 
 from __future__ import annotations
@@ -293,8 +294,14 @@ def lexical_seeds(
     documents: list[VaultDocument],
     query: str,
     seed_limit: int,
+    expanded_terms: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     terms = query_terms(query)
+    for raw_term in expanded_terms or []:
+        term = normalize_text(raw_term).strip()
+        if 2 <= len(term) <= 80 and term not in STOP_TERMS:
+            terms.append(term)
+    terms = sorted(set(terms), key=lambda item: (-len(item), item))
     if not terms:
         return [], []
     frequency = document_frequency(documents, terms)
@@ -392,6 +399,60 @@ def build_graph(documents: list[VaultDocument]) -> dict[str, set[str]]:
     return graph
 
 
+def personalized_pagerank(
+    graph: dict[str, set[str]],
+    seed_weights: dict[str, float],
+    damping: float = 0.85,
+    iterations: int = 40,
+) -> dict[str, float]:
+    """Rank the wikilink graph around lexical seeds without external packages."""
+    nodes = sorted(graph)
+    if not nodes or not seed_weights:
+        return {}
+
+    undirected = {node: set(targets) for node, targets in graph.items()}
+    for source, targets in graph.items():
+        for target in targets:
+            undirected.setdefault(target, set()).add(source)
+
+    normalized_weights = {
+        node: max(float(weight), 0.0)
+        for node, weight in seed_weights.items()
+        if node in undirected
+    }
+    weight_total = sum(normalized_weights.values())
+    if weight_total <= 0:
+        return {}
+    personalization = {
+        node: normalized_weights.get(node, 0.0) / weight_total
+        for node in nodes
+    }
+    ranks = dict(personalization)
+
+    for _ in range(max(iterations, 1)):
+        next_ranks = {
+            node: (1.0 - damping) * personalization[node]
+            for node in nodes
+        }
+        dangling_mass = sum(
+            ranks.get(node, 0.0)
+            for node in nodes
+            if not undirected.get(node)
+        )
+        for node in nodes:
+            if personalization[node]:
+                next_ranks[node] += damping * dangling_mass * personalization[node]
+        for source in nodes:
+            neighbors = undirected.get(source, set())
+            if not neighbors:
+                continue
+            contribution = damping * ranks.get(source, 0.0) / len(neighbors)
+            for target in neighbors:
+                next_ranks[target] = next_ranks.get(target, 0.0) + contribution
+        ranks = next_ranks
+    return ranks
+
+
 def expand_graph(
     documents: list[VaultDocument],
     seeds: list[dict[str, Any]],
@@ -401,37 +462,38 @@ def expand_graph(
         return []
     documents_by_path = {document.path: document for document in documents}
     graph = build_graph(documents)
-    inbound: dict[str, set[str]] = {path: set() for path in graph}
-    for source, targets in graph.items():
-        for target in targets:
-            inbound.setdefault(target, set()).add(source)
-
     seed_paths = {seed["path"] for seed in seeds}
-    expanded: dict[str, dict[str, Any]] = {}
-    for seed in seeds[:4]:
-        seed_path = seed["path"]
-        for direction, neighbors in (
-            ("outgoing", graph.get(seed_path, set())),
-            ("incoming", inbound.get(seed_path, set())),
+    ranks = personalized_pagerank(
+        graph,
+        {seed["path"]: float(seed["score"]) for seed in seeds},
+    )
+    expanded: list[dict[str, Any]] = []
+    for candidate_path, rank in ranks.items():
+        if (
+            candidate_path in seed_paths
+            or candidate_path in NAVIGATION_PATHS
+            or rank <= 0
         ):
-            for neighbor in neighbors:
-                if neighbor in seed_paths or neighbor in NAVIGATION_PATHS:
-                    continue
-                relation_score = round(float(seed["score"]) * 0.45, 2)
-                entry = expanded.setdefault(
-                    neighbor,
-                    {
-                        "path": neighbor,
-                        "title": documents_by_path[neighbor].title,
-                        "title_zh": documents_by_path[neighbor].title_zh,
-                        "score": relation_score,
-                        "via": [],
-                    },
-                )
-                entry["score"] = max(entry["score"], relation_score)
-                entry["via"].append({"seed": seed_path, "direction": direction})
-    ranked = sorted(expanded.values(), key=lambda item: (-item["score"], item["path"]))
-    return ranked[:graph_limit]
+            continue
+        linked_seeds = [
+            seed["path"]
+            for seed in seeds
+            if (
+                candidate_path in graph.get(seed["path"], set())
+                or seed["path"] in graph.get(candidate_path, set())
+            )
+        ]
+        expanded.append(
+            {
+                "path": candidate_path,
+                "title": documents_by_path[candidate_path].title,
+                "title_zh": documents_by_path[candidate_path].title_zh,
+                "score": round(rank, 8),
+                "via": linked_seeds[:4],
+            }
+        )
+    expanded.sort(key=lambda item: (-item["score"], item["path"]))
+    return expanded[:graph_limit]
 
 
 def fallback_candidates(vault_root: Path) -> list[str]:
@@ -443,21 +505,45 @@ def retrieve(
     query: str,
     seed_limit: int = 8,
     graph_limit: int = 12,
+    expanded_terms: list[str] | None = None,
 ) -> dict[str, Any]:
     vault_root = project_root / "knowledge-base"
     if not vault_root.is_dir():
         raise FileNotFoundError(f"Knowledge base not found: {vault_root}")
     documents = discover_documents(vault_root)
-    seeds, terms = lexical_seeds(documents, query, seed_limit)
+    normalized_expanded_terms = [
+        normalize_text(term).strip()
+        for term in expanded_terms or []
+        if normalize_text(term).strip()
+    ][:10]
+    seeds, terms = lexical_seeds(
+        documents,
+        query,
+        seed_limit,
+        normalized_expanded_terms,
+    )
     graph_candidates = expand_graph(documents, seeds, graph_limit)
     fallback = fallback_candidates(vault_root) if not seeds else []
-    stage = "lexical-seed+graph-expansion" if seeds else "no-match-fallback"
+    if seeds and normalized_expanded_terms:
+        stage = "llm-keyword+ppr"
+        retrieval_label = "LLM+PPR"
+    elif seeds:
+        stage = "lexical-seed+ppr"
+        retrieval_label = "Lex+PPR"
+    else:
+        stage = "no-match-fallback"
+        retrieval_label = "NoMatch+Index"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "query": query.strip(),
         "stage": stage,
+        "retrieval_label": retrieval_label,
         "document_count": len(documents),
         "query_terms": terms[:20],
+        "keyword_expansion": {
+            "used": bool(normalized_expanded_terms),
+            "terms": normalized_expanded_terms,
+        },
         "lexical_seeds": seeds,
         "graph_expansion": graph_candidates,
         "fallback": {
@@ -487,6 +573,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query", default="")
     parser.add_argument("--seed-limit", type=int, default=8)
     parser.add_argument("--graph-limit", type=int, default=12)
+    parser.add_argument(
+        "--expanded-term",
+        action="append",
+        default=[],
+        help="Optional externally generated keyword; repeat for multiple terms.",
+    )
     return parser.parse_args()
 
 
@@ -502,6 +594,7 @@ def main() -> int:
         query,
         seed_limit=max(args.seed_limit, 1),
         graph_limit=max(args.graph_limit, 0),
+        expanded_terms=args.expanded_term,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

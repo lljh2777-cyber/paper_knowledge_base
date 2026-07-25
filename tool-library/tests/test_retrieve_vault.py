@@ -70,7 +70,8 @@ title_zh: 单细胞示例论文
             "SingleR annotation workflow",
         )
 
-        self.assertEqual(result["stage"], "lexical-seed+graph-expansion")
+        self.assertEqual(result["stage"], "lexical-seed+ppr")
+        self.assertEqual(result["retrieval_label"], "Lex+PPR")
         self.assertEqual(
             result["lexical_seeds"][0]["path"],
             "wiki/methods/cell-annotation.md",
@@ -82,6 +83,22 @@ title_zh: 单细胞示例论文
         self.assertNotIn("wiki/index.md", expanded_paths)
         self.assertFalse(result["fallback"]["used"])
 
+    def test_expanded_terms_use_llm_ppr_label(self) -> None:
+        result = retrieve_vault.retrieve(
+            self.project_root,
+            "细胞身份判定",
+            expanded_terms=["SingleR annotation"],
+        )
+
+        self.assertEqual(result["stage"], "llm-keyword+ppr")
+        self.assertEqual(result["retrieval_label"], "LLM+PPR")
+        self.assertTrue(result["keyword_expansion"]["used"])
+        self.assertIn("singler annotation", result["keyword_expansion"]["terms"])
+        self.assertEqual(
+            result["lexical_seeds"][0]["path"],
+            "wiki/methods/cell-annotation.md",
+        )
+
     def test_unrelated_query_uses_orientation_fallback(self) -> None:
         result = retrieve_vault.retrieve(
             self.project_root,
@@ -89,6 +106,7 @@ title_zh: 单细胞示例论文
         )
 
         self.assertEqual(result["stage"], "no-match-fallback")
+        self.assertEqual(result["retrieval_label"], "NoMatch+Index")
         self.assertEqual(result["lexical_seeds"], [])
         self.assertEqual(result["graph_expansion"], [])
         self.assertTrue(result["fallback"]["used"])
