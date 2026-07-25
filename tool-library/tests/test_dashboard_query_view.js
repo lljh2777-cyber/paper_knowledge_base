@@ -55,5 +55,88 @@ assert.strictEqual(vaultPayload.mode, "vault");
 
 const session = plugin.makeQuerySession();
 assert.strictEqual(session.retrievalMode, "web");
+assert.strictEqual(session.queryBackendId, "codex-cli");
 
-console.log("DASHBOARD_QUERY_VIEW_TEST_OK");
+async function testDirectApiQuery() {
+	const profile = {
+		id: "provider-deepseek",
+		name: "ds-v4-pro",
+		type: "openai-compatible",
+		baseUrl: "https://api.example.test",
+		model: "deepseek-v4-pro",
+		secretId: "deepseek-main",
+		timeoutSeconds: 20,
+		capabilities: { streaming: true, pdf: false, vision: false },
+		lastTest: { ok: true },
+	};
+	plugin.settings = {
+		projectRoot: path.resolve(__dirname, "../.."),
+		providerProfiles: [profile],
+	};
+	plugin.directQueryRuns = new Map();
+	assert.deepStrictEqual(plugin.getVerifiedProviderProfiles().map((item) => item.id), [profile.id]);
+	assert.strictEqual(plugin.resolveQueryBackendId(profile.id), profile.id);
+	assert.strictEqual(plugin.resolveQueryBackendId("missing-provider"), "codex-cli");
+	const safeEvidence = plugin.readVaultEvidencePacket({
+		candidate_paths: ["wiki/index.md", "../AGENTS.md"],
+	});
+	assert.strictEqual(safeEvidence.length, 1);
+	assert.strictEqual(safeEvidence[0].path, "wiki/index.md");
+
+	const evidence = [{
+		path: "wiki/methods/example.md",
+		wikilink: "[[wiki/methods/example]]",
+		content: "# Example\nVault evidence",
+	}];
+	const trace = {
+		stage: "lexical-seed+graph-expansion",
+		lexical_seeds: [{ path: "wiki/methods/example.md" }],
+		graph_expansion: [],
+		fallback: { used: false, paths: [] },
+		candidate_paths: ["wiki/methods/example.md"],
+	};
+	const events = [];
+	let directRequest = null;
+	plugin.runVaultRetrievalPreflight = async () => trace;
+	plugin.readVaultEvidencePacket = () => evidence;
+	plugin.createLLMProvider = () => ({
+		complete: async (request) => {
+			directRequest = request;
+			return { text: "基于 [[wiki/methods/example]] 的回答。" };
+		},
+	});
+	const result = await plugin.runDirectVaultQuery(
+		"run-direct",
+		profile.id,
+		"这个方法是什么？",
+		priorMessages,
+		"vault",
+		{ onEvent: (event) => events.push(event) },
+	);
+	assert.strictEqual(result.exitCode, 0);
+	assert.ok(result.stdout.includes("[[wiki/methods/example]]"));
+	assert.strictEqual(result.events[0].type, "retrieval-preflight");
+	assert.ok(events.some((event) => event.type === "retrieval-preflight"));
+	assert.strictEqual(directRequest.model, "deepseek-v4-pro");
+	assert.ok(directRequest.messages[0].content.includes("只能依据本次提供的 Vault 证据"));
+	assert.ok(directRequest.messages.at(-1).content.includes("wiki/methods/example.md"));
+	assert.strictEqual(plugin.directQueryRuns.size, 0);
+
+	await assert.rejects(
+		() => plugin.runDirectVaultQuery(
+			"run-web",
+			profile.id,
+			"联网搜索",
+			[],
+			"web",
+		),
+		(error) => /仅支持知识库证据/.test(error.message),
+	);
+}
+
+testDirectApiQuery()
+	.then(() => console.log("DASHBOARD_QUERY_VIEW_TEST_OK"))
+	.catch((error) => {
+		console.error(error);
+		process.exitCode = 1;
+	});

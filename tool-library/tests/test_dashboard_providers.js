@@ -1,0 +1,224 @@
+"use strict";
+
+const assert = require("assert");
+const fs = require("fs");
+const Module = require("module");
+const path = require("path");
+
+let requestHandler = async () => {
+	throw new Error("Unexpected HTTP request");
+};
+const originalLoad = Module._load;
+Module._load = function loadWithObsidianStub(request, parent, isMain) {
+	if (request === "obsidian") {
+		class Base {}
+		class SecretComponentStub {}
+		return {
+			ItemView: Base,
+			MarkdownRenderer: { render: async () => {} },
+			Modal: Base,
+			Notice: class {},
+			Plugin: Base,
+			PluginSettingTab: Base,
+			SecretComponent: SecretComponentStub,
+			Setting: class {},
+			normalizePath: (value) => value,
+			requestUrl: (options) => requestHandler(options),
+			setIcon: () => {},
+		};
+	}
+	return originalLoad.call(this, request, parent, isMain);
+};
+
+const pluginPath = path.resolve(
+	__dirname,
+	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/main.js",
+);
+const AgentDashboardPlugin = require(pluginPath);
+Module._load = originalLoad;
+const pluginSource = fs.readFileSync(pluginPath, "utf8");
+
+global.window = {
+	setTimeout,
+	clearTimeout,
+};
+
+function makePlugin(profile) {
+	const plugin = Object.create(AgentDashboardPlugin.prototype);
+	plugin.app = {
+		secretStorage: {
+			getSecret: (secretId) => secretId === "openai-main" ? "sk-test-secret" : null,
+		},
+	};
+	plugin.settings = {
+		projectRoot: "D:\\example",
+		codexExecutable: "codex.exe",
+		codexModel: "gpt-5.6-terra",
+		codexReasoningEffort: "medium",
+		pythonExecutable: "D:\\python\\python.exe",
+		rscriptExecutable: "Rscript.exe",
+		codePracticeTimeoutSeconds: 30,
+		taskTimeoutMinutes: 60,
+		activeProviderId: profile.id,
+		providerProfiles: [profile],
+		providerTimeoutSeconds: 20,
+		openaiApiKey: "must-not-persist",
+		githubToken: "must-not-persist",
+	};
+	plugin.providerRuntimeState = new Map();
+	plugin.saveSettings = async () => {};
+	return plugin;
+}
+
+async function main() {
+	const providerSelectIndex = pluginSource.indexOf('.setName("LLM Provider")');
+	const secretIndex = pluginSource.indexOf('.setName("API Key / 凭据")');
+	const endpointIndex = pluginSource.indexOf('.setName("API Base URL")');
+	const fetchModelsIndex = pluginSource.indexOf('.setName("获取可用模型")');
+	const selectModelIndex = pluginSource.indexOf('.setName("选择模型")');
+	const testConnectionIndex = pluginSource.indexOf('.setName("测试连接")');
+	assert.ok(providerSelectIndex < secretIndex);
+	assert.ok(secretIndex < endpointIndex);
+	assert.ok(endpointIndex < fetchModelsIndex);
+	assert.ok(fetchModelsIndex < selectModelIndex);
+	assert.ok(selectModelIndex < testConnectionIndex);
+	assert.ok(
+		pluginSource.includes('text.inputEl.addEventListener("blur"'),
+		"provider name should commit on blur",
+	);
+	assert.ok(
+		pluginSource.includes('event.key !== "Enter" || event.isComposing'),
+		"provider name Enter handling should preserve IME composition",
+	);
+
+	const profile = {
+		id: "provider-openai",
+		name: "OpenAI test",
+		type: "openai",
+		baseUrl: "https://api.openai.test",
+		model: "model-a",
+		secretId: "openai-main",
+		timeoutSeconds: 5,
+		capabilities: { streaming: true, pdf: true, vision: true },
+		apiKey: "must-not-persist",
+	};
+	const plugin = makePlugin(profile);
+
+	const stored = plugin.sanitizeSettingsForStorage();
+	assert.strictEqual(stored.openaiApiKey, undefined);
+	assert.strictEqual(stored.githubToken, undefined);
+	assert.strictEqual(stored.providerProfiles[0].apiKey, undefined);
+	assert.strictEqual(stored.providerProfiles[0].secretId, "openai-main");
+	assert.ok(!JSON.stringify(stored).includes("must-not-persist"));
+	assert.strictEqual(stored.activeProviderId, "");
+
+	for (const type of ["openai", "anthropic", "openai-compatible", "ollama", "lm-studio"]) {
+		const adapter = plugin.createLLMProvider({
+			...profile,
+			id: `provider-${type}`,
+			type,
+		});
+		assert.strictEqual(typeof adapter.testConnection, "function");
+		assert.strictEqual(typeof adapter.listModels, "function");
+		assert.strictEqual(typeof adapter.complete, "function");
+	}
+	assert.strictEqual(typeof plugin.createLLMProvider("codex-cli").testConnection, "function");
+
+	const calls = [];
+	requestHandler = async (options) => {
+		calls.push(options);
+		if (options.url.endsWith("/v1/models")) {
+			return {
+				status: 200,
+				text: JSON.stringify({
+					data: [
+						{ id: "model-a", owned_by: "test" },
+						{ id: "model-b", owned_by: "test" },
+					],
+				}),
+				headers: {},
+			};
+		}
+		const body = JSON.parse(options.body);
+		if (body.stream) {
+			return {
+				status: 200,
+				text: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: [DONE]",
+				headers: { "content-type": "text/event-stream" },
+			};
+		}
+		return {
+			status: 200,
+			text: JSON.stringify({ output_text: "OK" }),
+			headers: {},
+		};
+	};
+
+	const provider = plugin.createLLMProvider("provider-openai");
+	assert.strictEqual(typeof provider.listModels, "function");
+	assert.strictEqual(typeof provider.complete, "function");
+	assert.strictEqual(typeof provider.probeStreaming, "function");
+	const result = await provider.testConnection();
+	assert.strictEqual(result.ok, true);
+	assert.strictEqual(result.model, "model-a");
+	assert.strictEqual(result.modelCount, 2);
+	assert.strictEqual(result.streaming.verified, true);
+	assert.strictEqual(result.pdf.supported, true);
+	assert.strictEqual(result.responsePreview, "OK");
+	assert.ok(calls.every((call) => call.headers.Authorization === "Bearer sk-test-secret"));
+	assert.ok(calls.every((call) => !String(call.body || "").includes("paper-knowledge-base")));
+
+	plugin.settings.activeProviderId = "";
+	const persistedResult = await plugin.testProviderConnection("provider-openai");
+	assert.strictEqual(persistedResult.ok, true);
+	assert.strictEqual(profile.lastTest.ok, true);
+	assert.strictEqual(profile.lastTest.streamingVerified, true);
+	assert.strictEqual(plugin.settings.activeProviderId, "provider-openai");
+	assert.strictEqual(plugin.sanitizeSettingsForStorage().activeProviderId, "provider-openai");
+
+	requestHandler = async () => ({
+		status: 401,
+		text: JSON.stringify({ error: { message: "invalid API key" } }),
+		headers: {},
+	});
+	await assert.rejects(
+		() => provider.listModels(),
+		(error) => plugin.normalizeProviderError(error).type === "authentication",
+	);
+
+	requestHandler = async () => ({
+		status: 200,
+		text: "not-json",
+		headers: {},
+	});
+	await assert.rejects(
+		() => provider.listModels(),
+		(error) => plugin.normalizeProviderError(error).type === "protocol",
+	);
+
+	const ollamaProfile = {
+		...profile,
+		id: "provider-ollama",
+		type: "ollama",
+		name: "Local Ollama",
+		baseUrl: "http://127.0.0.1:11434",
+		model: "qwen3",
+		secretId: "",
+		capabilities: { streaming: true, pdf: false, vision: false },
+	};
+	plugin.settings.providerProfiles.push(ollamaProfile);
+	requestHandler = async () => {
+		throw new Error("connect ECONNREFUSED 127.0.0.1:11434");
+	};
+	await assert.rejects(
+		() => plugin.listProviderModels("provider-ollama"),
+		(error) => plugin.normalizeProviderError(error).type === "local-service-offline",
+	);
+
+	console.log("DASHBOARD_PROVIDER_TEST_OK");
+}
+
+main().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});
