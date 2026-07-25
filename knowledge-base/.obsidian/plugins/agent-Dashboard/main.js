@@ -2,6 +2,7 @@
 
 const {
 	ItemView,
+	MarkdownRenderer,
 	Modal,
 	Notice,
 	Plugin,
@@ -17,6 +18,7 @@ const { spawn } = require("child_process");
 
 const VIEW_TYPE = "agent-dashboard-research-vault";
 const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
+const QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 const LEGACY_CODEX_EXECUTABLE = "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
 const MANAGED_CODEX_BIN_ROOT = path.join(process.env.LOCALAPPDATA || "", "OpenAI", "Codex", "bin");
 
@@ -133,13 +135,14 @@ const ACTIONS = [
 		id: "vault-retrieval",
 		label: "知识库检索",
 		agent: "research-vault-retrieval",
-		description: "输入需要由当前 vault 回答的问题。该操作强制使用只读沙箱，结果显示在任务详情中，不写入文件。",
+		description: "在独立侧边栏中连续查询当前 vault。每轮都会执行透明检索级联并使用只读沙箱，不写入知识库文件。",
 		placeholder: "例如：当前知识库关于 scRNA-seq 质控阈值有哪些依据和分歧？",
 		requiresInput: true,
 		writes: false,
 		enabled: true,
 		ai: true,
 		reasoningEffort: "medium",
+		queryView: true,
 	},
 	{
 		id: "synthesis",
@@ -1583,6 +1586,632 @@ class CodePracticeView extends ItemView {
 	}
 }
 
+class QueryWikiView extends ItemView {
+	constructor(leaf, plugin) {
+		super(leaf);
+		this.plugin = plugin;
+		this.initialQuestion = "";
+		this.activeRunId = "";
+		this.activeMessageId = "";
+		this.stopRequested = false;
+		this.renderVersion = 0;
+		this.inputEl = null;
+		this.statusEl = null;
+		this.executionOverrides = {
+			model: "",
+			reasoningEffort: "",
+			serviceTier: "default",
+		};
+	}
+
+	getViewType() {
+		return QUERY_WIKI_VIEW_TYPE;
+	}
+
+	getDisplayText() {
+		return "知识库对话";
+	}
+
+	getIcon() {
+		return "messages-square";
+	}
+
+	async onOpen() {
+		this.syncActiveRunFromSession();
+		await this.render();
+	}
+
+	async onClose() {
+		this.contentEl.empty();
+	}
+
+	setInitialQuestion(value) {
+		this.initialQuestion = String(value || "").trim();
+		if (this.containerEl?.isConnected) {
+			void this.render().then(() => this.inputEl?.focus());
+		}
+	}
+
+	get session() {
+		return this.plugin.getActiveQuerySession();
+	}
+
+	syncActiveRunFromSession() {
+		const activeMessage = this.session.messages.find((message) => {
+			return ["pending", "stopping"].includes(message.status)
+				&& message.runId
+				&& this.plugin.isVaultActionProcessActive(message.runId);
+		});
+		this.activeRunId = activeMessage?.runId || "";
+		this.activeMessageId = activeMessage?.id || "";
+		this.stopRequested = activeMessage?.status === "stopping";
+	}
+
+	async render(options = {}) {
+		const version = ++this.renderVersion;
+		const session = this.session;
+		this.contentEl.empty();
+		this.contentEl.addClass("query-wiki-view");
+		const shell = this.contentEl.createDiv({ cls: "query-wiki-shell" });
+		this.renderHeader(shell, session);
+		const conversation = shell.createDiv({
+			cls: "query-wiki-conversation",
+			attr: { "aria-live": "polite" },
+		});
+		if (!session.messages.length) {
+			this.renderEmptyState(conversation);
+		} else {
+			for (const message of session.messages) {
+				if (version !== this.renderVersion) return;
+				await this.renderMessage(conversation, message);
+			}
+		}
+		if (version !== this.renderVersion) return;
+		this.renderComposer(shell);
+		if (options.scrollToBottom) {
+			window.requestAnimationFrame(() => {
+				conversation.scrollTop = conversation.scrollHeight;
+			});
+		}
+	}
+
+	renderHeader(parent, session) {
+		const header = parent.createEl("header", { cls: "query-wiki-header" });
+		const title = header.createDiv({ cls: "query-wiki-title" });
+		title.createEl("p", { cls: "query-wiki-kicker", text: "VAULT EVIDENCE" });
+		title.createEl("h1", { text: "知识库对话" });
+		const tools = header.createDiv({ cls: "query-wiki-header-tools" });
+		const sessions = tools.createEl("select", {
+			cls: "query-wiki-session-select",
+			attr: { "aria-label": "选择查询会话", title: "查询历史" },
+		});
+		this.plugin.getQuerySessions().forEach((item) => {
+			sessions.createEl("option", {
+				text: item.title || "新对话",
+				attr: { value: item.id },
+			});
+		});
+		sessions.value = session.id;
+		sessions.disabled = Boolean(this.activeRunId);
+		sessions.addEventListener("change", () => {
+			void this.plugin.setActiveQuerySession(sessions.value).then(() => {
+				this.syncActiveRunFromSession();
+				return this.render();
+			});
+		});
+		const create = this.createIconButton(tools, "message-square-plus", "新建对话");
+		create.disabled = Boolean(this.activeRunId);
+		create.addEventListener("click", () => {
+			void this.plugin.createQuerySession().then(() => this.render()).then(() => this.inputEl?.focus());
+		});
+		const save = this.createIconButton(tools, "file-output", "整理为笔记");
+		save.disabled = Boolean(this.activeRunId) || !session.messages.some((message) => message.role === "assistant" && message.status === "done");
+		save.addEventListener("click", () => this.openSynthesisHandoff());
+		const clear = this.createIconButton(tools, "trash-2", "清空当前对话");
+		clear.disabled = Boolean(this.activeRunId) || session.messages.length === 0;
+		clear.addEventListener("click", () => {
+			if (!window.confirm("清空当前查询会话？此操作不会删除任何知识库笔记。")) return;
+			void this.plugin.clearActiveQuerySession().then(() => this.render()).then(() => this.inputEl?.focus());
+		});
+	}
+
+	renderEmptyState(parent) {
+		const empty = parent.createDiv({ cls: "query-wiki-empty" });
+		const icon = empty.createDiv({ cls: "query-wiki-empty-icon" });
+		setIcon(icon, "search");
+		empty.createEl("h2", { text: "从当前知识库开始查询" });
+		empty.createEl("p", {
+			text: "当前会话暂无查询记录。",
+		});
+	}
+
+	async renderMessage(parent, message) {
+		const article = parent.createEl("article", {
+			cls: `query-wiki-message is-${message.role} is-${message.status || "done"}`,
+			attr: { "data-message-id": message.id },
+		});
+		const heading = article.createDiv({ cls: "query-wiki-message-heading" });
+		const identity = heading.createDiv({ cls: "query-wiki-message-identity" });
+		const icon = identity.createSpan({ cls: "query-wiki-message-icon" });
+		setIcon(icon, message.role === "user" ? "user" : "library-big");
+		identity.createSpan({ text: message.role === "user" ? "你" : "检索助手" });
+		if (message.role === "assistant" && message.retrievalMode) {
+			identity.createSpan({
+				cls: `query-wiki-message-mode is-${message.retrievalMode}`,
+				text: message.retrievalMode === "web" ? "联网" : "知识库",
+			});
+		}
+		heading.createSpan({
+			cls: "query-wiki-message-time",
+			text: this.formatTime(message.createdAt),
+		});
+		const body = article.createDiv({ cls: "query-wiki-message-body" });
+		if (message.role === "user") {
+			body.createEl("p", { text: message.content });
+			return;
+		}
+		if (["pending", "stopping"].includes(message.status)) {
+			const progress = body.createDiv({ cls: "query-wiki-progress" });
+			progress.createSpan({ cls: "query-wiki-progress-indicator" });
+			this.statusEl = progress.createSpan({
+				text: message.progress || (message.status === "stopping" ? "正在停止任务" : "正在准备检索"),
+			});
+		} else if (message.status === "failed" || message.status === "interrupted") {
+			body.createEl("p", {
+				cls: "query-wiki-error",
+				text: message.error || "本轮查询未完成。",
+			});
+		} else if (message.content) {
+			const markdown = body.createDiv({ cls: "query-wiki-markdown markdown-rendered" });
+			await MarkdownRenderer.render(this.app, message.content, markdown, "", this);
+		}
+		if (message.retrievalTrace) {
+			this.renderRetrievalTrace(article, message.retrievalTrace);
+		}
+	}
+
+	renderRetrievalTrace(parent, trace) {
+		const seeds = Array.isArray(trace.lexical_seeds) ? trace.lexical_seeds : [];
+		const graph = Array.isArray(trace.graph_expansion) ? trace.graph_expansion : [];
+		const fallback = trace.fallback && typeof trace.fallback === "object"
+			? trace.fallback
+			: { used: false, paths: [] };
+		const details = parent.createEl("details", { cls: "query-wiki-trace" });
+		const summary = details.createEl("summary");
+		const summaryIcon = summary.createSpan({ cls: "query-wiki-trace-icon" });
+		setIcon(summaryIcon, "git-fork");
+		summary.createSpan({
+			text: fallback.used
+				? `本轮检索 · 索引回退`
+				: `本轮检索 · ${seeds.length} 个种子 / ${graph.length} 个关联页`,
+		});
+		const content = details.createDiv({ cls: "query-wiki-trace-content" });
+		content.createEl("p", {
+			cls: "query-wiki-trace-stage",
+			text: `检索阶段：${this.displayRetrievalStage(trace.stage)}`,
+		});
+		if (seeds.length) this.renderTraceGroup(content, "词法种子", seeds);
+		if (graph.length) this.renderTraceGroup(content, "关系扩展", graph);
+		if (fallback.used) {
+			content.createEl("p", {
+				cls: "query-wiki-trace-note",
+				text: "未找到可靠词法种子，已回退到方向索引。",
+			});
+			this.renderTraceGroup(
+				content,
+				"回退索引",
+				(fallback.paths || []).map((item) => ({ path: item, title: item.replace(/\.md$/i, "") })),
+			);
+		}
+		content.createEl("p", {
+			cls: "query-wiki-trace-note",
+			text: "这些页面是候选路由；实际采用的证据以回答中的“检索路径”和引用为准。",
+		});
+	}
+
+	renderTraceGroup(parent, title, candidates) {
+		const group = parent.createDiv({ cls: "query-wiki-trace-group" });
+		group.createEl("h3", { text: title });
+		const list = group.createDiv({ cls: "query-wiki-trace-list" });
+		candidates.slice(0, 8).forEach((candidate) => {
+			const pathValue = String(candidate.path || "");
+			const label = candidate.title_zh || candidate.title || pathValue.replace(/\.md$/i, "");
+			const button = list.createEl("button", {
+				cls: "query-wiki-trace-link",
+				text: label,
+				attr: { type: "button", title: pathValue },
+			});
+			button.disabled = !pathValue;
+			button.addEventListener("click", () => {
+				void this.app.workspace.openLinkText(pathValue, "", true);
+			});
+		});
+	}
+
+	renderComposer(parent) {
+		const composer = parent.createEl("section", {
+			cls: "query-wiki-composer",
+			attr: { "aria-label": "知识库查询输入" },
+		});
+		this.renderRetrievalModeSwitch(composer);
+		const input = composer.createEl("textarea", {
+			cls: "query-wiki-input",
+			attr: {
+				rows: "4",
+				placeholder: "输入问题…",
+				"aria-label": "输入知识库问题",
+			},
+		});
+		input.value = this.initialQuestion;
+		this.initialQuestion = "";
+		input.disabled = Boolean(this.activeRunId);
+		this.inputEl = input;
+		const footer = composer.createDiv({ cls: "query-wiki-composer-footer" });
+		const turnCount = this.session.messages.filter((message) => message.role === "user").length;
+		const hint = footer.createSpan({
+			cls: "query-wiki-shortcut",
+			text: `${turnCount}/30 轮`,
+		});
+		const controls = footer.createDiv({ cls: "query-wiki-composer-actions" });
+		const stop = this.createIconButton(controls, "square", "停止生成");
+		stop.addClass("query-wiki-stop");
+		stop.disabled = !this.activeRunId || this.activeRunId === "starting" || this.stopRequested;
+		stop.addEventListener("click", () => this.stopQuery());
+		const send = controls.createEl("button", {
+			cls: "query-wiki-send mod-cta",
+			attr: { type: "button", "aria-label": "发送问题" },
+		});
+		setIcon(send, "arrow-up");
+		send.createSpan({ text: "发送" });
+		send.disabled = Boolean(this.activeRunId) || !input.value.trim();
+		const submit = () => {
+			if (send.disabled) return;
+			void this.submitQuestion(input.value.trim());
+		};
+		input.addEventListener("input", () => {
+			send.disabled = Boolean(this.activeRunId) || !input.value.trim();
+			input.style.height = "auto";
+			input.style.height = `${Math.min(Math.max(input.scrollHeight, 92), 220)}px`;
+		});
+		input.addEventListener("keydown", (event) => {
+			if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+				event.preventDefault();
+				submit();
+			}
+		});
+		send.addEventListener("click", submit);
+		if (this.activeRunId) hint.setText("查询运行中");
+		this.renderExecutionSettings(composer);
+	}
+
+	renderRetrievalModeSwitch(parent) {
+		const currentMode = this.session.retrievalMode === "vault" ? "vault" : "web";
+		const control = parent.createDiv({
+			cls: "query-wiki-mode-switch",
+			attr: { role: "radiogroup", "aria-label": "查询证据范围" },
+		});
+		[
+			["vault", "database", "知识库", "仅使用当前知识库中的证据"],
+			["web", "globe-2", "联网搜索", "综合知识库证据与实时联网来源"],
+		].forEach(([value, iconName, label, title]) => {
+			const button = control.createEl("button", {
+				cls: value === currentMode ? "query-wiki-mode-option is-active" : "query-wiki-mode-option",
+				attr: {
+					type: "button",
+					role: "radio",
+					title,
+					"aria-checked": value === currentMode ? "true" : "false",
+				},
+			});
+			const icon = button.createSpan({ cls: "query-wiki-mode-icon" });
+			setIcon(icon, iconName);
+			button.createSpan({ text: label });
+			button.disabled = Boolean(this.activeRunId);
+			button.addEventListener("click", () => {
+				if (button.disabled || value === currentMode) return;
+				this.initialQuestion = this.inputEl?.value || "";
+				void this.plugin.setActiveQueryMode(value).then(() => this.render()).then(() => this.inputEl?.focus());
+			});
+		});
+	}
+
+	renderExecutionSettings(parent) {
+		const action = ACTION_BY_ID.get("vault-retrieval");
+		const effective = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+		const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
+		const summary = details.createEl("summary");
+		const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
+		setIcon(icon, "sliders-horizontal");
+		const summaryText = summary.createSpan({
+			text: `${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`,
+		});
+		const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
+		const model = this.createSelectField(grid, "模型");
+		model.createEl("option", {
+			text: `使用检索默认 · ${this.plugin.getModelLabel(this.plugin.resolveActionExecutionConfig(action).model)}`,
+			attr: { value: "" },
+		});
+		MODEL_OPTIONS.forEach((option) => {
+			model.createEl("option", {
+				text: option.description ? `${option.label} · ${option.description}` : option.label,
+				attr: { value: option.id },
+			});
+		});
+		model.value = this.executionOverrides.model;
+		const reasoning = this.createSelectField(grid, "推理强度");
+		reasoning.createEl("option", { text: "使用检索默认", attr: { value: "" } });
+		REASONING_OPTIONS.forEach((option) => {
+			reasoning.createEl("option", { text: option.label, attr: { value: option.id } });
+		});
+		reasoning.value = this.executionOverrides.reasoningEffort;
+		const speed = this.createSelectField(grid, "速度");
+		speed.createEl("option", { text: "标准", attr: { value: "default" } });
+		speed.createEl("option", { text: "快速", attr: { value: "fast" } });
+		speed.value = this.executionOverrides.serviceTier;
+		const sync = () => {
+			const selectedModel = model.value || this.plugin.resolveActionExecutionConfig(action).model;
+			if (!this.plugin.supportsFast(selectedModel) && speed.value === "fast") speed.value = "default";
+			speed.querySelector('option[value="fast"]').disabled = !this.plugin.supportsFast(selectedModel);
+			this.executionOverrides = {
+				model: model.value,
+				reasoningEffort: reasoning.value,
+				serviceTier: speed.value,
+			};
+			const next = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+			summaryText.setText(`${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
+		};
+		model.addEventListener("change", sync);
+		reasoning.addEventListener("change", sync);
+		speed.addEventListener("change", sync);
+		sync();
+	}
+
+	createSelectField(parent, labelText) {
+		const label = parent.createEl("label", { cls: "query-wiki-settings-field" });
+		label.createSpan({ text: labelText });
+		return label.createEl("select");
+	}
+
+	createIconButton(parent, icon, label) {
+		const button = parent.createEl("button", {
+			cls: "query-wiki-icon-button",
+			attr: { type: "button", title: label, "aria-label": label },
+		});
+		setIcon(button, icon);
+		return button;
+	}
+
+	async submitQuestion(question) {
+		if (!question || this.activeRunId || this.plugin.isActionRunning("vault-retrieval")) return;
+		const action = ACTION_BY_ID.get("vault-retrieval");
+		const session = this.session;
+		const retrievalMode = session.retrievalMode === "vault" ? "vault" : "web";
+		const priorMessages = session.messages.filter((message) => message.status === "done");
+		const now = new Date().toISOString();
+		const userMessage = {
+			id: this.plugin.createQueryMessageId(),
+			role: "user",
+			content: question,
+			status: "done",
+			createdAt: now,
+			retrievalMode,
+		};
+		const assistantMessage = {
+			id: this.plugin.createQueryMessageId(),
+			role: "assistant",
+			content: "",
+			status: "pending",
+			progress: "正在准备检索",
+			createdAt: new Date(Date.now() + 1).toISOString(),
+			runId: "",
+			retrievalTrace: null,
+			error: "",
+			retrievalMode,
+		};
+		this.activeRunId = "starting";
+		this.activeMessageId = assistantMessage.id;
+		this.stopRequested = false;
+		const executionConfig = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+		const input = this.plugin.buildQueryActionInput(question, priorMessages, retrievalMode);
+		let run = null;
+		let completedRun = null;
+		try {
+			await this.plugin.appendQueryMessages(session.id, [userMessage, assistantMessage], question);
+			await this.render({ scrollToBottom: true });
+			run = await this.plugin.startTaskRun(action, question.slice(0, 160), executionConfig);
+			this.activeRunId = run.id;
+			await this.plugin.updateQueryMessage(session.id, assistantMessage.id, { runId: run.id });
+			await this.render({ scrollToBottom: true });
+			const result = await this.plugin.runVaultAction(
+				run.id,
+				action,
+				input,
+				executionConfig,
+				{
+					onEvent: (event) => this.handleRunnerEvent(session.id, assistantMessage.id, event),
+				},
+			);
+			const stopped = this.stopRequested;
+			const status = result.exitCode === 0 ? "done" : stopped ? "interrupted" : "failed";
+			const response = result.stdout.trim();
+			const error = status === "done"
+				? ""
+				: stopped
+					? "已停止本轮查询。"
+					: result.stderr.trim() || `查询进程退出码：${result.exitCode}`;
+			const traceEvent = [...(result.events || [])].reverse().find((event) => event.type === "retrieval-preflight");
+			await this.plugin.updateQueryMessage(session.id, assistantMessage.id, {
+				status,
+				content: response || (status === "done" ? "本轮查询未返回文本。" : ""),
+				error,
+				progress: "",
+				retrievalTrace: traceEvent?.payload || assistantMessage.retrievalTrace || null,
+				retrievalMode: traceEvent?.mode || retrievalMode,
+			});
+			const output = [
+				response,
+				result.stderr.trim() ? `运行日志\n${result.stderr.trim()}` : "",
+			].filter(Boolean).join("\n\n").slice(0, 120000) || error;
+			completedRun = await this.plugin.finishTaskRun(run.id, {
+				status,
+				exitCode: result.exitCode,
+				output,
+				error,
+			});
+			new Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await this.plugin.updateQueryMessage(session.id, assistantMessage.id, {
+				status: this.stopRequested ? "interrupted" : "failed",
+				error: this.stopRequested ? "已停止本轮查询。" : message,
+				progress: "",
+			});
+			if (run) {
+				completedRun = await this.plugin.finishTaskRun(run.id, {
+					status: this.stopRequested ? "interrupted" : "failed",
+					exitCode: null,
+					output: "",
+					error: message,
+				});
+			}
+			new Notice(this.stopRequested ? "知识库查询已停止" : `知识库查询失败：${message}`);
+		} finally {
+			this.activeRunId = "";
+			this.activeMessageId = "";
+			this.stopRequested = false;
+			await this.render({ scrollToBottom: true });
+			if (!completedRun) console.warn("Query run completed without a persisted task record");
+		}
+	}
+
+	handleRunnerEvent(sessionId, messageId, event) {
+		if (!event || typeof event !== "object") return;
+		if (event.type === "retrieval-preflight") {
+			void this.plugin.updateQueryMessage(sessionId, messageId, {
+				retrievalTrace: event.payload || null,
+				retrievalMode: event.mode === "vault" ? "vault" : "web",
+				progress: this.progressFromTrace(event.payload),
+			});
+			this.updateProgressText(this.progressFromTrace(event.payload));
+			return;
+		}
+		if (event.type === "status" && event.label) {
+			void this.plugin.updateQueryMessage(sessionId, messageId, { progress: String(event.label) });
+			this.updateProgressText(String(event.label));
+		}
+	}
+
+	updateProgressText(value) {
+		if (this.statusEl?.isConnected) this.statusEl.setText(value);
+	}
+
+	progressFromTrace(trace) {
+		if (!trace || typeof trace !== "object") return "已完成检索预检";
+		if (trace.fallback?.used) return "未找到可靠种子，正在检查方向索引";
+		const seedCount = Array.isArray(trace.lexical_seeds) ? trace.lexical_seeds.length : 0;
+		const graphCount = Array.isArray(trace.graph_expansion) ? trace.graph_expansion.length : 0;
+		return `已找到 ${seedCount} 个种子和 ${graphCount} 个关联页面`;
+	}
+
+	stopQuery() {
+		if (!this.activeRunId || this.activeRunId === "starting" || this.stopRequested) return;
+		this.stopRequested = this.plugin.stopVaultAction(this.activeRunId);
+		if (!this.stopRequested) {
+			new Notice("当前查询进程已经结束");
+			return;
+		}
+		this.updateProgressText("正在停止任务");
+		const message = this.session.messages.find((item) => item.id === this.activeMessageId);
+		if (message) {
+			void this.plugin.updateQueryMessage(this.session.id, message.id, {
+				status: "stopping",
+				progress: "正在停止任务",
+			});
+		}
+	}
+
+	openSynthesisHandoff() {
+		const action = ACTION_BY_ID.get("synthesis");
+		const session = this.session;
+		const transcript = session.messages
+			.filter((message) => message.status === "done" && message.content)
+			.slice(-10)
+			.map((message) => `${message.role === "user" ? "用户" : "知识库回答"}：\n${message.content}`)
+			.join("\n\n");
+		const initialInput = [
+			"将以下知识库查询对话整理为合适的 Wiki 页面。",
+			"先重新核验被引用的 vault 页面，不要把对话中的模型表述直接当作证据。",
+			"根据内容选择 synthesis、method、concept、dataset 或 project 页面；优先更新已有页面，写入前遵守 research-vault-synthesis 边界并同步相应索引和日志。",
+			"",
+			`会话标题：${session.title}`,
+			"",
+			transcript,
+		].join("\n").slice(0, 30000);
+		new ActionInputModal(
+			this.app,
+			this.plugin,
+			action,
+			({ input, overrides }) => {
+				void this.executeSynthesisHandoff(action, input, overrides);
+			},
+			{ initialInput },
+		).open();
+	}
+
+	async executeSynthesisHandoff(action, input, overrides) {
+		if (this.plugin.isActionRunning(action.id)) {
+			new Notice("综合分析正在运行");
+			return;
+		}
+		const executionConfig = this.plugin.resolveActionExecutionConfig(action, overrides);
+		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || "整理查询对话";
+		const run = await this.plugin.startTaskRun(action, summary, executionConfig);
+		let completedRun;
+		try {
+			const result = await this.plugin.runVaultAction(run.id, action, input, executionConfig);
+			const output = [
+				result.stdout.trim(),
+				result.stderr.trim() ? `运行日志\n${result.stderr.trim()}` : "",
+			].filter(Boolean).join("\n\n").slice(0, 120000) || "任务未返回文本输出。";
+			const status = result.exitCode === 0 ? "done" : "failed";
+			completedRun = await this.plugin.finishTaskRun(run.id, {
+				status,
+				exitCode: result.exitCode,
+				output,
+				error: status === "failed" ? `进程退出码：${result.exitCode}` : "",
+			});
+			new Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			completedRun = await this.plugin.finishTaskRun(run.id, {
+				status: "failed",
+				exitCode: null,
+				output: "",
+				error: message,
+			});
+			new Notice(`整理为笔记失败：${message}`);
+		}
+		if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
+	}
+
+	displayRetrievalStage(stage) {
+		return {
+			"lexical-seed+graph-expansion": "词法种子 → 关系扩展",
+			"no-match-fallback": "无匹配 → 方向索引回退",
+			"preflight-unavailable": "预检不可用，交由检索 skill 回退",
+		}[stage] || stage || "未知";
+	}
+
+	formatTime(value) {
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return "";
+		return new Intl.DateTimeFormat("zh-CN", {
+			hour: "2-digit",
+			minute: "2-digit",
+		}).format(date);
+	}
+}
+
 class DashboardView extends ItemView {
 	constructor(leaf, plugin) {
 		super(leaf);
@@ -1972,6 +2601,10 @@ class DashboardView extends ItemView {
 			new Notice(`${action.label}将在后续阶段接入`);
 			return;
 		}
+		if (action.queryView) {
+			void this.plugin.activateQueryWikiView(options.initialInput || "");
+			return;
+		}
 		if (this.plugin.isActionRunning(action.id)) {
 			new Notice(`${action.label}正在运行`);
 			return;
@@ -2270,6 +2903,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		this.recoverInterruptedPracticeRuns();
 		this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
 		this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
+		this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
 		this.registerEvent(this.app.workspace.on("file-open", (file) => {
 			if (file?.extension === "md") this.lastContextFile = file;
 		}));
@@ -2289,6 +2923,13 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			name: "打开代码练习",
 			callback: () => {
 				this.activateCodePracticeView();
+			},
+		});
+		this.addCommand({
+			id: "open-query-wiki",
+			name: "打开知识库对话",
+			callback: () => {
+				this.activateQueryWikiView();
 			},
 		});
 		this.addSettingTab(new AgentDashboardSettingTab(this.app, this));
@@ -2527,10 +3168,39 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		const storedSettings = stored.settings && typeof stored.settings === "object" ? stored.settings : stored;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings);
 		this.taskRuns = Array.isArray(stored.taskRuns) ? stored.taskRuns.slice(0, 30) : [];
+		this.querySessions = Array.isArray(stored.querySessions)
+			? stored.querySessions.slice(0, 8).map((session) => this.normalizeQuerySession(session))
+			: [];
+		this.activeQuerySessionId = typeof stored.activeQuerySessionId === "string"
+			? stored.activeQuerySessionId
+			: "";
 		if (!this.settings.projectRoot) {
 			this.settings.projectRoot = this.inferProjectRoot();
 		}
 		let changed = false;
+		if (!this.querySessions.length) {
+			const session = this.makeQuerySession();
+			this.querySessions = [session];
+			this.activeQuerySessionId = session.id;
+			changed = true;
+		}
+		if (!this.querySessions.some((session) => session.id === this.activeQuerySessionId)) {
+			this.activeQuerySessionId = this.querySessions[0].id;
+			changed = true;
+		}
+		this.querySessions = this.querySessions.map((session) => {
+			const messages = session.messages.map((message) => {
+				if (!["pending", "stopping"].includes(message.status)) return message;
+				changed = true;
+				return {
+					...message,
+					status: "interrupted",
+					progress: "",
+					error: "Obsidian 或插件在回答完成前关闭，本轮查询已标记为中断。",
+				};
+			});
+			return { ...session, messages };
+		});
 		const preferredCodexExecutable = findPreferredCodexExecutable();
 		const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
 		if (
@@ -2579,6 +3249,150 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		await this.saveData({
 			settings: this.settings,
 			taskRuns: this.taskRuns,
+			querySessions: this.querySessions,
+			activeQuerySessionId: this.activeQuerySessionId,
+		});
+	}
+
+	makeQuerySession(title = "新对话") {
+		const now = new Date().toISOString();
+		return {
+			id: `query-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			title,
+			retrievalMode: "web",
+			createdAt: now,
+			updatedAt: now,
+			messages: [],
+		};
+	}
+
+	normalizeQuerySession(session) {
+		const fallback = this.makeQuerySession();
+		const messages = Array.isArray(session?.messages)
+			? session.messages.slice(-60).map((message) => ({
+				id: String(message?.id || this.createQueryMessageId()),
+				role: message?.role === "user" ? "user" : "assistant",
+				content: String(message?.content || "").slice(0, 20000),
+				status: String(message?.status || "done"),
+				progress: String(message?.progress || ""),
+				createdAt: String(message?.createdAt || new Date().toISOString()),
+				runId: String(message?.runId || ""),
+				retrievalTrace: message?.retrievalTrace && typeof message.retrievalTrace === "object"
+					? message.retrievalTrace
+					: null,
+				retrievalMode: message?.retrievalMode === "vault" ? "vault" : "web",
+				error: String(message?.error || "").slice(0, 12000),
+			}))
+			: [];
+		return {
+			id: String(session?.id || fallback.id),
+			title: String(session?.title || "新对话").slice(0, 80),
+			retrievalMode: session?.retrievalMode === "vault" ? "vault" : "web",
+			createdAt: String(session?.createdAt || fallback.createdAt),
+			updatedAt: String(session?.updatedAt || fallback.updatedAt),
+			messages,
+		};
+	}
+
+	createQueryMessageId() {
+		return `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+
+	getQuerySessions() {
+		return [...this.querySessions].sort((a, b) => {
+			return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+		});
+	}
+
+	getActiveQuerySession() {
+		return this.querySessions.find((session) => session.id === this.activeQuerySessionId)
+			|| this.querySessions[0];
+	}
+
+	async createQuerySession() {
+		const session = this.makeQuerySession();
+		this.querySessions = [session, ...this.querySessions].slice(0, 8);
+		this.activeQuerySessionId = session.id;
+		await this.saveSettings();
+		return session;
+	}
+
+	async setActiveQuerySession(sessionId) {
+		if (!this.querySessions.some((session) => session.id === sessionId)) return;
+		this.activeQuerySessionId = sessionId;
+		await this.saveSettings();
+	}
+
+	async clearActiveQuerySession() {
+		const session = this.getActiveQuerySession();
+		session.messages = [];
+		session.title = "新对话";
+		session.updatedAt = new Date().toISOString();
+		await this.saveSettings();
+	}
+
+	async setActiveQueryMode(mode) {
+		const session = this.getActiveQuerySession();
+		session.retrievalMode = mode === "vault" ? "vault" : "web";
+		session.updatedAt = new Date().toISOString();
+		await this.saveSettings();
+	}
+
+	async appendQueryMessages(sessionId, messages, firstQuestion = "") {
+		const session = this.querySessions.find((item) => item.id === sessionId);
+		if (!session) throw new Error("查询会话不存在");
+		session.messages = [...session.messages, ...messages].slice(-60);
+		if (session.title === "新对话" && firstQuestion) {
+			session.title = firstQuestion.replace(/\s+/g, " ").slice(0, 36);
+		}
+		session.updatedAt = new Date().toISOString();
+		await this.saveSettings();
+	}
+
+	async updateQueryMessage(sessionId, messageId, updates) {
+		const session = this.querySessions.find((item) => item.id === sessionId);
+		if (!session) return null;
+		const index = session.messages.findIndex((message) => message.id === messageId);
+		if (index === -1) return null;
+		session.messages[index] = {
+			...session.messages[index],
+			...updates,
+		};
+		if (typeof session.messages[index].content === "string") {
+			session.messages[index].content = session.messages[index].content.slice(0, 20000);
+		}
+		if (typeof session.messages[index].error === "string") {
+			session.messages[index].error = session.messages[index].error.slice(0, 12000);
+		}
+		session.updatedAt = new Date().toISOString();
+		await this.saveSettings();
+		return session.messages[index];
+	}
+
+	buildQueryActionInput(question, priorMessages, mode = "web") {
+		const completed = Array.isArray(priorMessages)
+			? priorMessages.filter((message) => message.status === "done" && message.content)
+			: [];
+		const recent = completed.slice(-8).map((message) => ({
+			role: message.role,
+			content: String(message.content).slice(0, 3000),
+		}));
+		const olderUsers = completed
+			.slice(0, Math.max(0, completed.length - 8))
+			.filter((message) => message.role === "user")
+			.slice(-6)
+			.map((message) => String(message.content).replace(/\s+/g, " ").slice(0, 240));
+		const firstQuestion = completed.find((message) => message.role === "user")?.content || "";
+		const summaryParts = [];
+		if (firstQuestion) summaryParts.push(`对话起点：${String(firstQuestion).replace(/\s+/g, " ").slice(0, 400)}`);
+		if (olderUsers.length) summaryParts.push(`较早追问：${olderUsers.join("；")}`);
+		return JSON.stringify({
+			kind: "query-session",
+			schema_version: 1,
+			mode: mode === "vault" ? "vault" : "web",
+			question,
+			conversation_summary: summaryParts.join("\n"),
+			recent_turns: recent,
 		});
 	}
 
@@ -2739,7 +3553,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	runVaultAction(runId, action, input, executionConfig = null) {
+	runVaultAction(runId, action, input, executionConfig = null, hooks = {}) {
 		const registered = ACTION_BY_ID.get(action.id);
 		if (!registered || !registered.enabled) {
 			return Promise.reject(new Error(`操作尚未启用：${action.label}`));
@@ -2775,6 +3589,8 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		return new Promise((resolve, reject) => {
 			let stdout = "";
 			let stderr = "";
+			let stderrBuffer = "";
+			const events = [];
 			let settled = false;
 			let timedOut = false;
 			const child = spawn(this.settings.pythonExecutable, args, {
@@ -2789,11 +3605,30 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			});
 			this.activeProcesses.set(runId, child);
 			const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-160000);
+			const consumeStderrLine = (line, keepNewline = true) => {
+				const normalized = line.replace(/\r$/, "");
+				if (normalized.startsWith("DASHBOARD_EVENT ")) {
+					try {
+						const event = JSON.parse(normalized.slice("DASHBOARD_EVENT ".length));
+						events.push(event);
+						if (typeof hooks.onEvent === "function") hooks.onEvent(event);
+					} catch (error) {
+						console.warn("Could not parse Dashboard runner event", error);
+					}
+					return;
+				}
+				stderr = append(stderr, `${line}${keepNewline ? "\n" : ""}`);
+				if (typeof hooks.onStderr === "function") hooks.onStderr(line);
+			};
 			child.stdout.on("data", (chunk) => {
 				stdout = append(stdout, chunk);
+				if (typeof hooks.onStdout === "function") hooks.onStdout(chunk.toString("utf8"));
 			});
 			child.stderr.on("data", (chunk) => {
-				stderr = append(stderr, chunk);
+				stderrBuffer += chunk.toString("utf8");
+				const lines = stderrBuffer.split("\n");
+				stderrBuffer = lines.pop() || "";
+				lines.forEach((line) => consumeStderrLine(line));
 			});
 			child.once("error", (error) => {
 				if (settled) return;
@@ -2807,11 +3642,13 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				settled = true;
 				window.clearTimeout(timer);
 				this.activeProcesses.delete(runId);
+				if (stderrBuffer) consumeStderrLine(stderrBuffer, false);
 				resolve({
 					exitCode: timedOut ? 124 : typeof code === "number" ? code : 1,
 					signal: signal || "",
 					stdout,
 					stderr: timedOut ? `${stderr}\n任务超过 ${timeoutSeconds} 秒，已请求终止。` : stderr,
+					events,
 				});
 			});
 			const timer = window.setTimeout(() => {
@@ -2820,6 +3657,18 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			}, (timeoutSeconds + 15) * 1000);
 			child.stdin.end(input, "utf8");
 		});
+	}
+
+	stopVaultAction(runId) {
+		const child = this.activeProcesses.get(runId);
+		if (!child || child.killed) return false;
+		child.kill();
+		return true;
+	}
+
+	isVaultActionProcessActive(runId) {
+		const child = this.activeProcesses.get(runId);
+		return Boolean(child && !child.killed);
 	}
 
 	async activateDashboardView() {
@@ -2839,6 +3688,18 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			await leaf.setViewState({ type: CODE_PRACTICE_VIEW_TYPE, active: true });
 		}
 		if (typeof leaf.view?.setRelatedNote === "function") leaf.view.setRelatedNote(contextFile);
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	async activateQueryWikiView(initialQuestion = "") {
+		const existing = this.app.workspace.getLeavesOfType(QUERY_WIKI_VIEW_TYPE)[0];
+		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
+		if (!existing) {
+			await leaf.setViewState({ type: QUERY_WIKI_VIEW_TYPE, active: true });
+		}
+		if (typeof leaf.view?.setInitialQuestion === "function") {
+			leaf.view.setInitialQuestion(initialQuestion);
+		}
 		await this.app.workspace.revealLeaf(leaf);
 	}
 };

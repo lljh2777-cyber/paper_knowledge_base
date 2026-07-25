@@ -78,15 +78,16 @@ static evidence is insufficient.
         "input_required": True,
         "writes": False,
         "instructions": """
-Use the `research-vault-retrieval` skill. Follow the supplied deterministic
-retrieval preflight as a transparent cascade: inspect lexical seeds first,
-expand through linked and linking notes second, and use the orientation-index
-fallback only when no reliable seed exists. The preflight contains routing
-hints, not evidence; read candidate notes directly before making claims.
-Answer only from evidence already in the vault, cite the relevant vault notes,
-and state `Vault 中未找到足够依据` where evidence is insufficient. In the final
+Use the `research-vault-retrieval` skill. Follow the supplied retrieval mode
+and deterministic preflight exactly. Inspect lexical seeds first, expand
+through linked and linking notes second, and use the orientation-index fallback
+only when no reliable seed exists. The preflight contains routing hints, not
+evidence; read candidate notes directly before making claims. In the final
 response include a concise `检索路径` section listing the stage used, seed
 notes, graph-expanded notes actually inspected, and any fallback reason.
+When citing a vault Markdown note, use an Obsidian wikilink relative to the
+vault root, for example `[[wiki/methods/example|页面标题]]`, so the Dashboard
+sidebar can open it directly.
 This action is read-only: do not create, modify, move, or delete files. Return
 the answer in the final response so the dashboard can display it.
 """,
@@ -217,11 +218,54 @@ def validate_project_root(project_root: Path) -> Path:
     return root
 
 
+def normalize_action_input(action: str, raw_input: str) -> tuple[str, str, str]:
+    if action != "vault-retrieval":
+        return raw_input, "", "vault"
+    try:
+        payload = json.loads(raw_input)
+    except json.JSONDecodeError:
+        return raw_input, "", "vault"
+    if not isinstance(payload, dict) or payload.get("kind") != "query-session":
+        return raw_input, "", "vault"
+
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        raise ValueError("Query session request requires a non-empty question")
+    retrieval_mode = str(payload.get("mode") or "web").strip().lower()
+    if retrieval_mode not in {"vault", "web"}:
+        retrieval_mode = "web"
+    summary = str(payload.get("conversation_summary") or "").strip()[:4000]
+    recent_turns = payload.get("recent_turns")
+    if not isinstance(recent_turns, list):
+        recent_turns = []
+
+    context_lines: list[str] = []
+    if summary:
+        context_lines.extend(["Conversation summary:", summary])
+    normalized_turns: list[tuple[str, str]] = []
+    for turn in recent_turns[-8:]:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(turn.get("content") or "").strip()[:3000]
+        if content:
+            normalized_turns.append((role, content))
+    if normalized_turns:
+        context_lines.append("Recent turns:")
+        for role, content in normalized_turns:
+            context_lines.append(f"{role}: {content}")
+    return question, "\n".join(context_lines), retrieval_mode
+
+
 def build_prompt(
     action: str,
     user_input: str,
     project_root: Path,
     retrieval_preflight: dict[str, Any] | None = None,
+    conversation_context: str = "",
+    retrieval_mode: str = "vault",
 ) -> str:
     spec = ACTION_SPECS[action]
     request = user_input.strip()
@@ -230,7 +274,31 @@ def build_prompt(
 
     retrieval_block = ""
     if action == "vault-retrieval":
+        if retrieval_mode == "web":
+            mode_block = """
+Retrieval mode: VAULT + LIVE WEB.
+
+First inspect relevant vault notes from the deterministic preflight. Then use
+live web search to add current external knowledge. Prefer primary or
+authoritative sources such as papers, official documentation, database pages,
+standards, and publisher records. Cite external claims with direct Markdown
+links. Keep vault-backed claims and web-derived claims visibly separate; do not
+present web content as if it came from the vault. Where they conflict, report
+the conflict and evidence dates. Use sections equivalent to `知识库证据`,
+`联网补充`, `综合结论`, `冲突/证据缺口`, and `检索路径` when useful. If live search
+is unavailable, state that explicitly and continue with vault evidence only.
+"""
+        else:
+            mode_block = """
+Retrieval mode: VAULT ONLY.
+
+Use only evidence already present in the vault. Do not use web search, external
+pages, or unsupported model knowledge. Cite the relevant vault notes and state
+`Vault 中未找到足够依据` where evidence is insufficient.
+"""
         retrieval_block = f"""
+{mode_block.strip()}
+
 Deterministic retrieval preflight:
 ```json
 {json.dumps(retrieval_preflight or {}, ensure_ascii=False, indent=2)}
@@ -238,6 +306,15 @@ Deterministic retrieval preflight:
 
 Treat this JSON as candidate routing metadata, not as claim evidence. Do not
 cite a path merely because it appears here; open and inspect the note first.
+"""
+        if conversation_context:
+            retrieval_block += f"""
+Conversation context:
+{conversation_context}
+
+Use this context only to resolve follow-up references such as "it", "this
+paper", or "explain further". Previous assistant answers are not vault
+evidence. Re-check the current question against directly inspected vault notes.
 """
 
     return f"""You are executing a Research Vault dashboard action in:
@@ -329,6 +406,7 @@ def build_codex_command(
     model: str,
     reasoning_effort: str,
     service_tier: str,
+    retrieval_mode: str = "vault",
 ) -> list[str]:
     effective_service_tier = (
         "fast" if service_tier == "fast" and model in FAST_SERVICE_MODELS else "default"
@@ -350,6 +428,14 @@ def build_codex_command(
         "-c",
         f'service_tier="{effective_service_tier}"',
     ]
+    if spec.get("agent") == "research-vault-retrieval":
+        web_search_mode = "live" if retrieval_mode == "web" else "disabled"
+        command.extend(
+            [
+                "-c",
+                f'web_search="{web_search_mode}"',
+            ]
+        )
     if model.strip():
         command.extend(["-m", model.strip()])
     command.append("-")
@@ -403,6 +489,8 @@ def dry_run_payload(
     service_tier: str,
     python_value: str,
     user_input: str,
+    conversation_context: str = "",
+    retrieval_mode: str = "vault",
 ) -> dict[str, Any]:
     spec = ACTION_SPECS[action]
     kind = spec.get("kind", "codex")
@@ -442,12 +530,15 @@ def dry_run_payload(
             model_value,
             reasoning_effort,
             effective_service_tier,
+            retrieval_mode,
         )
         prompt = build_prompt(
             action,
             user_input,
             project_root,
             retrieval_preflight,
+            conversation_context,
+            retrieval_mode,
         )
     return {
         "action": action,
@@ -460,6 +551,7 @@ def dry_run_payload(
         "model": model_value if kind == "codex" else None,
         "reasoning_effort": reasoning_effort if kind == "codex" else None,
         "service_tier": effective_service_tier if kind == "codex" else None,
+        "retrieval_mode": retrieval_mode if action == "vault-retrieval" else None,
         "command": command,
         "prompt": prompt,
     }
@@ -486,8 +578,12 @@ def main() -> int:
         return 0
 
     project_root = validate_project_root(args.project_root)
-    user_input = sys.stdin.read()
+    raw_user_input = sys.stdin.read()
     spec = ACTION_SPECS[args.action]
+    user_input, conversation_context, retrieval_mode = normalize_action_input(
+        args.action,
+        raw_user_input,
+    )
 
     if args.dry_run:
         print(
@@ -501,6 +597,8 @@ def main() -> int:
                     args.service_tier,
                     args.python,
                     user_input,
+                    conversation_context,
+                    retrieval_mode,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -543,11 +641,43 @@ def main() -> int:
             f"fallback={bool(retrieval_preflight.get('fallback', {}).get('used'))}",
             file=sys.stderr,
         )
+        print(
+            "DASHBOARD_EVENT "
+            + json.dumps(
+                {
+                    "type": "retrieval-preflight",
+                    "mode": retrieval_mode,
+                    "payload": retrieval_preflight,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        print(
+            "DASHBOARD_EVENT "
+            + json.dumps(
+                {
+                    "type": "status",
+                    "stage": "reading-evidence",
+                    "label": (
+                        "正在读取知识库并检索联网来源"
+                        if retrieval_mode == "web"
+                        else "正在读取候选笔记并生成回答"
+                    ),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
     prompt = build_prompt(
         args.action,
         user_input,
         project_root,
         retrieval_preflight,
+        conversation_context,
+        retrieval_mode,
     )
     command = build_codex_command(
         codex,
@@ -556,6 +686,7 @@ def main() -> int:
         args.model,
         args.reasoning_effort,
         args.service_tier,
+        retrieval_mode,
     )
     result = run_process(command, project_root, args.timeout_seconds, prompt)
     if result != 0 or not spec.get("post_validate"):
