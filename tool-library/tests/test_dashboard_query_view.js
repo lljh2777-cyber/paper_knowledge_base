@@ -134,30 +134,54 @@ async function testDirectApiQuery() {
 		},
 	});
 	const imagePath = "wiki/assets/figures/li_cellular_2026/figure-1.png";
+	const secondImagePath = "wiki/assets/figures/li_cellular_2026/figure-2.png";
 	const visionResult = await plugin.runDirectVaultQuery(
 		"run-vision",
 		profile.id,
-		"分析这张图",
+		"联合分析这两张图",
 		[],
 		"vault",
 		{},
-		[{ path: imagePath, name: "figure-1.png" }],
+		[
+			{
+				path: imagePath,
+				name: "figure-1.png",
+				sourceNotePath: "wiki/sources/li_cellular_2026.md",
+			},
+			{
+				path: secondImagePath,
+				name: "figure-2.png",
+				sourceNotePath: "wiki/sources/li_cellular_2026.md",
+			},
+		],
 	);
 	assert.strictEqual(visionResult.stdout, "图像回答");
+	assert.deepStrictEqual(
+		visionResult.events[0].payload.linked_note_paths,
+		["wiki/sources/li_cellular_2026.md"],
+	);
 	const visionContent = visionRequest.messages.at(-1).content;
 	assert.ok(Array.isArray(visionContent));
 	assert.strictEqual(visionContent[0].type, "image_url");
 	assert.ok(visionContent[0].image_url.url.startsWith("data:image/png;base64,"));
+	assert.strictEqual(visionContent[1].type, "image_url");
+	assert.ok(visionContent[1].image_url.url.startsWith("data:image/png;base64,"));
 	assert.strictEqual(visionContent.at(-1).type, "text");
 	assert.ok(visionContent.at(-1).text.includes("实际检查图片像素"));
+	assert.ok(visionContent.at(-1).text.includes("图片 2"));
+	assert.ok(visionContent.at(-1).text.includes("wiki/sources/li_cellular_2026.md"));
 	const normalizedVisionSession = plugin.normalizeQuerySession({
 		messages: [{
 			role: "user",
-			content: "分析这张图",
-			attachments: [{ path: imagePath, name: "figure-1.png" }],
+			content: "联合分析这两张图",
+			attachments: [
+				{ path: imagePath, name: "figure-1.png" },
+				{ path: secondImagePath, name: "figure-2.png" },
+			],
 		}],
 	});
 	assert.strictEqual(normalizedVisionSession.messages[0].attachments[0].path, imagePath);
+	assert.strictEqual(normalizedVisionSession.messages[0].attachments[1].path, secondImagePath);
 	assert.ok(!JSON.stringify(normalizedVisionSession).includes("base64"));
 	assert.throws(
 		() => plugin.readVaultImageData({ path: "../outside.png" }),
@@ -265,6 +289,7 @@ async function testDirectApiQuery() {
 
 	const figurePath = "wiki/assets/figures/example/figure-1.png";
 	const unreferencedPath = "wiki/assets/figures/example/figure-2.png";
+	const autoFigurePath = "wiki/assets/figures/example/figure-3.png";
 	const sourceNote = {
 		path: "wiki/sources/example.md",
 		basename: "example",
@@ -273,9 +298,21 @@ async function testDirectApiQuery() {
 		path: "wiki/methods/example-method.md",
 		basename: "example-method",
 	};
+	const figureFile = {
+		path: figurePath,
+		name: "figure-1.png",
+		stat: { size: 1024 },
+	};
+	const autoFigureFile = {
+		path: autoFigurePath,
+		name: "figure-3.png",
+		stat: { size: 2048 },
+	};
 	const filesByPath = new Map([
 		[sourceNote.path, sourceNote],
 		[methodNote.path, methodNote],
+		[figurePath, figureFile],
+		[autoFigurePath, autoFigureFile],
 	]);
 	plugin.app = {
 		vault: {
@@ -290,7 +327,11 @@ async function testDirectApiQuery() {
 				if (file.path === sourceNote.path) {
 					return {
 						frontmatter: { title_zh: "示例论文" },
-						embeds: [{ link: figurePath }, { link: figurePath }],
+						embeds: [
+							{ link: figurePath },
+							{ link: figurePath },
+							{ link: autoFigurePath },
+						],
 					};
 				}
 				return {
@@ -298,9 +339,7 @@ async function testDirectApiQuery() {
 					embeds: [{ link: figurePath }],
 				};
 			},
-			getFirstLinkpathDest: (link) => (
-				link === figurePath ? { path: figurePath } : null
-			),
+			getFirstLinkpathDest: (link) => filesByPath.get(link) || null,
 		},
 	};
 	const referenceIndex = plugin.buildVaultImageReferenceIndex([
@@ -312,6 +351,25 @@ async function testDirectApiQuery() {
 		{ path: methodNote.path, title: "Example method", count: 1 },
 	]);
 	assert.deepStrictEqual(referenceIndex.get(unreferencedPath), []);
+
+	const linkedNotes = plugin.extractQuestionNoteFiles(
+		"请分析 obsidian://open?vault=knowledge-base&file=wiki%2Fsources%2Fexample中的图片，并联系 [[wiki/methods/example-method|方法页]]。",
+	);
+	assert.deepStrictEqual(
+		linkedNotes.map((file) => file.path),
+		[sourceNote.path, methodNote.path],
+	);
+	const discovered = await plugin.resolveQuestionImageAttachments(
+		"请分析 obsidian://open?vault=knowledge-base&file=wiki%2Fsources%2Fexample中的图片",
+	);
+	assert.strictEqual(discovered.discoveredCount, 2);
+	assert.deepStrictEqual(
+		discovered.attachments.map((attachment) => attachment.path),
+		[figurePath, autoFigurePath],
+	);
+	assert.ok(discovered.attachments.every(
+		(attachment) => attachment.sourceNotePath === sourceNote.path,
+	));
 }
 
 testDirectApiQuery()

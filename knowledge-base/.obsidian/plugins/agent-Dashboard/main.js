@@ -24,6 +24,8 @@ const VIEW_TYPE = "agent-dashboard-research-vault";
 const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 const QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 const MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
+const MAX_QUERY_IMAGE_ATTACHMENTS = 6;
+const MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
 const VAULT_IMAGE_MIME_TYPES = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -210,12 +212,34 @@ function normalizeVaultImageAttachment(value) {
 	const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
 	if (!attachmentPath || !mimeType) return null;
 	const size = Number(value?.size || 0);
+	const sourceNotePath = String(value?.sourceNotePath || "")
+		.trim()
+		.replace(/\\/g, "/")
+		.replace(/^\/+/, "");
 	return {
 		path: attachmentPath.slice(0, 1000),
 		name: String(value?.name || path.posix.basename(attachmentPath)).slice(0, 240),
 		mimeType,
 		size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+		sourceNotePath: sourceNotePath.toLowerCase().endsWith(".md")
+			? sourceNotePath.slice(0, 1000)
+			: "",
 	};
+}
+
+function normalizeVaultImageAttachments(values) {
+	const seen = new Set();
+	const normalized = [];
+	for (const value of Array.isArray(values) ? values : []) {
+		const attachment = normalizeVaultImageAttachment(value);
+		if (!attachment) continue;
+		const key = attachment.path.toLocaleLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		normalized.push(attachment);
+		if (normalized.length >= MAX_QUERY_IMAGE_ATTACHMENTS) break;
+	}
+	return normalized;
 }
 
 function normalizeProviderModelList(payload) {
@@ -2272,10 +2296,14 @@ class CodePracticeView extends ItemView {
 }
 
 class VaultImagePickerModal extends Modal {
-	constructor(app, plugin, onChoose) {
+	constructor(app, plugin, onChoose, selectedImages = []) {
 		super(app);
 		this.plugin = plugin;
 		this.onChoose = onChoose;
+		this.selectedPaths = new Set(
+			normalizeVaultImageAttachments(selectedImages)
+				.map((image) => image.path.toLocaleLowerCase()),
+		);
 	}
 
 	onOpen() {
@@ -2283,10 +2311,10 @@ class VaultImagePickerModal extends Modal {
 		contentEl.empty();
 		contentEl.addClass("query-wiki-image-picker");
 		this.modalEl?.addClass("query-wiki-image-picker-modal");
-		this.setTitle("选择一张 Vault 图片");
+		this.setTitle("添加 Vault 图片");
 		contentEl.createEl("p", {
 			cls: "query-wiki-image-picker-description",
-			text: "将鼠标移到图片上可查看大图和引用笔记。图片仅用于本次 Direct API 请求；会话历史只保存 Vault 相对路径。",
+			text: `每轮最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张。将鼠标移到图片上可查看大图和引用笔记；会话历史只保存 Vault 相对路径。`,
 		});
 		const toolbar = contentEl.createDiv({ cls: "query-wiki-image-picker-toolbar" });
 		const search = toolbar.createEl("input", {
@@ -2319,6 +2347,7 @@ class VaultImagePickerModal extends Modal {
 		const files = this.app.vault.getFiles()
 			.filter((file) => Boolean(VAULT_IMAGE_MIME_TYPES[path.extname(file.path).toLowerCase()]))
 			.filter((file) => Number(file.stat?.size || 0) <= MAX_VAULT_IMAGE_BYTES)
+			.filter((file) => !this.selectedPaths.has(file.path.toLocaleLowerCase()))
 			.sort((a, b) => Number(b.stat?.mtime || 0) - Number(a.stat?.mtime || 0));
 		const referenceIndex = this.plugin.buildVaultImageReferenceIndex(files);
 		const items = files.map((file) => ({
@@ -2478,7 +2507,7 @@ class QueryWikiView extends ItemView {
 		this.renderVersion = 0;
 		this.inputEl = null;
 		this.statusEl = null;
-		this.pendingImage = null;
+		this.pendingImages = [];
 		this.executionOverrides = {
 			model: "",
 			reasoningEffort: "",
@@ -2576,7 +2605,7 @@ class QueryWikiView extends ItemView {
 		sessions.value = session.id;
 		sessions.disabled = Boolean(this.activeRunId);
 		sessions.addEventListener("change", () => {
-			this.pendingImage = null;
+			this.pendingImages = [];
 			void this.plugin.setActiveQuerySession(sessions.value).then(() => {
 				this.syncActiveRunFromSession();
 				return this.render();
@@ -2585,7 +2614,7 @@ class QueryWikiView extends ItemView {
 		const create = this.createIconButton(tools, "message-square-plus", "新建对话");
 		create.disabled = Boolean(this.activeRunId);
 		create.addEventListener("click", () => {
-			this.pendingImage = null;
+			this.pendingImages = [];
 			void this.plugin.createQuerySession().then(() => this.render()).then(() => this.inputEl?.focus());
 		});
 		const save = this.createIconButton(tools, "file-output", "整理为笔记");
@@ -2595,7 +2624,7 @@ class QueryWikiView extends ItemView {
 		clear.disabled = Boolean(this.activeRunId) || session.messages.length === 0;
 		clear.addEventListener("click", () => {
 			if (!window.confirm("清空当前查询会话？此操作不会删除任何知识库笔记。")) return;
-			this.pendingImage = null;
+			this.pendingImages = [];
 			void this.plugin.clearActiveQuerySession().then(() => this.render()).then(() => this.inputEl?.focus());
 		});
 	}
@@ -2683,24 +2712,28 @@ class QueryWikiView extends ItemView {
 	}
 
 	renderMessageImages(parent, attachments) {
-		const images = Array.isArray(attachments)
-			? attachments.map(normalizeVaultImageAttachment).filter(Boolean).slice(0, 1)
-			: [];
+		const images = normalizeVaultImageAttachments(attachments);
 		if (!images.length) return;
-		const image = images[0];
-		const file = this.app.vault.getAbstractFileByPath(image.path);
-		const figure = parent.createEl("figure", { cls: "query-wiki-message-image" });
-		if (file) {
-			figure.createEl("img", {
-				attr: {
-					src: this.app.vault.getResourcePath(file),
-					alt: image.name,
-				},
+		const gallery = parent.createDiv({ cls: "query-wiki-message-images" });
+		for (const image of images) {
+			const file = this.app.vault.getAbstractFileByPath(image.path);
+			const figure = gallery.createEl("figure", { cls: "query-wiki-message-image" });
+			if (file) {
+				figure.createEl("img", {
+					attr: {
+						src: this.app.vault.getResourcePath(file),
+						alt: image.name,
+					},
+				});
+			}
+			figure.createEl("figcaption", {
+				text: file
+					? image.sourceNotePath
+						? `${image.path} · 来自 ${image.sourceNotePath}`
+						: image.path
+					: `${image.path}（文件已不可用）`,
 			});
 		}
-		figure.createEl("figcaption", {
-			text: file ? image.path : `${image.path}（文件已不可用）`,
-		});
 	}
 
 	renderRetrievalTrace(parent, trace) {
@@ -2804,26 +2837,33 @@ class QueryWikiView extends ItemView {
 		this.initialQuestion = "";
 		input.disabled = Boolean(this.activeRunId);
 		this.inputEl = input;
-		if (this.pendingImage) {
-			const preview = composer.createDiv({ cls: "query-wiki-pending-image" });
-			const file = this.app.vault.getAbstractFileByPath(this.pendingImage.path);
-			if (file) {
-				preview.createEl("img", {
-					attr: {
-						src: this.app.vault.getResourcePath(file),
-						alt: "",
-					},
+		if (this.pendingImages.length) {
+			const previews = composer.createDiv({ cls: "query-wiki-pending-images" });
+			this.pendingImages.forEach((image, index) => {
+				const preview = previews.createDiv({ cls: "query-wiki-pending-image" });
+				const file = this.app.vault.getAbstractFileByPath(image.path);
+				if (file) {
+					preview.createEl("img", {
+						attr: {
+							src: this.app.vault.getResourcePath(file),
+							alt: "",
+						},
+					});
+				}
+				const previewText = preview.createDiv({ cls: "query-wiki-pending-image-text" });
+				previewText.createEl("strong", { text: image.name });
+				previewText.createEl("span", {
+					text: image.sourceNotePath
+						? `${image.path} · 来自 ${image.sourceNotePath}`
+						: image.path,
 				});
-			}
-			const previewText = preview.createDiv({ cls: "query-wiki-pending-image-text" });
-			previewText.createEl("strong", { text: this.pendingImage.name });
-			previewText.createEl("span", { text: this.pendingImage.path });
-			const remove = this.createIconButton(preview, "x", "移除图片");
-			remove.disabled = Boolean(this.activeRunId);
-			remove.addEventListener("click", () => {
-				this.initialQuestion = this.inputEl?.value || "";
-				this.pendingImage = null;
-				void this.render().then(() => this.inputEl?.focus());
+				const remove = this.createIconButton(preview, "x", `移除图片 ${image.name}`);
+				remove.disabled = Boolean(this.activeRunId);
+				remove.addEventListener("click", () => {
+					this.initialQuestion = this.inputEl?.value || "";
+					this.pendingImages = this.pendingImages.filter((_, itemIndex) => itemIndex !== index);
+					void this.render().then(() => this.inputEl?.focus());
+				});
 			});
 		}
 		const footer = composer.createDiv({ cls: "query-wiki-composer-footer" });
@@ -2841,25 +2881,30 @@ class QueryWikiView extends ItemView {
 		const attach = this.createIconButton(
 			controls,
 			"image-plus",
-			this.pendingImage ? "更换图片" : "附加 Vault 图片",
+			this.pendingImages.length ? "继续添加 Vault 图片" : "附加 Vault 图片",
 		);
 		attach.addClass("query-wiki-attach");
-		attach.disabled = Boolean(this.activeRunId) || !canAttachImage;
+		attach.disabled = Boolean(this.activeRunId)
+			|| !canAttachImage
+			|| this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS;
 		attach.title = canAttachImage
-			? this.pendingImage
-				? "更换图片"
-				: "附加 Vault 图片"
+			? this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS
+				? `最多附加 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张图片`
+				: `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS}）`
 			: directProfile
-				? "当前 Direct API 配置或适配器未启用单图输入"
+				? "当前 Direct API 配置或适配器未启用视觉输入"
 				: "图片附件目前仅支持 Direct API";
 		attach.addEventListener("click", () => {
 			if (attach.disabled) return;
 			const draft = this.inputEl?.value || "";
 			new VaultImagePickerModal(this.app, this.plugin, (image) => {
 				this.initialQuestion = draft;
-				this.pendingImage = image;
+				this.pendingImages = normalizeVaultImageAttachments([
+					...this.pendingImages,
+					image,
+				]);
 				void this.render().then(() => this.inputEl?.focus());
-			}).open();
+			}, this.pendingImages).open();
 		});
 		const stop = this.createIconButton(controls, "square", "停止生成");
 		stop.addClass("query-wiki-stop");
@@ -2919,7 +2964,7 @@ class QueryWikiView extends ItemView {
 				if (button.disabled || value === currentMode) return;
 				this.initialQuestion = this.inputEl?.value || "";
 				if (value === "web" && this.plugin.resolveQueryBackendId(this.session.queryBackendId) !== "codex-cli") {
-					if (this.pendingImage) this.pendingImage = null;
+					if (this.pendingImages.length) this.pendingImages = [];
 					await this.plugin.setActiveQueryBackend("codex-cli");
 					new Notice("联网搜索使用 Codex CLI；已切换执行后端");
 				}
@@ -2992,7 +3037,7 @@ class QueryWikiView extends ItemView {
 			directNotice.toggleClass("is-visible", usingDirect);
 			directNotice.setText(
 				usingDirect
-					? `将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。${profileSupportsQueryImage(selectedProfile) ? "可附加一张 Vault 图片。" : "当前适配器未启用单图输入。"}Direct API 暂不提供联网搜索、Codex skill 或文件写入。`
+					? `将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。${profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。"}Direct API 暂不提供联网搜索、Codex skill 或文件写入。`
 					: "",
 			);
 			if (usingDirect) {
@@ -3013,8 +3058,8 @@ class QueryWikiView extends ItemView {
 		backend.addEventListener("change", async () => {
 			this.initialQuestion = this.inputEl?.value || "";
 			const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
-			if (this.pendingImage && !profileSupportsQueryImage(selectedProfile)) {
-				this.pendingImage = null;
+			if (this.pendingImages.length && !profileSupportsQueryImage(selectedProfile)) {
+				this.pendingImages = [];
 				new Notice("所选后端未启用视觉输入，已移除待发送图片");
 			}
 			await this.plugin.setActiveQueryBackend(backend.value);
@@ -3058,12 +3103,33 @@ class QueryWikiView extends ItemView {
 			new Notice("所选 Direct API 配置不可用，请重新选择执行后端");
 			return;
 		}
-		const selectedImage = this.pendingImage
-			? normalizeVaultImageAttachment(this.pendingImage)
-			: null;
-		if (selectedImage && !profileSupportsQueryImage(directProfile)) {
+		const selectedImages = normalizeVaultImageAttachments(this.pendingImages);
+		if (selectedImages.length && !profileSupportsQueryImage(directProfile)) {
 			new Notice("当前执行后端未启用视觉输入，无法发送图片");
 			return;
+		}
+		let linkedImageResult = { attachments: [], notePaths: [], discoveredCount: 0 };
+		if (profileSupportsQueryImage(directProfile)) {
+			try {
+				linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
+			} catch (error) {
+				new Notice(
+					`未能解析链接笔记中的图片，将继续使用手动附件：${error instanceof Error ? error.message : String(error)}`,
+					8000,
+				);
+			}
+		}
+		const attachments = normalizeVaultImageAttachments([
+			...selectedImages,
+			...linkedImageResult.attachments,
+		]);
+		if (linkedImageResult.discoveredCount > 0) {
+			const addedCount = attachments.filter((attachment) => attachment.sourceNotePath).length;
+			new Notice(
+				linkedImageResult.discoveredCount > addedCount
+					? `从链接笔记发现 ${linkedImageResult.discoveredCount} 张图片，本轮按限制附加 ${addedCount} 张`
+					: `已从链接笔记附加 ${addedCount} 张图片`,
+			);
 		}
 		const retrievalMode = backendId === "codex-cli" && session.retrievalMode === "web" ? "web" : "vault";
 		const priorMessages = session.messages.filter((message) => message.status === "done");
@@ -3072,7 +3138,7 @@ class QueryWikiView extends ItemView {
 			id: this.plugin.createQueryMessageId(),
 			role: "user",
 			content: question,
-			attachments: selectedImage ? [selectedImage] : [],
+			attachments,
 			status: "done",
 			createdAt: now,
 			retrievalMode,
@@ -3107,7 +3173,7 @@ class QueryWikiView extends ItemView {
 		let completedRun = null;
 		try {
 			await this.plugin.appendQueryMessages(session.id, [userMessage, assistantMessage], question);
-			this.pendingImage = null;
+			this.pendingImages = [];
 			await this.render({ scrollToBottom: true });
 			run = await this.plugin.startTaskRun(action, question.slice(0, 160), executionConfig);
 			this.activeRunId = run.id;
@@ -4357,8 +4423,8 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 			.setName("视觉输入")
 			.setDesc(
 				profile.type === "openai-compatible"
-					? "允许查询侧边栏将用户明确选择的一张 Vault 图片发送给该模型。这里只声明客户端能力，不会自动发送笔记图片。"
-					: "第一阶段仅为 OpenAI 兼容适配器提供单图输入。",
+							? `允许查询侧边栏发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并从问题中的 Obsidian/Wiki 笔记链接发现嵌入图片。`
+							: "视觉输入目前仅由 OpenAI 兼容适配器处理。",
 			)
 			.addToggle((toggle) =>
 				toggle
@@ -5354,12 +5420,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				id: String(message?.id || this.createQueryMessageId()),
 				role: message?.role === "user" ? "user" : "assistant",
 				content: String(message?.content || "").slice(0, 20000),
-				attachments: Array.isArray(message?.attachments)
-					? message.attachments
-						.map(normalizeVaultImageAttachment)
-						.filter(Boolean)
-						.slice(0, 1)
-					: [],
+				attachments: normalizeVaultImageAttachments(message?.attachments),
 				status: String(message?.status || "done"),
 				progress: String(message?.progress || ""),
 				createdAt: String(message?.createdAt || new Date().toISOString()),
@@ -5670,9 +5731,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		if (!profile || profile.lastTest?.ok !== true) {
 			throw new ProviderConnectionError("configuration", "Direct API 配置不存在或尚未通过连接测试");
 		}
-		const imageAttachments = Array.isArray(attachments)
-			? attachments.map(normalizeVaultImageAttachment).filter(Boolean).slice(0, 1)
-			: [];
+		const imageAttachments = normalizeVaultImageAttachments(attachments);
 		if (imageAttachments.length && !profileSupportsQueryImage(profile)) {
 			throw new ProviderConnectionError(
 				"unsupported",
@@ -5727,6 +5786,18 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				}
 			}
 			if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
+			const linkedNotePaths = [...new Set(
+				imageAttachments
+					.map((attachment) => attachment.sourceNotePath)
+					.filter(Boolean),
+			)];
+			if (linkedNotePaths.length) {
+				trace.linked_note_paths = linkedNotePaths;
+				trace.candidate_paths = [...new Set([
+					...linkedNotePaths,
+					...(Array.isArray(trace.candidate_paths) ? trace.candidate_paths : []),
+				])];
+			}
 			const evidence = this.readVaultEvidencePacket(trace);
 			trace.context_pages = evidence.map((item) => item.path);
 			const retrievalEvent = {
@@ -5942,6 +6013,177 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		return evidence;
 	}
 
+	resolveVaultLinkedFile(rawLink, sourcePath = "") {
+		let link = String(rawLink || "").trim();
+		if (!link) return null;
+		link = link.split("|", 1)[0].split("#", 1)[0].trim();
+		link = link.replace(/^<|>$/g, "").replace(/\\/g, "/").replace(/^\/+/, "");
+		try {
+			link = decodeURIComponent(link);
+		} catch {
+			// Keep the original value when malformed percent encoding is present.
+		}
+		link = normalizePath(link.replace(/^knowledge-base\//i, ""));
+		if (!link) return null;
+		const metadataCache = this.app?.metadataCache;
+		if (typeof metadataCache?.getFirstLinkpathDest === "function") {
+			const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
+			if (resolved) return resolved;
+		}
+		const direct = this.app.vault.getAbstractFileByPath(link);
+		if (direct) return direct;
+		if (sourcePath) {
+			const relative = normalizePath(
+				path.posix.normalize(path.posix.join(path.posix.dirname(sourcePath), link)),
+			);
+			const relativeFile = this.app.vault.getAbstractFileByPath(relative);
+			if (relativeFile) return relativeFile;
+		}
+		return null;
+	}
+
+	resolveVaultMarkdownFile(rawLink) {
+		let candidate = String(rawLink || "").trim();
+		if (!candidate) return null;
+		candidate = candidate.split("|", 1)[0].split("#", 1)[0].trim();
+		candidate = candidate.replace(/\\/g, "/").replace(/^\/+/, "");
+		try {
+			candidate = decodeURIComponent(candidate);
+		} catch {
+			// Keep the original value when malformed percent encoding is present.
+		}
+		candidate = normalizePath(candidate.replace(/^knowledge-base\//i, ""));
+		const attempts = [candidate];
+		if (!candidate.toLowerCase().endsWith(".md")) attempts.push(`${candidate}.md`);
+		for (const attempt of attempts) {
+			const file = this.resolveVaultLinkedFile(attempt);
+			if (file?.path?.toLowerCase().endsWith(".md")) return file;
+		}
+
+		const normalizedCandidate = candidate.toLocaleLowerCase();
+		const files = typeof this.app?.vault?.getMarkdownFiles === "function"
+			? this.app.vault.getMarkdownFiles()
+			: [];
+		return files
+			.filter((file) => {
+				const pathWithoutExtension = file.path.replace(/\.md$/i, "").toLocaleLowerCase();
+				const remainder = normalizedCandidate.slice(pathWithoutExtension.length);
+				return normalizedCandidate === pathWithoutExtension
+					|| (
+						normalizedCandidate.startsWith(pathWithoutExtension)
+						&& remainder.length > 0
+						&& !/^[a-z0-9_./-]/i.test(remainder)
+					);
+			})
+			.sort((a, b) => b.path.length - a.path.length)[0] || null;
+	}
+
+	extractQuestionNoteFiles(question) {
+		const text = String(question || "");
+		const candidates = [];
+		for (const match of text.matchAll(/obsidian:\/\/open\?[^\s<>"']+/gi)) {
+			const rawUrl = match[0].replace(/[)\]}>，。；;!?]+$/u, "");
+			try {
+				const fileValue = new URL(rawUrl).searchParams.get("file");
+				if (fileValue) candidates.push(fileValue);
+			} catch {
+				const fileMatch = rawUrl.match(/[?&]file=([^&]+)/i);
+				if (fileMatch?.[1]) candidates.push(fileMatch[1]);
+			}
+		}
+		for (const match of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
+			const value = String(match[1] || "").split("|", 1)[0].split("#", 1)[0].trim();
+			if (!VAULT_IMAGE_MIME_TYPES[path.posix.extname(value).toLowerCase()]) {
+				candidates.push(value);
+			}
+		}
+		const seen = new Set();
+		const files = [];
+		for (const candidate of candidates) {
+			const file = this.resolveVaultMarkdownFile(candidate);
+			if (!file || seen.has(file.path.toLocaleLowerCase())) continue;
+			seen.add(file.path.toLocaleLowerCase());
+			files.push(file);
+		}
+		return files;
+	}
+
+	async getEmbeddedImageFiles(noteFile) {
+		const metadataCache = this.app?.metadataCache;
+		const cache = typeof metadataCache?.getFileCache === "function"
+			? metadataCache.getFileCache(noteFile)
+			: null;
+		let links = Array.isArray(cache?.embeds)
+			? cache.embeds.map((embed) => String(embed?.link || "")).filter(Boolean)
+			: [];
+		if (!links.length && typeof this.app?.vault?.cachedRead === "function") {
+			const markdown = await this.app.vault.cachedRead(noteFile);
+			links = [
+				...[...String(markdown).matchAll(/!\[\[([^\]]+)\]\]/g)]
+					.map((match) => String(match[1] || "")),
+				...[...String(markdown).matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)]
+					.map((match) => {
+						const target = String(match[1] || "").trim();
+						if (target.startsWith("<") && target.includes(">")) {
+							return target.slice(1, target.indexOf(">"));
+						}
+						return target.split(/\s+["']/u, 1)[0];
+					}),
+			];
+		}
+		const seen = new Set();
+		const images = [];
+		for (const link of links) {
+			const file = this.resolveVaultLinkedFile(link, noteFile.path);
+			if (!file || !VAULT_IMAGE_MIME_TYPES[path.posix.extname(file.path).toLowerCase()]) continue;
+			const key = file.path.toLocaleLowerCase();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			images.push(file);
+		}
+		return images;
+	}
+
+	async resolveQuestionImageAttachments(question, existingAttachments = []) {
+		const noteFiles = this.extractQuestionNoteFiles(question);
+		const existing = normalizeVaultImageAttachments(existingAttachments);
+		const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
+		let totalBytes = existing.reduce((sum, attachment) => {
+			const file = this.app.vault.getAbstractFileByPath(attachment.path);
+			return sum + Number(file?.stat?.size || attachment.size || 0);
+		}, 0);
+		const attachments = [];
+		let discoveredCount = 0;
+		for (const noteFile of noteFiles) {
+			const images = await this.getEmbeddedImageFiles(noteFile);
+			for (const file of images) {
+				const key = file.path.toLocaleLowerCase();
+				if (seen.has(key)) continue;
+				seen.add(key);
+				discoveredCount += 1;
+				const size = Number(file.stat?.size || 0);
+				if (size > MAX_VAULT_IMAGE_BYTES) continue;
+				if (existing.length + attachments.length >= MAX_QUERY_IMAGE_ATTACHMENTS) continue;
+				if (totalBytes + size > MAX_QUERY_IMAGE_TOTAL_BYTES) continue;
+				const attachment = normalizeVaultImageAttachment({
+					path: file.path,
+					name: file.name,
+					size,
+					sourceNotePath: noteFile.path,
+				});
+				if (!attachment) continue;
+				attachments.push(attachment);
+				totalBytes += size;
+			}
+		}
+		return {
+			attachments,
+			notePaths: noteFiles.map((file) => file.path),
+			discoveredCount,
+			totalBytes,
+		};
+	}
+
 	buildVaultImageReferenceIndex(imageFiles = []) {
 		const normalizeVaultPath = (value) => normalizePath(
 			String(value || "").trim().replace(/\\/g, "/").replace(/^\/+/, ""),
@@ -6085,9 +6327,25 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				}))
 			: [];
 		const evidenceJson = JSON.stringify(evidence, null, 2);
-		const imageBlocks = attachments
-			.map((attachment) => this.readVaultImageData(attachment).content)
-			.slice(0, 1);
+		const imagePayloads = normalizeVaultImageAttachments(attachments)
+			.map((attachment) => this.readVaultImageData(attachment));
+		const totalImageBytes = imagePayloads.reduce(
+			(sum, payload) => sum + Number(payload.attachment.size || 0),
+			0,
+		);
+		if (totalImageBytes > MAX_QUERY_IMAGE_TOTAL_BYTES) {
+			throw new ProviderConnectionError(
+				"attachment",
+				`本轮图片总大小超过 ${(MAX_QUERY_IMAGE_TOTAL_BYTES / 1024 / 1024).toFixed(0)} MiB 上限`,
+			);
+		}
+		const imageBlocks = imagePayloads.map((payload) => payload.content);
+		const imageManifest = imagePayloads.map((payload, index) => {
+			const source = payload.attachment.sourceNotePath
+				? `；引用笔记：${payload.attachment.sourceNotePath}`
+				: "";
+			return `图片 ${index + 1}：${payload.attachment.path}${source}`;
+		});
 		const currentPrompt = [
 			`当前问题：${String(question).slice(0, 4000)}`,
 			"",
@@ -6095,7 +6353,11 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			evidenceJson || "[]",
 			"",
 			imageBlocks.length
-				? "本轮还附加了一张用户明确选择的 Vault 图片。请实际检查图片像素，并区分直接视觉观察、笔记文字和推断。"
+				? [
+					`本轮附加了 ${imageBlocks.length} 张 Vault 图片，顺序如下：`,
+					...imageManifest,
+					"请逐张实际检查图片像素，使用“图片 1”等编号说明依据，并区分直接视觉观察、笔记文字和推断。",
+				].join("\n")
 				: "",
 			"请仅根据这些证据回答，并在“检索路径”中列出实际采用的页面。",
 		].filter(Boolean).join("\n");
