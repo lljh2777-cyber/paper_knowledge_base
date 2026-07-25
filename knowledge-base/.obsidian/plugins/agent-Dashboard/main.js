@@ -2508,6 +2508,7 @@ class QueryWikiView extends ItemView {
 		this.inputEl = null;
 		this.statusEl = null;
 		this.pendingImages = [];
+		this.navigatorFrame = 0;
 		this.executionOverrides = {
 			model: "",
 			reasoningEffort: "",
@@ -2533,6 +2534,8 @@ class QueryWikiView extends ItemView {
 	}
 
 	async onClose() {
+		if (this.navigatorFrame) window.cancelAnimationFrame(this.navigatorFrame);
+		this.navigatorFrame = 0;
 		this.contentEl.empty();
 	}
 
@@ -2561,11 +2564,14 @@ class QueryWikiView extends ItemView {
 	async render(options = {}) {
 		const version = ++this.renderVersion;
 		const session = this.session;
+		if (this.navigatorFrame) window.cancelAnimationFrame(this.navigatorFrame);
+		this.navigatorFrame = 0;
 		this.contentEl.empty();
 		this.contentEl.addClass("query-wiki-view");
 		const shell = this.contentEl.createDiv({ cls: "query-wiki-shell" });
 		this.renderHeader(shell, session);
-		const conversation = shell.createDiv({
+		const conversationRegion = shell.createDiv({ cls: "query-wiki-conversation-region" });
+		const conversation = conversationRegion.createDiv({
 			cls: "query-wiki-conversation",
 			attr: { "aria-live": "polite" },
 		});
@@ -2578,12 +2584,94 @@ class QueryWikiView extends ItemView {
 			}
 		}
 		if (version !== this.renderVersion) return;
+		this.renderConversationNavigator(conversationRegion, conversation, session.messages);
 		this.renderComposer(shell);
 		if (options.scrollToBottom) {
 			window.requestAnimationFrame(() => {
 				conversation.scrollTop = conversation.scrollHeight;
 			});
 		}
+	}
+
+	renderConversationNavigator(parent, conversation, messages) {
+		const navigationMessages = Array.isArray(messages)
+			? messages.filter((message) => message.role === "user")
+			: [];
+		if (navigationMessages.length < 2) return;
+		parent.addClass("has-navigator");
+		const navigator = parent.createEl("nav", {
+			cls: "query-wiki-navigator",
+			attr: { "aria-label": "快速定位用户问题" },
+		});
+		navigator.style.setProperty("--query-navigator-count", String(navigationMessages.length));
+		const markers = [];
+		for (const [index, message] of navigationMessages.entries()) {
+			const snippet = String(
+				message.content
+					|| message.progress
+					|| "空问题",
+			)
+				.replace(/```[\s\S]*?```/g, " 代码块 ")
+				.replace(/[#>*_`~\[\]]/g, " ")
+				.replace(/\s+/g, " ")
+				.trim()
+				.slice(0, 72);
+			const marker = navigator.createEl("button", {
+				cls: "query-wiki-navigator-marker is-user",
+				attr: {
+					type: "button",
+					"aria-label": `问题 ${index + 1}：${snippet}`,
+					"data-target-message-id": message.id,
+				},
+			});
+			marker.createSpan({
+				cls: "query-wiki-navigator-tooltip",
+				text: snippet || "空问题",
+			});
+			marker.addEventListener("click", () => {
+				const article = conversation.querySelector(
+					`[data-message-id="${CSS.escape(String(message.id))}"]`,
+				);
+				if (!article) return;
+				const conversationRect = conversation.getBoundingClientRect();
+				const articleRect = article.getBoundingClientRect();
+				const top = conversation.scrollTop + articleRect.top - conversationRect.top - 12;
+				conversation.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+				markers.forEach((item) => {
+					item.marker.toggleClass("is-active", item.messageId === message.id);
+					item.marker.setAttribute(
+						"aria-current",
+						item.messageId === message.id ? "true" : "false",
+					);
+				});
+			});
+			markers.push({ marker, messageId: message.id });
+		}
+		const updateActiveMarker = () => {
+			this.navigatorFrame = 0;
+			const conversationRect = conversation.getBoundingClientRect();
+			const threshold = conversationRect.top + Math.min(120, conversationRect.height * 0.3);
+			let activeId = markers[0]?.messageId || "";
+			for (const item of markers) {
+				const article = conversation.querySelector(
+					`[data-message-id="${CSS.escape(String(item.messageId))}"]`,
+				);
+				if (!article) continue;
+				if (article.getBoundingClientRect().top <= threshold) activeId = item.messageId;
+				else break;
+			}
+			markers.forEach((item) => {
+				const active = item.messageId === activeId;
+				item.marker.toggleClass("is-active", active);
+				item.marker.setAttribute("aria-current", active ? "true" : "false");
+			});
+		};
+		const scheduleUpdate = () => {
+			if (this.navigatorFrame) return;
+			this.navigatorFrame = window.requestAnimationFrame(updateActiveMarker);
+		};
+		conversation.addEventListener("scroll", scheduleUpdate, { passive: true });
+		scheduleUpdate();
 	}
 
 	renderHeader(parent, session) {
