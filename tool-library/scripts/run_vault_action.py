@@ -15,7 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_CODEX = r"C:\Users\Thomas Wade\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe"
@@ -24,6 +26,16 @@ DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_SERVICE_TIER = "default"
 FAST_SERVICE_MODELS = {"gpt-5.6-terra", "gpt-5.6-sol"}
+RETRIEVAL_SCHEMA_RELATIVE_PATH = (
+    Path("tool-library")
+    / "schemas"
+    / "dashboard_retrieval_response.schema.json"
+)
+MARKDOWN_EXTERNAL_LINK_RE = re.compile(
+    r"\[([^\]]+)\]\((https?://[^\s)]+)(?:\s+[\"'][^)]*[\"'])?\)",
+    re.IGNORECASE,
+)
+OBSIDIAN_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -90,6 +102,12 @@ and any fallback reason.
 When citing a vault Markdown note, use an Obsidian wikilink relative to the
 vault root, for example `[[wiki/methods/example|页面标题]]`, so the Dashboard
 sidebar can open it directly.
+Return the final answer as the structured object required by the supplied
+output schema. Put the user-facing Markdown in `answer_markdown`. List every
+vault note actually used in `vault_sources`. In web mode, list every external
+page used in `web_sources` and cite it in `answer_markdown` with the exact same
+URL. Never cite an external URL that was not returned by live web search. In
+vault-only mode, `web_sources` and `retrieval_path.web_queries` must be empty.
 This action is read-only: do not create, modify, move, or delete files. Return
 the answer in the final response so the dashboard can display it.
 """,
@@ -513,17 +531,555 @@ def build_codex_command(
         f'service_tier="{effective_service_tier}"',
     ]
     if spec.get("agent") == "research-vault-retrieval":
+        retrieval_schema = project_root / RETRIEVAL_SCHEMA_RELATIVE_PATH
         web_search_mode = "live" if retrieval_mode == "web" else "disabled"
         command.extend(
             [
                 "-c",
                 f'web_search="{web_search_mode}"',
+                "--json",
+                "--output-schema",
+                str(retrieval_schema),
             ]
         )
     if model.strip():
         command.extend(["-m", model.strip()])
     command.append("-")
     return command
+
+
+def emit_dashboard_event(payload: dict[str, Any]) -> None:
+    print(
+        "DASHBOARD_EVENT "
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def canonicalize_external_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if not parsed.hostname or parsed.username or parsed.password:
+        return ""
+    host = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    netloc = host
+    if port and not (
+        (parsed.scheme.lower() == "http" and port == 80)
+        or (parsed.scheme.lower() == "https" and port == 443)
+    ):
+        netloc = f"{host}:{port}"
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            netloc,
+            path,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _collect_type_markers(value: Any) -> set[str]:
+    markers: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"type", "name", "tool_name"} and isinstance(child, str):
+                markers.add(child.lower())
+            elif isinstance(child, (dict, list)):
+                markers.update(_collect_type_markers(child))
+    elif isinstance(value, list):
+        for child in value:
+            markers.update(_collect_type_markers(child))
+    return markers
+
+
+def is_web_search_event(event: dict[str, Any]) -> bool:
+    return any(
+        marker == "web_search"
+        or marker == "web_search_call"
+        or marker.startswith("web_search_")
+        for marker in _collect_type_markers(event)
+    )
+
+
+def collect_web_event_metadata(
+    value: Any,
+    urls: set[str],
+    queries: list[str],
+) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"url", "uri"} and isinstance(child, str):
+                canonical = canonicalize_external_url(child)
+                if canonical:
+                    urls.add(canonical)
+            elif key in {"query", "search_query"} and isinstance(child, str):
+                query = child.strip()
+                if query and query not in queries:
+                    queries.append(query[:500])
+            elif key == "queries" and isinstance(child, list):
+                for item in child:
+                    query = str(item or "").strip()
+                    if query and query not in queries:
+                        queries.append(query[:500])
+            collect_web_event_metadata(child, urls, queries)
+    elif isinstance(value, list):
+        for child in value:
+            collect_web_event_metadata(child, urls, queries)
+
+
+def parse_structured_retrieval_payload(value: str) -> dict[str, Any] | None:
+    text = value.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_vault_sources(value: Any) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        if path.startswith("knowledge-base/"):
+            path = path[len("knowledge-base/") :]
+        if not path or path.lower() in seen:
+            continue
+        seen.add(path.lower())
+        sources.append(
+            {
+                "path": path[:1000],
+                "title": str(item.get("title") or Path(path).stem).strip()[:500],
+            }
+        )
+    return sources[:30]
+
+
+def canonicalize_vault_reference(value: Any) -> str:
+    reference = str(value or "").strip().replace("\\", "/").lstrip("/")
+    if reference.startswith("knowledge-base/"):
+        reference = reference[len("knowledge-base/") :]
+    if reference.lower().endswith(".md"):
+        reference = reference[:-3]
+    return reference.lower()
+
+
+def _normalize_web_sources(
+    value: Any,
+    observed_urls: set[str],
+    cited_urls: set[str],
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = canonicalize_external_url(item.get("url"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        sources.append(
+            {
+                "title": str(item.get("title") or url).strip()[:500],
+                "url": url,
+                "publisher": str(item.get("publisher") or "").strip()[:300],
+                "published_at": str(item.get("published_at") or "").strip()[:100],
+                "cited": url in cited_urls,
+                "event_verified": url in observed_urls,
+                "verification": (
+                    "event"
+                    if url in observed_urls
+                    else "structured"
+                ),
+            }
+        )
+    return sources[:30]
+
+
+def normalize_structured_retrieval_result(
+    payload: dict[str, Any],
+    retrieval_mode: str,
+    observed_urls: set[str] | None = None,
+    observed_queries: list[str] | None = None,
+) -> dict[str, Any]:
+    observed_urls = observed_urls or set()
+    observed_queries = observed_queries or []
+    answer = str(payload.get("answer_markdown") or "").strip()
+    vault_sources = _normalize_vault_sources(payload.get("vault_sources"))
+    cited_vault_references = {
+        canonicalize_vault_reference(match.group(1))
+        for match in OBSIDIAN_WIKILINK_RE.finditer(answer)
+        if canonicalize_vault_reference(match.group(1))
+    }
+    vault_source_references = {
+        canonicalize_vault_reference(source["path"])
+        for source in vault_sources
+    }
+    unlisted_vault_citations = sorted(
+        cited_vault_references - vault_source_references
+    )
+    uncited_vault_sources = sorted(
+        vault_source_references - cited_vault_references
+    )
+    for source in vault_sources:
+        source["cited"] = (
+            canonicalize_vault_reference(source["path"])
+            in cited_vault_references
+        )
+    markdown_links = [
+        (match.group(1), match.group(2), canonicalize_external_url(match.group(2)))
+        for match in MARKDOWN_EXTERNAL_LINK_RE.finditer(answer)
+    ]
+    cited_urls = {canonical for _, _, canonical in markdown_links if canonical}
+    web_sources = _normalize_web_sources(
+        payload.get("web_sources"),
+        observed_urls,
+        cited_urls,
+    )
+    source_urls = {item["url"] for item in web_sources}
+    unlisted_citations = sorted(cited_urls - source_urls)
+
+    if unlisted_citations:
+        def replace_unlisted(match: re.Match[str]) -> str:
+            canonical = canonicalize_external_url(match.group(2))
+            if canonical and canonical not in source_urls:
+                return f"{match.group(1)}（引用未通过本轮来源校验）"
+            return match.group(0)
+
+        answer = MARKDOWN_EXTERNAL_LINK_RE.sub(replace_unlisted, answer)
+
+    path_payload = (
+        payload.get("retrieval_path")
+        if isinstance(payload.get("retrieval_path"), dict)
+        else {}
+    )
+    path_queries = [
+        str(item).strip()[:500]
+        for item in path_payload.get("web_queries", [])
+        if str(item).strip()
+    ] if isinstance(path_payload.get("web_queries"), list) else []
+    for query in observed_queries:
+        if query not in path_queries:
+            path_queries.append(query)
+    if retrieval_mode != "web":
+        web_sources = []
+        path_queries = []
+
+    warnings: list[str] = []
+    if retrieval_mode == "web" and not web_sources:
+        warnings.append("本轮回答未返回可展示的联网来源。")
+    if unlisted_citations:
+        warnings.append(
+            f"{len(unlisted_citations)} 个回答外链未列入结构化来源，已停止显示为可点击引用。"
+        )
+    event_verified_count = sum(
+        1 for source in web_sources if source["event_verified"]
+    )
+    if web_sources and observed_urls and event_verified_count < len(web_sources):
+        warnings.append(
+            "部分来源未在 Codex Web Search JSONL 事件中出现，仅通过结构和引用一致性校验。"
+        )
+    elif web_sources and not observed_urls:
+        warnings.append(
+            "当前 Codex JSONL 未暴露来源 URL；来源仅通过结构和引用一致性校验。"
+        )
+    uncited_sources = [
+        source["url"] for source in web_sources if not source["cited"]
+    ]
+    if uncited_sources:
+        warnings.append(
+            f"{len(uncited_sources)} 个来源未在回答正文中引用。"
+        )
+    if unlisted_vault_citations:
+        warnings.append(
+            f"{len(unlisted_vault_citations)} 个正文 wikilink 未列入结构化知识库来源。"
+        )
+    if uncited_vault_sources:
+        warnings.append(
+            f"{len(uncited_vault_sources)} 个知识库来源未在回答正文中引用。"
+        )
+
+    has_any_sources = bool(
+        vault_sources
+        or web_sources
+        or cited_vault_references
+        or cited_urls
+    )
+    has_citation_mismatch = bool(
+        unlisted_citations
+        or uncited_sources
+        or unlisted_vault_citations
+        or uncited_vault_sources
+    )
+    if not has_any_sources:
+        validation_status = "not-applicable"
+    elif has_citation_mismatch:
+        validation_status = "partial"
+    elif (
+        event_verified_count == len(web_sources)
+        and web_sources
+    ):
+        validation_status = "verified"
+    else:
+        validation_status = "structured"
+
+    return {
+        "answer_markdown": answer,
+        "vault_sources": vault_sources,
+        "web_sources": web_sources,
+        "conflicts": [
+            str(item).strip()[:2000]
+            for item in payload.get("conflicts", [])
+            if str(item).strip()
+        ] if isinstance(payload.get("conflicts"), list) else [],
+        "evidence_gaps": [
+            str(item).strip()[:2000]
+            for item in payload.get("evidence_gaps", [])
+            if str(item).strip()
+        ] if isinstance(payload.get("evidence_gaps"), list) else [],
+        "retrieval_path": {
+            "stage": str(path_payload.get("stage") or "").strip()[:200],
+            "inspected_vault_paths": [
+                str(item).strip().replace("\\", "/")[:1000]
+                for item in path_payload.get("inspected_vault_paths", [])
+                if str(item).strip()
+            ][:30] if isinstance(path_payload.get("inspected_vault_paths"), list) else [],
+            "web_queries": path_queries[:20],
+            "fallback_reason": str(
+                path_payload.get("fallback_reason") or ""
+            ).strip()[:1000],
+        },
+        "citation_validation": {
+            "status": validation_status,
+            "source_count": len(web_sources),
+            "cited_count": sum(1 for source in web_sources if source["cited"]),
+            "event_verified_count": event_verified_count,
+            "unlisted_citations": unlisted_citations[:20],
+            "uncited_sources": uncited_sources[:20],
+            "vault_source_count": len(vault_sources),
+            "vault_cited_count": sum(
+                1 for source in vault_sources if source["cited"]
+            ),
+            "unlisted_vault_citations": unlisted_vault_citations[:20],
+            "uncited_vault_sources": uncited_vault_sources[:20],
+            "warnings": warnings,
+        },
+    }
+
+
+def _status_from_codex_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(event.get("type") or "")
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    item_type = str(item.get("type") or "")
+    if is_web_search_event(event):
+        label = (
+            "正在核对联网来源"
+            if event_type.endswith("completed")
+            else "正在执行联网搜索"
+        )
+        return {
+            "type": "status",
+            "stage": "web-search",
+            "label": label,
+        }
+    if event_type == "turn.started":
+        return {
+            "type": "status",
+            "stage": "model-started",
+            "label": "正在调用模型并检查证据",
+        }
+    if item_type in {"command_execution", "mcp_tool_call"}:
+        return {
+            "type": "status",
+            "stage": "reading-evidence",
+            "label": "正在读取并核验候选证据",
+        }
+    if item_type == "agent_message" and event_type.endswith("completed"):
+        return {
+            "type": "status",
+            "stage": "structuring-answer",
+            "label": "正在整理回答与来源",
+        }
+    return None
+
+
+def run_retrieval_process(
+    command: list[str],
+    project_root: Path,
+    timeout_seconds: int,
+    stdin_text: str,
+    retrieval_mode: str,
+) -> int:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    process = subprocess.Popen(
+        command,
+        cwd=project_root,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        bufsize=1,
+    )
+    final_messages: list[str] = []
+    observed_urls: set[str] = set()
+    observed_queries: list[str] = []
+    output_lock = threading.Lock()
+
+    def emit(payload: dict[str, Any]) -> None:
+        with output_lock:
+            emit_dashboard_event(payload)
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                with output_lock:
+                    print(
+                        f"Codex JSONL parse warning: {line[:500]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                continue
+            if not isinstance(event, dict):
+                continue
+            if is_web_search_event(event):
+                collect_web_event_metadata(
+                    event,
+                    observed_urls,
+                    observed_queries,
+                )
+            status_event = _status_from_codex_event(event)
+            if status_event:
+                emit(status_event)
+            item = event.get("item")
+            if (
+                str(event.get("type") or "").endswith("completed")
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+            ):
+                final_messages.append(item["text"])
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            with output_lock:
+                print(line, end="", file=sys.stderr, flush=True)
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    assert process.stdin is not None
+    process.stdin.write(stdin_text)
+    process.stdin.close()
+    try:
+        return_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return_code = 124
+        with output_lock:
+            print(
+                f"Action timed out after {timeout_seconds} seconds.",
+                file=sys.stderr,
+                flush=True,
+            )
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    if return_code != 0:
+        return return_code
+    if not final_messages:
+        print(
+            "Codex JSONL completed without a final agent message.",
+            file=sys.stderr,
+        )
+        return 1
+
+    raw_final = final_messages[-1]
+    payload = parse_structured_retrieval_payload(raw_final)
+    if payload is None:
+        emit(
+            {
+                "type": "retrieval-result",
+                "payload": {
+                    "answer_markdown": raw_final,
+                    "vault_sources": [],
+                    "web_sources": [],
+                    "conflicts": [],
+                    "evidence_gaps": [],
+                    "retrieval_path": {
+                        "stage": "",
+                        "inspected_vault_paths": [],
+                        "web_queries": observed_queries,
+                        "fallback_reason": "",
+                    },
+                    "citation_validation": {
+                        "status": "invalid",
+                        "source_count": 0,
+                        "cited_count": 0,
+                        "event_verified_count": 0,
+                        "unlisted_citations": [],
+                        "uncited_sources": [],
+                        "warnings": [
+                            "Codex 最终响应未通过结构化 JSON 解析，已回退显示原始回答。"
+                        ],
+                    },
+                },
+            }
+        )
+        print(raw_final)
+        return 0
+
+    normalized = normalize_structured_retrieval_result(
+        payload,
+        retrieval_mode,
+        observed_urls,
+        observed_queries,
+    )
+    emit({"type": "retrieval-result", "payload": normalized})
+    print(normalized["answer_markdown"])
+    return 0
 
 
 def run_process(
@@ -806,7 +1362,26 @@ def main() -> int:
         args.service_tier,
         retrieval_mode,
     )
-    result = run_process(command, project_root, args.timeout_seconds, prompt)
+    if args.action == "vault-retrieval":
+        retrieval_schema = project_root / RETRIEVAL_SCHEMA_RELATIVE_PATH
+        if not retrieval_schema.is_file():
+            raise FileNotFoundError(
+                f"Dashboard retrieval schema not found: {retrieval_schema}"
+            )
+        result = run_retrieval_process(
+            command,
+            project_root,
+            args.timeout_seconds,
+            prompt,
+            retrieval_mode,
+        )
+    else:
+        result = run_process(
+            command,
+            project_root,
+            args.timeout_seconds,
+            prompt,
+        )
     if result != 0 or not spec.get("post_validate"):
         return result
 

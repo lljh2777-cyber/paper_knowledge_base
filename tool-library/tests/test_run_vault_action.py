@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -108,6 +111,8 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertIn("VAULT + LIVE WEB", web_prompt)
         self.assertIn("知识库证据", web_prompt)
         self.assertIn('web_search="live"', web_command)
+        self.assertIn("--json", web_command)
+        self.assertIn("--output-schema", web_command)
         self.assertIn("VAULT ONLY", vault_prompt)
         self.assertIn("Vault 中未找到足够依据", vault_prompt)
         self.assertIn('web_search="disabled"', vault_command)
@@ -129,6 +134,224 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         )
 
         self.assertEqual(keywords, ["SingleR", "细胞注释"])
+
+    def test_structured_retrieval_result_validates_citations(self) -> None:
+        payload = {
+            "answer_markdown": (
+                "已核验 [官方文档](https://example.com/docs)。"
+                "另见 [未知链接](https://invalid.example/item)。"
+            ),
+            "vault_sources": [
+                {
+                    "path": "knowledge-base/wiki/methods/example.md",
+                    "title": "示例方法",
+                }
+            ],
+            "web_sources": [
+                {
+                    "title": "官方文档",
+                    "url": "https://example.com/docs",
+                    "publisher": "Example",
+                    "published_at": "2026-07-25",
+                }
+            ],
+            "conflicts": [],
+            "evidence_gaps": [],
+            "retrieval_path": {
+                "stage": "vault+web",
+                "inspected_vault_paths": ["wiki/methods/example.md"],
+                "web_queries": ["example docs"],
+                "fallback_reason": "",
+            },
+        }
+
+        normalized = run_vault_action.normalize_structured_retrieval_result(
+            payload,
+            "web",
+            {"https://example.com/docs"},
+            ["example docs current"],
+        )
+
+        self.assertEqual(
+            normalized["vault_sources"][0]["path"],
+            "wiki/methods/example.md",
+        )
+        self.assertEqual(
+            normalized["web_sources"][0]["verification"],
+            "event",
+        )
+        self.assertTrue(normalized["web_sources"][0]["cited"])
+        self.assertNotIn(
+            "](https://invalid.example/item)",
+            normalized["answer_markdown"],
+        )
+        self.assertEqual(
+            normalized["citation_validation"]["status"],
+            "partial",
+        )
+        self.assertIn(
+            "example docs current",
+            normalized["retrieval_path"]["web_queries"],
+        )
+
+    def test_vault_mode_removes_external_sources(self) -> None:
+        payload = {
+            "answer_markdown": "仅使用 Vault。",
+            "vault_sources": [],
+            "web_sources": [
+                {
+                    "title": "不应保留",
+                    "url": "https://example.com",
+                    "publisher": "",
+                    "published_at": "",
+                }
+            ],
+            "conflicts": [],
+            "evidence_gaps": [],
+            "retrieval_path": {
+                "stage": "vault",
+                "inspected_vault_paths": [],
+                "web_queries": ["should disappear"],
+                "fallback_reason": "",
+            },
+        }
+
+        normalized = run_vault_action.normalize_structured_retrieval_result(
+            payload,
+            "vault",
+        )
+
+        self.assertEqual(normalized["web_sources"], [])
+        self.assertEqual(normalized["retrieval_path"]["web_queries"], [])
+
+    def test_vault_wikilinks_are_checked_against_structured_sources(self) -> None:
+        payload = {
+            "answer_markdown": (
+                "参考 [[wiki/methods/singler|SingleR]]；"
+                "另见 [[wiki/methods/unlisted|未登记页面]]。"
+            ),
+            "vault_sources": [
+                {
+                    "path": "wiki/methods/singler.md",
+                    "title": "SingleR",
+                }
+            ],
+            "web_sources": [],
+            "conflicts": [],
+            "evidence_gaps": [],
+            "retrieval_path": {
+                "stage": "vault",
+                "inspected_vault_paths": ["wiki/methods/singler.md"],
+                "web_queries": [],
+                "fallback_reason": "",
+            },
+        }
+
+        normalized = run_vault_action.normalize_structured_retrieval_result(
+            payload,
+            "vault",
+        )
+
+        self.assertTrue(normalized["vault_sources"][0]["cited"])
+        self.assertEqual(
+            normalized["citation_validation"]["unlisted_vault_citations"],
+            ["wiki/methods/unlisted"],
+        )
+        self.assertEqual(
+            normalized["citation_validation"]["status"],
+            "partial",
+        )
+
+    def test_retrieval_schema_is_valid_json(self) -> None:
+        schema_path = (
+            SCRIPT_PATH.parents[1]
+            / "schemas"
+            / "dashboard_retrieval_response.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("answer_markdown", schema["required"])
+
+    def test_jsonl_runner_emits_structured_dashboard_result(self) -> None:
+        payload = {
+            "answer_markdown": "参考 [官方页面](https://example.com/docs)。",
+            "vault_sources": [],
+            "web_sources": [
+                {
+                    "title": "官方页面",
+                    "url": "https://example.com/docs",
+                    "publisher": "Example",
+                    "published_at": "2026-07-25",
+                }
+            ],
+            "conflicts": [],
+            "evidence_gaps": [],
+            "retrieval_path": {
+                "stage": "vault+web",
+                "inspected_vault_paths": [],
+                "web_queries": ["example docs"],
+                "fallback_reason": "",
+            },
+        }
+        events = [
+            {"type": "turn.started"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "web_search",
+                    "query": "example docs",
+                    "sources": [{"type": "url", "url": "https://example.com/docs"}],
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": json.dumps(payload, ensure_ascii=False),
+                },
+            },
+        ]
+        script = (
+            "import json,sys;"
+            "sys.stdin.read();"
+            f"events={json.dumps(events, ensure_ascii=False)!r};"
+            "[print(json.dumps(item, ensure_ascii=False), flush=True) "
+            "for item in json.loads(events)]"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = run_vault_action.run_retrieval_process(
+                [sys.executable, "-c", script],
+                Path.cwd(),
+                10,
+                "prompt",
+                "web",
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "参考 [官方页面](https://example.com/docs)。",
+        )
+        dashboard_events = [
+            json.loads(line.removeprefix("DASHBOARD_EVENT "))
+            for line in stderr.getvalue().splitlines()
+            if line.startswith("DASHBOARD_EVENT ")
+        ]
+        result_event = next(
+            event for event in dashboard_events
+            if event["type"] == "retrieval-result"
+        )
+        self.assertTrue(
+            result_event["payload"]["web_sources"][0]["event_verified"]
+        )
+        self.assertEqual(
+            result_event["payload"]["citation_validation"]["status"],
+            "verified",
+        )
 
 
 if __name__ == "__main__":

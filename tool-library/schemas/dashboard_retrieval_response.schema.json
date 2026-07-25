@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "answer_markdown",
+    "vault_sources",
+    "web_sources",
+    "conflicts",
+    "evidence_gaps",
+    "retrieval_path"
+  ],
+  "properties": {
+    "answer_markdown": {
+      "type": "string"
+    },
+    "vault_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "title"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "web_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "url",
+          "publisher",
+          "published_at"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "publisher": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "retrieval_path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "inspected_vault_paths",
+        "web_queries",
+        "fallback_reason"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "inspected_vault_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "web_queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fallback_reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
