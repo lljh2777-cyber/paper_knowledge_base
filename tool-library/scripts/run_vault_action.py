@@ -78,11 +78,17 @@ static evidence is insufficient.
         "input_required": True,
         "writes": False,
         "instructions": """
-Use the `research-vault-retrieval` skill. Answer only from evidence already in
-the vault, cite the relevant vault notes, and state `Vault 中未找到足够依据`
-where evidence is insufficient. This action is read-only: do not create,
-modify, move, or delete files. Return the answer in the final response so the
-dashboard can display it.
+Use the `research-vault-retrieval` skill. Follow the supplied deterministic
+retrieval preflight as a transparent cascade: inspect lexical seeds first,
+expand through linked and linking notes second, and use the orientation-index
+fallback only when no reliable seed exists. The preflight contains routing
+hints, not evidence; read candidate notes directly before making claims.
+Answer only from evidence already in the vault, cite the relevant vault notes,
+and state `Vault 中未找到足够依据` where evidence is insufficient. In the final
+response include a concise `检索路径` section listing the stage used, seed
+notes, graph-expanded notes actually inspected, and any fallback reason.
+This action is read-only: do not create, modify, move, or delete files. Return
+the answer in the final response so the dashboard can display it.
 """,
     },
     "synthesis": {
@@ -157,7 +163,7 @@ deferred items requiring user confirmation.
 
 
 def configure_utf8_stdio() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
@@ -211,11 +217,28 @@ def validate_project_root(project_root: Path) -> Path:
     return root
 
 
-def build_prompt(action: str, user_input: str, project_root: Path) -> str:
+def build_prompt(
+    action: str,
+    user_input: str,
+    project_root: Path,
+    retrieval_preflight: dict[str, Any] | None = None,
+) -> str:
     spec = ACTION_SPECS[action]
     request = user_input.strip()
     if spec.get("input_required") and not request:
         raise ValueError(f"{spec['label']} requires a non-empty request")
+
+    retrieval_block = ""
+    if action == "vault-retrieval":
+        retrieval_block = f"""
+Deterministic retrieval preflight:
+```json
+{json.dumps(retrieval_preflight or {}, ensure_ascii=False, indent=2)}
+```
+
+Treat this JSON as candidate routing metadata, not as claim evidence. Do not
+cite a path merely because it appears here; open and inspect the note first.
+"""
 
     return f"""You are executing a Research Vault dashboard action in:
 {project_root}
@@ -233,12 +256,70 @@ Action-specific instructions:
 
 User request:
 {request}
+{retrieval_block}
 
 At completion, report files created or updated, indexes/logs updated or
 deliberately skipped, evidence source and processing depth, unresolved gaps,
 and skipped steps. Do not ask a follow-up question unless the task cannot
 proceed safely without information that is absent from the request.
 """
+
+
+def run_retrieval_preflight(
+    python_value: str,
+    project_root: Path,
+    user_input: str,
+) -> dict[str, Any]:
+    script = project_root / "tool-library" / "scripts" / "retrieve_vault.py"
+    if not script.is_file():
+        return {
+            "stage": "preflight-unavailable",
+            "error": f"Retrieval helper not found: {script}",
+            "fallback": {"used": True, "paths": []},
+        }
+    try:
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        completed = subprocess.run(
+            [
+                python_value,
+                str(script),
+                "--project-root",
+                str(project_root),
+            ],
+            cwd=project_root,
+            input=user_input,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            shell=False,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            "stage": "preflight-unavailable",
+            "error": str(error),
+            "fallback": {"used": True, "paths": []},
+        }
+    if completed.returncode != 0:
+        return {
+            "stage": "preflight-unavailable",
+            "error": completed.stderr.strip() or f"exit code {completed.returncode}",
+            "fallback": {"used": True, "paths": []},
+        }
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return {
+            "stage": "preflight-unavailable",
+            "error": f"Invalid retrieval JSON: {error}",
+            "fallback": {"used": True, "paths": []},
+        }
+    return payload
 
 
 def build_codex_command(
@@ -345,6 +426,15 @@ def dry_run_payload(
         ]
         prompt = ""
     else:
+        retrieval_preflight = (
+            run_retrieval_preflight(
+                python_value,
+                project_root,
+                user_input,
+            )
+            if action == "vault-retrieval"
+            else None
+        )
         command = build_codex_command(
             codex_value,
             project_root,
@@ -353,7 +443,12 @@ def dry_run_payload(
             reasoning_effort,
             effective_service_tier,
         )
-        prompt = build_prompt(action, user_input, project_root)
+        prompt = build_prompt(
+            action,
+            user_input,
+            project_root,
+            retrieval_preflight,
+        )
     return {
         "action": action,
         "label": spec["label"],
@@ -432,7 +527,28 @@ def main() -> int:
         return run_process(command, project_root, args.timeout_seconds)
 
     codex = resolve_executable(args.codex, "Codex")
-    prompt = build_prompt(args.action, user_input, project_root)
+    retrieval_preflight = None
+    if args.action == "vault-retrieval":
+        python = resolve_executable(args.python, "Python")
+        retrieval_preflight = run_retrieval_preflight(
+            python,
+            project_root,
+            user_input,
+        )
+        print(
+            "Retrieval preflight: "
+            f"stage={retrieval_preflight.get('stage', 'unknown')}, "
+            f"seeds={len(retrieval_preflight.get('lexical_seeds', []))}, "
+            f"graph={len(retrieval_preflight.get('graph_expansion', []))}, "
+            f"fallback={bool(retrieval_preflight.get('fallback', {}).get('used'))}",
+            file=sys.stderr,
+        )
+    prompt = build_prompt(
+        args.action,
+        user_input,
+        project_root,
+        retrieval_preflight,
+    )
     command = build_codex_command(
         codex,
         project_root,

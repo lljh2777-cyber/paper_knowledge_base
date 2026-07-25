@@ -238,16 +238,30 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
 
 When answering from vault evidence:
 
-1. Read these first when relevant, skipping missing files:
+1. For a focused query, run the read-only retrieval preflight first:
+
+   ```powershell
+   D:\python\python.exe tool-library/scripts/retrieve_vault.py --project-root . --query "<question>"
+   ```
+
+   Treat its output as routing metadata, not evidence. Follow the reported
+   cascade in order: lexical seeds, one-hop wikilink/backlink expansion, then
+   orientation-index fallback only when no reliable seed exists.
+2. Read these orientation files when the preflight falls back or when the query
+   is broad, skipping missing files:
    - `knowledge-base/文献索引.md`
    - `knowledge-base/研究主题索引.md`
    - `knowledge-base/研究方法索引.md`
    - `knowledge-base/字段补全检查.md`
    - `knowledge-base/wiki/index.md`
-2. Use `rg` in `knowledge-base/` to locate candidate Markdown notes.
-3. Read the most relevant evidence notes before answering.
-4. Base vault-backed conclusions only on vault evidence.
-5. Use answer sections such as `结论`, `支持文献`, `差异/争议`, `对我研究的启发`, and `证据缺口` when useful.
+3. Use `rg` in `knowledge-base/` to refine or broaden candidate discovery when
+   the preflight terms are incomplete.
+4. Read the most relevant candidate notes directly before answering. A
+   preflight score or graph edge never counts as claim evidence.
+5. Base vault-backed conclusions only on vault evidence.
+6. Include a concise `检索路径` section for Dashboard retrievals: stage used,
+   seed notes, graph-expanded notes actually inspected, and fallback reason.
+7. Use answer sections such as `结论`, `支持文献`, `差异/争议`, `对我研究的启发`, and `证据缺口` when useful.
 
 ## Index And Log Rules
 
