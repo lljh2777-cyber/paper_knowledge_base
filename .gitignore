@@ -19,6 +19,11 @@ tool-library/scripts/update_source_conclusions.py
 .obsidian/
 .claudian/
 
+# Local dashboard implementation notes retained as workspace references
+/stateless-code-execution.md
+/本地Codex+Obsidian搭建AgentDashboard智能体操作中心.md
+/用Codex为Obsidian搭建AgentDashboard智能体操作中心.md
+
 # Python/runtime noise
 __pycache__/
 *.py[cod]
