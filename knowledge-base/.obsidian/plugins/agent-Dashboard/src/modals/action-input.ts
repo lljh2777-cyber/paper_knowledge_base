@@ -2,24 +2,17 @@ import { App, Modal } from "obsidian";
 
 import type { DashboardAction } from "../actions";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../config";
+import type {
+	CodexExecutionConfig,
+	ExecutionOverrides,
+	ServiceTier,
+} from "../types/contracts";
 
-type ServiceTier = "default" | "fast";
-
-export interface ExecutionOverrides {
-	model: string;
-	reasoningEffort: string;
-	serviceTier: ServiceTier;
-}
+export type { ExecutionOverrides } from "../types/contracts";
 
 export interface ActionInputResult {
 	input: string;
 	overrides: ExecutionOverrides | Record<string, never>;
-}
-
-interface ExecutionConfig {
-	model: string;
-	reasoningEffort: string;
-	serviceTier: ServiceTier;
 }
 
 interface ActionInputHost {
@@ -29,7 +22,7 @@ interface ActionInputHost {
 	resolveActionExecutionConfig(
 		action: DashboardAction,
 		overrides?: Partial<ExecutionOverrides>,
-	): ExecutionConfig;
+	): CodexExecutionConfig;
 	getModelLabel(model: string): string;
 	getReasoningLabel(reasoningEffort: string): string;
 	supportsFast(model: string): boolean;

@@ -1,6 +1,6 @@
-type UnknownRecord = Record<string, unknown>;
+export type UnknownRecord = Record<string, unknown>;
 
-function asRecord(value: unknown): UnknownRecord {
+export function asRecord(value: unknown): UnknownRecord {
 	return value !== null && typeof value === "object" ? value as UnknownRecord : {};
 }
 
@@ -67,9 +67,12 @@ export function extractOpenAIText(payload: unknown): string {
 	return String(message.content || firstChoice.text || "");
 }
 
-export function parseProviderJson(value: unknown): unknown {
+export function parseProviderJson(value: unknown): UnknownRecord | null {
 	try {
-		return JSON.parse(String(value || ""));
+		const parsed: unknown = JSON.parse(String(value || ""));
+		return parsed !== null && typeof parsed === "object"
+			? parsed as UnknownRecord
+			: null;
 	} catch {
 		return null;
 	}

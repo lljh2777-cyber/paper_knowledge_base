@@ -19,13 +19,14 @@ src/runtime/settings.ts      Executable discovery and persisted setting defaults
 src/services/dashboard-data.ts
                              Incremental vault scan and Dashboard metric/gap derivation
 src/settings/settings-tab.ts Obsidian settings UI
+src/types/contracts.ts       Shared PluginHost, task, query-session, and provider contracts
 src/views/                   Code practice, conversational query, and Dashboard ItemViews
 ```
 
-The entry point and extracted contract/helper modules use strict TypeScript.
-Large UI and runtime-orchestration modules temporarily retain `@ts-nocheck`;
-remove those exemptions incrementally as their host interfaces and persisted
-data types are formalized.
+All extracted providers, services, settings, modals, and ItemViews use strict
+TypeScript. `src/plugin.ts` is the only remaining `@ts-nocheck` module; remove
+that final exemption after its process, persistence, and lifecycle state are
+split into typed runtime services.
 
 Build constraints:
 

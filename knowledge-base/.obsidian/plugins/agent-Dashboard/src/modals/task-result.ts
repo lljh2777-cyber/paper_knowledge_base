@@ -1,37 +1,13 @@
 import { App, Modal, Notice } from "obsidian";
 
-interface TaskExecutionConfig {
-	model: string;
-	reasoningEffort: string;
-	serviceTier: string;
-}
-
-interface TaskRun {
-	label: string;
-	agent: string;
-	startedAt: string;
-	status: string;
-	actionId: string;
-	exitCode?: number;
-	output?: string;
-	error?: string;
-	summary?: string;
-	executionConfig?: TaskExecutionConfig;
-}
+import type { LintStatus, TaskRun } from "../types/contracts";
 
 interface TaskResultHost {
 	getModelLabel(model: string): string;
 	getReasoningLabel(reasoningEffort: string): string;
 	getTaskRunOutput(run: TaskRun): string;
 	isActionRunning(actionId: string): boolean;
-	getLintStatus(): {
-		latest?: {
-			summary?: {
-				errors?: number;
-				warnings?: number;
-			};
-		};
-	};
+	getLintStatus(): LintStatus;
 }
 
 export class TaskResultModal extends Modal {
@@ -63,7 +39,10 @@ export class TaskResultModal extends Modal {
 			const config = contentEl.createDiv({ cls: "agent-dashboard-result-config" });
 			const items: Array<[string, string]> = [
 				["模型", this.plugin.getModelLabel(this.run.executionConfig.model)],
-				["推理强度", this.plugin.getReasoningLabel(this.run.executionConfig.reasoningEffort)],
+				[
+					"推理强度",
+					this.plugin.getReasoningLabel(this.run.executionConfig.reasoningEffort || ""),
+				],
 				["速度", this.run.executionConfig.serviceTier === "fast" ? "快速" : "标准"],
 			];
 			items.forEach(([label, value]) => {

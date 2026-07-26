@@ -1,14 +1,77 @@
-// @ts-nocheck
+import {
+	ItemView,
+	Notice,
+	TFile,
+	normalizePath,
+	setIcon,
+	type TAbstractFile,
+	type WorkspaceLeaf,
+} from "obsidian";
 
-import { ItemView, Notice, normalizePath, setIcon } from "obsidian";
-
-import { ACTIONS, ACTION_BY_ID } from "../actions";
+import {
+	ACTIONS,
+	ACTION_BY_ID,
+	type DashboardAction,
+} from "../actions";
 import { VIEW_TYPE } from "../config";
-import { ActionInputModal } from "../modals/action-input";
+import {
+	ActionInputModal,
+	type ExecutionOverrides,
+} from "../modals/action-input";
 import { TaskResultModal } from "../modals/task-result";
-import { DashboardDataService } from "../services/dashboard-data";
+import {
+	DashboardDataService,
+	type DashboardVaultChange,
+} from "../services/dashboard-data";
+import type {
+	DashboardProcessResult,
+	ExecutionConfig,
+	PluginHost,
+	TaskRun,
+} from "../types/contracts";
+
+type DashboardData = NonNullable<Awaited<ReturnType<DashboardDataService["load"]>>>;
+type AgentRun = DashboardData["agentRuns"][number];
+type KnowledgeGap = DashboardData["knowledgeGaps"][number];
+type OkfReadiness = DashboardData["okf"];
+type HeatmapDay = DashboardData["activity"]["days"][number];
+type RunsFilter = "all" | "done" | "open";
+type GapsFilter = "all" | "high" | "medium" | "low";
+
+interface DashboardHost extends PluginHost {
+	getRunningTaskRun(actionId: string): TaskRun | null;
+	stopDirectVaultQuery(runId: string): boolean;
+	stopVaultAction(runId: string): boolean;
+	activateQueryWikiView(initialInput?: string): Promise<void>;
+	activateCodePracticeView(): Promise<void>;
+	supportsFast(model: string): boolean;
+	runVaultAction(
+		runId: string,
+		action: DashboardAction,
+		input: string,
+		executionConfig?: ExecutionConfig | null,
+	): Promise<DashboardProcessResult>;
+}
+
 export class DashboardView extends ItemView {
-	constructor(leaf, plugin) {
+	private readonly plugin: DashboardHost;
+	private readonly dataService: DashboardDataService;
+	private data: DashboardData | null;
+	private runsFilter: RunsFilter;
+	private gapsFilter: GapsFilter;
+	private readonly monthFormatter: Intl.DateTimeFormat;
+	private reloadTimer: number | null;
+	private readonly pendingVaultChanges: Map<string, DashboardVaultChange>;
+	private loadSequence: number;
+	private closed: boolean;
+	private readonly stoppingRunIds: Set<string>;
+
+	private get currentData(): DashboardData {
+		if (!this.data) throw new Error("Dashboard data is not loaded");
+		return this.data;
+	}
+
+	constructor(leaf: WorkspaceLeaf, plugin: DashboardHost) {
 		super(leaf);
 		this.plugin = plugin;
 		this.dataService = new DashboardDataService(plugin.app, plugin);
@@ -23,33 +86,33 @@ export class DashboardView extends ItemView {
 		this.stoppingRunIds = new Set();
 	}
 
-	getViewType() {
+	getViewType(): string {
 		return VIEW_TYPE;
 	}
 
-	getDisplayText() {
+	getDisplayText(): string {
 		return "智能体控制台";
 	}
 
-	getIcon() {
+	getIcon(): string {
 		return "layout-dashboard";
 	}
 
-	async onOpen() {
+	async onOpen(): Promise<void> {
 		this.closed = false;
 		this.renderLoading();
 		this.registerVaultRefreshEvents();
 		await this.loadAndRender();
 	}
 
-	async onClose() {
+	async onClose(): Promise<void> {
 		this.closed = true;
 		this.loadSequence += 1;
 		if (this.reloadTimer) window.clearTimeout(this.reloadTimer);
 		this.contentEl.empty();
 	}
 
-	registerVaultRefreshEvents() {
+	registerVaultRefreshEvents(): void {
 		this.registerEvent(this.app.vault.on("create", (file) => this.queueVaultChange("upsert", file)));
 		this.registerEvent(this.app.vault.on("modify", (file) => this.queueVaultChange("upsert", file)));
 		this.registerEvent(this.app.vault.on("delete", (file) => this.queueVaultChange("delete", file)));
@@ -67,23 +130,23 @@ export class DashboardView extends ItemView {
 		}));
 	}
 
-	isDashboardWikiPath(value) {
+	isDashboardWikiPath(value: unknown): boolean {
 		const normalized = normalizePath(String(value || ""));
 		return normalized.startsWith("wiki/") && normalized.toLowerCase().endsWith(".md");
 	}
 
-	queueVaultChange(type, file) {
+	queueVaultChange(type: "upsert" | "delete", file: TAbstractFile): void {
 		const filePath = normalizePath(String(file?.path || ""));
 		if (!this.isDashboardWikiPath(filePath)) return;
 		this.pendingVaultChanges.set(filePath, {
 			type,
 			path: filePath,
-			file: type === "upsert" ? file : null,
+			file: type === "upsert" && file instanceof TFile ? file : null,
 		});
 		this.scheduleReload();
 	}
 
-	scheduleReload() {
+	scheduleReload(): void {
 		if (this.reloadTimer) {
 			window.clearTimeout(this.reloadTimer);
 		}
@@ -95,7 +158,7 @@ export class DashboardView extends ItemView {
 		}, 1200);
 	}
 
-	async loadAndRender(changes = []) {
+	async loadAndRender(changes: DashboardVaultChange[] = []): Promise<void> {
 		const sequence = ++this.loadSequence;
 		try {
 			const data = await this.dataService.load(changes);
@@ -109,7 +172,7 @@ export class DashboardView extends ItemView {
 		}
 	}
 
-	renderLoading() {
+	renderLoading(): void {
 		this.contentEl.empty();
 		this.contentEl.addClass("agent-dashboard-view");
 		const shell = this.contentEl.createDiv({ cls: "agent-dashboard-shell" });
@@ -119,7 +182,7 @@ export class DashboardView extends ItemView {
 		panel.createEl("p", { cls: "agent-dashboard-loading-copy", text: "正在读取 Markdown 文件、属性区、wikilink、日志记录和笔记活动。" });
 	}
 
-	renderError(error) {
+	renderError(error: unknown): void {
 		this.contentEl.empty();
 		this.contentEl.addClass("agent-dashboard-view");
 		const shell = this.contentEl.createDiv({ cls: "agent-dashboard-shell" });
@@ -129,7 +192,7 @@ export class DashboardView extends ItemView {
 		panel.createEl("p", { cls: "agent-dashboard-loading-copy", text: error instanceof Error ? error.message : String(error) });
 	}
 
-	renderDashboard() {
+	renderDashboard(): void {
 		if (!this.data) {
 			this.renderLoading();
 			return;
@@ -158,20 +221,20 @@ export class DashboardView extends ItemView {
 		this.renderOkfReadiness(main);
 	}
 
-	renderHeader(parent) {
+	renderHeader(parent: HTMLElement): void {
 		const header = parent.createEl("header", { cls: "agent-dashboard-header" });
 		const titleBlock = header.createDiv({ cls: "agent-dashboard-title-block" });
-		titleBlock.createEl("p", { cls: "agent-dashboard-eyebrow", text: this.data.header.scope });
-		titleBlock.createEl("h1", { text: this.data.header.title });
+		titleBlock.createEl("p", { cls: "agent-dashboard-eyebrow", text: this.currentData.header.scope });
+		titleBlock.createEl("h1", { text: this.currentData.header.title });
 		const status = header.createDiv({ cls: "agent-dashboard-header-status", attr: { "aria-label": "知识库状态" } });
 		const pill = status.createEl("button", {
 			cls: "agent-dashboard-status-pill agent-dashboard-local-pill",
-			text: this.data.header.status,
+			text: this.currentData.header.status,
 			attr: { "aria-pressed": "true" },
 		});
 		pill.type = "button";
-		status.createSpan({ cls: "agent-dashboard-vault-chip", text: this.data.header.vault });
-		status.createSpan({ cls: "agent-dashboard-scan-time", text: this.data.header.lastScan });
+		status.createSpan({ cls: "agent-dashboard-vault-chip", text: this.currentData.header.vault });
+		status.createSpan({ cls: "agent-dashboard-scan-time", text: this.currentData.header.lastScan });
 		const refresh = status.createEl("button", {
 			cls: "agent-dashboard-refresh-button",
 			text: "刷新",
@@ -183,9 +246,9 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderActions(parent) {
+	renderActions(parent: HTMLElement): void {
 		const rail = parent.createEl("nav", { cls: "agent-dashboard-action-rail", attr: { "aria-label": "研究知识库操作" } });
-		this.data.actions.filter((action) => action.showInRail !== false).forEach((action) => {
+		this.currentData.actions.filter((action) => action.showInRail !== false).forEach((action) => {
 			const isRunning = this.plugin.isActionRunning(action.id);
 			const runningTask = isRunning ? this.plugin.getRunningTaskRun(action.id) : null;
 			const isStopping = Boolean(runningTask && this.stoppingRunIds.has(runningTask.id));
@@ -219,7 +282,7 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	requestStopRun(run) {
+	requestStopRun(run: TaskRun): void {
 		if (!run || this.stoppingRunIds.has(run.id)) return;
 		const backend = String(run.executionConfig?.backend || "codex-cli");
 		const requested = backend !== "codex-cli"
@@ -235,9 +298,9 @@ export class DashboardView extends ItemView {
 		this.renderDashboard();
 	}
 
-	renderStats(parent) {
+	renderStats(parent: HTMLElement): void {
 		const grid = parent.createEl("section", { cls: "agent-dashboard-metric-grid", attr: { "aria-label": "知识库摘要指标" } });
-		this.data.metrics.forEach((metric) => {
+		this.currentData.metrics.forEach((metric) => {
 			const card = grid.createEl("article", { cls: `agent-dashboard-metric-card agent-dashboard-tone-${metric.tone}` });
 			card.createDiv({ cls: "agent-dashboard-metric-label", text: metric.label });
 			const value = card.createDiv({ cls: "agent-dashboard-metric-value" });
@@ -249,8 +312,8 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderHeatmap(parent) {
-		const panel = this.createPanel(parent, "agent-dashboard-panel-wide agent-dashboard-heatmap-panel", "知识活动", this.data.activity.title, this.data.activity.rangeLabel);
+	renderHeatmap(parent: HTMLElement): void {
+		const panel = this.createPanel(parent, "agent-dashboard-panel-wide agent-dashboard-heatmap-panel", "知识活动", this.currentData.activity.title, this.currentData.activity.rangeLabel);
 		const stage = panel
 			.createDiv({ cls: "agent-dashboard-heatmap-scroll", attr: { role: "img", "aria-label": "基于本地 Markdown 修改记录的每日知识库活动热力图" } })
 			.createDiv({ cls: "agent-dashboard-heatmap-stage" });
@@ -259,8 +322,8 @@ export class DashboardView extends ItemView {
 		const weekdayLabels = graph.createDiv({ cls: "agent-dashboard-weekday-labels", attr: { "aria-hidden": "true" } });
 		["一", "", "三", "", "五", "", "日"].forEach((label) => weekdayLabels.createSpan({ text: label }));
 		const cells = graph.createDiv({ cls: "agent-dashboard-heatmap-cells" });
-		this.renderMonthMarkers(monthRow, this.data.activity.days);
-		this.data.activity.days.forEach((day) => {
+		this.renderMonthMarkers(monthRow, this.currentData.activity.days);
+		this.currentData.activity.days.forEach((day) => {
 			const label = day.inRange ? `${day.date}: ${day.count} 个${day.track}笔记更新` : `${day.date}: 不在统计范围内`;
 			const cell = cells.createSpan({
 				cls: `agent-dashboard-heat-cell agent-dashboard-heat-level-${day.inRange ? day.level : 0}`,
@@ -272,31 +335,31 @@ export class DashboardView extends ItemView {
 		});
 		const footer = panel.createDiv({ cls: "agent-dashboard-heatmap-footer" });
 		const tracks = footer.createDiv({ cls: "agent-dashboard-track-legend" });
-		this.data.activity.tracks.forEach((track) => tracks.createSpan({ cls: "agent-dashboard-track-token", text: track }));
+		this.currentData.activity.tracks.forEach((track) => tracks.createSpan({ cls: "agent-dashboard-track-token", text: track }));
 		const legend = footer.createDiv({ cls: "agent-dashboard-density-legend", attr: { "aria-label": "活动密度图例" } });
 		legend.createSpan({ text: "少" });
 		[0, 1, 2, 3, 4].forEach((level) => legend.createSpan({ cls: `agent-dashboard-density agent-dashboard-density-${level}` }));
 		legend.createSpan({ text: "多" });
 	}
 
-	renderAgentRuns(parent) {
+	renderAgentRuns(parent: HTMLElement): void {
 		const panel = this.createPanel(parent, "agent-dashboard-list-panel", "运行记录", "智能体运行");
 		this.renderFilterGroup(panel, "runs");
 		const list = panel.createDiv({ cls: "agent-dashboard-table-list" });
 		this.renderAgentRunsList(list);
 	}
 
-	renderKnowledgeGaps(parent) {
+	renderKnowledgeGaps(parent: HTMLElement): void {
 		const panel = this.createPanel(parent, "agent-dashboard-list-panel", "知识缺口", "待处理问题");
 		this.renderFilterGroup(panel, "gaps");
 		const list = panel.createDiv({ cls: "agent-dashboard-table-list" });
 		this.renderKnowledgeGapsList(list);
 	}
 
-	renderProcessingDepth(parent) {
+	renderProcessingDepth(parent: HTMLElement): void {
 		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "处理深度", "证据深度分布");
 		const bar = panel.createDiv({ cls: "agent-dashboard-stacked-bar", attr: { "aria-label": "证据处理深度分布" } });
-		this.data.processingDepth.forEach((row) => {
+		this.currentData.processingDepth.forEach((row) => {
 			const segment = bar.createSpan({
 				cls: `agent-dashboard-bar-segment agent-dashboard-bar-${this.formatClassToken(row.label)}`,
 				attr: { "aria-label": `${this.displayDepth(row.label)}: ${row.percent}%` },
@@ -304,36 +367,36 @@ export class DashboardView extends ItemView {
 			segment.style.width = `${Math.max(row.percent, 2)}%`;
 		});
 		const list = panel.createDiv({ cls: "agent-dashboard-count-list" });
-		this.data.processingDepth.forEach((row) => {
+		this.currentData.processingDepth.forEach((row) => {
 			const item = list.createDiv({ cls: "agent-dashboard-count-item" });
 			item.createSpan({ cls: "agent-dashboard-count-name", text: this.displayDepth(row.label) });
 			item.createSpan({ cls: "agent-dashboard-count-value", text: `${row.count} / ${row.percent}%` });
 		});
 	}
 
-	renderCoverage(parent) {
+	renderCoverage(parent: HTMLElement): void {
 		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "知识枢纽", "方法 / 综合覆盖");
 		const stats = panel.createDiv({ cls: "agent-dashboard-coverage-stats" });
 		[
-			["方法", this.data.coverage.methodNodes],
-			["综合", this.data.coverage.synthesisNodes],
-			["待建", this.data.coverage.missingMethodPages],
+			["方法", this.currentData.coverage.methodNodes],
+			["综合", this.currentData.coverage.synthesisNodes],
+			["待建", this.currentData.coverage.missingMethodPages],
 		].forEach(([label, value]) => {
 			const stat = stats.createDiv({ cls: "agent-dashboard-coverage-stat" });
 			stat.createSpan({ cls: "agent-dashboard-coverage-number", text: String(value) });
 			stat.createSpan({ cls: "agent-dashboard-coverage-label", text: String(label) });
 		});
 		const hubs = panel.createDiv({ cls: "agent-dashboard-hub-list" });
-		this.data.coverage.recentHubs.forEach((hub) => hubs.createDiv({ cls: "agent-dashboard-hub-item" }).createSpan({ cls: "agent-dashboard-hub-name", text: hub }));
+		this.currentData.coverage.recentHubs.forEach((hub) => hubs.createDiv({ cls: "agent-dashboard-hub-item" }).createSpan({ cls: "agent-dashboard-hub-name", text: hub }));
 	}
 
-	renderOkfReadiness(parent) {
-		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度", this.data.okf.latestLabel);
-		this.renderOkfList(panel, this.data.okf);
-		this.renderRiskBox(panel, this.data.okf);
+	renderOkfReadiness(parent: HTMLElement): void {
+		const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度", this.currentData.okf.latestLabel);
+		this.renderOkfList(panel, this.currentData.okf);
+		this.renderRiskBox(panel, this.currentData.okf);
 	}
 
-	renderFilterGroup(panel, type) {
+	renderFilterGroup(panel: HTMLElement, type: "runs" | "gaps"): void {
 		const heading = panel.find(".agent-dashboard-panel-heading");
 		if (!heading) return;
 		heading.addClass("agent-dashboard-compact-heading");
@@ -349,18 +412,18 @@ export class DashboardView extends ItemView {
 			button.type = "button";
 			this.registerDomEvent(button, "click", () => {
 				if (type === "runs") {
-					this.runsFilter = key;
+					this.runsFilter = key as RunsFilter;
 				} else {
-					this.gapsFilter = key;
+					this.gapsFilter = key as GapsFilter;
 				}
 				this.renderDashboard();
 			});
 		});
 	}
 
-	renderAgentRunsList(parent) {
+	renderAgentRunsList(parent: HTMLElement): void {
 		parent.empty();
-		const visibleRuns = this.data.agentRuns.filter((run) => this.isVisibleAgentRun(run));
+		const visibleRuns = this.currentData.agentRuns.filter((run) => this.isVisibleAgentRun(run));
 		if (visibleRuns.length === 0) {
 			parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有运行记录。" });
 			return;
@@ -369,11 +432,12 @@ export class DashboardView extends ItemView {
 			const row = run.runId
 				? parent.createEl("button", { cls: "agent-dashboard-data-row agent-dashboard-run-row" })
 				: parent.createEl("article", { cls: "agent-dashboard-data-row" });
-			if (run.runId) {
+			if (run.runId && row instanceof HTMLButtonElement) {
+				const runId = run.runId;
 				row.type = "button";
 				row.setAttr("title", "查看任务输出");
 				this.registerDomEvent(row, "click", () => {
-					const taskRun = this.plugin.getTaskRun(run.runId);
+					const taskRun = this.plugin.getTaskRun(runId);
 					if (taskRun) this.openTaskResult(taskRun);
 				});
 			}
@@ -383,9 +447,9 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderKnowledgeGapsList(parent) {
+	renderKnowledgeGapsList(parent: HTMLElement): void {
 		parent.empty();
-		const visibleGaps = this.data.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
+		const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
 		if (visibleGaps.length === 0) {
 			parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有待处理的知识缺口。" });
 			return;
@@ -399,7 +463,7 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderKnowledgeGapAction(parent, gap) {
+	renderKnowledgeGapAction(parent: HTMLElement, gap: KnowledgeGap): void {
 		const action = ACTION_BY_ID.get(gap.actionId);
 		const button = parent.createEl("button", {
 			cls: "agent-dashboard-gap-action",
@@ -422,7 +486,7 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderOkfList(parent, okf) {
+	renderOkfList(parent: HTMLElement, okf: OkfReadiness): void {
 		const list = parent.createDiv({ cls: "agent-dashboard-okf-list" });
 		okf.readiness.forEach((item) => {
 			const row = list.createDiv({ cls: "agent-dashboard-okf-item" });
@@ -431,7 +495,7 @@ export class DashboardView extends ItemView {
 		});
 	}
 
-	renderRiskBox(parent, okf) {
+	renderRiskBox(parent: HTMLElement, okf: OkfReadiness): void {
 		const box = parent.createDiv({ cls: "agent-dashboard-risk-box" });
 		const head = box.createDiv({ cls: "agent-dashboard-risk-head" });
 		head.createSpan({ text: "维护风险" });
@@ -440,7 +504,13 @@ export class DashboardView extends ItemView {
 		okf.maintenanceRisk.items.forEach((item) => list.createEl("li", { text: item }));
 	}
 
-	createPanel(parent, className, kicker, title, stat) {
+	createPanel(
+		parent: HTMLElement,
+		className: string,
+		kicker: string,
+		title: string,
+		stat?: string,
+	): HTMLElement {
 		const panel = parent.createEl("section", { cls: `agent-dashboard-panel ${className}`, attr: { "aria-label": title } });
 		const heading = panel.createDiv({ cls: "agent-dashboard-panel-heading" });
 		const titleBlock = heading.createDiv();
@@ -452,7 +522,7 @@ export class DashboardView extends ItemView {
 		return panel;
 	}
 
-	async runRefresh(button) {
+	async runRefresh(button: HTMLButtonElement): Promise<void> {
 		const previous = button.getText();
 		button.disabled = true;
 		button.setText("扫描中");
@@ -464,7 +534,10 @@ export class DashboardView extends ItemView {
 		}, 900);
 	}
 
-	openAction(action, options = {}) {
+	openAction(
+		action: DashboardAction,
+		options: { initialInput?: string } = {},
+	): void {
 		if (!action.enabled) {
 			new Notice(`${action.label}将在后续阶段接入`);
 			return;
@@ -490,7 +563,11 @@ export class DashboardView extends ItemView {
 		void this.executeAction(action, "");
 	}
 
-	async executeAction(action, input, executionOverrides = {}) {
+	async executeAction(
+		action: DashboardAction,
+		input: string,
+		executionOverrides: ExecutionOverrides = {},
+	): Promise<void> {
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
 		const executionConfig = action.ai
 			? this.plugin.resolveActionExecutionConfig(action, executionOverrides)
@@ -542,7 +619,7 @@ export class DashboardView extends ItemView {
 		}
 	}
 
-	openTaskResult(run) {
+	openTaskResult(run: TaskRun): void {
 		const onRepair = run.actionId === "vault-lint"
 			? () => {
 				const repairAction = ACTION_BY_ID.get("vault-lint-fix");
@@ -552,8 +629,8 @@ export class DashboardView extends ItemView {
 		new TaskResultModal(this.app, this.plugin, run, onRepair).open();
 	}
 
-	formatProcessOutput(result) {
-		const parts = [];
+	formatProcessOutput(result: DashboardProcessResult): string {
+		const parts: string[] = [];
 		if (result.stdout.trim()) {
 			parts.push(result.stdout.trim());
 		}
@@ -563,17 +640,17 @@ export class DashboardView extends ItemView {
 		return parts.join("\n\n").slice(0, 120000) || "任务未返回文本输出。";
 	}
 
-	isVisibleAgentRun(run) {
+	isVisibleAgentRun(run: AgentRun): boolean {
 		if (this.runsFilter === "all") return true;
 		if (this.runsFilter === "open") return run.status !== "done";
 		return run.status === this.runsFilter;
 	}
 
-	isVisibleKnowledgeGap(gap) {
+	isVisibleKnowledgeGap(gap: KnowledgeGap): boolean {
 		return this.gapsFilter === "all" || gap.severity === this.gapsFilter;
 	}
 
-	renderMonthMarkers(parent, days) {
+	renderMonthMarkers(parent: HTMLElement, days: HeatmapDay[]): void {
 		const weekCount = Math.ceil(days.length / 7);
 		for (let week = 0; week < weekCount; week += 1) {
 			const monthStart = days.slice(week * 7, week * 7 + 7).find((day) => {
@@ -584,7 +661,7 @@ export class DashboardView extends ItemView {
 		}
 	}
 
-	displayStatus(status) {
+	displayStatus(status: string): string {
 		return {
 			done: "已完成",
 			failed: "失败",
@@ -596,7 +673,7 @@ export class DashboardView extends ItemView {
 		}[status] || status;
 	}
 
-	displaySeverity(severity) {
+	displaySeverity(severity: string): string {
 		return {
 			high: "高",
 			medium: "中",
@@ -604,7 +681,7 @@ export class DashboardView extends ItemView {
 		}[severity] || severity;
 	}
 
-	displayGapType(type) {
+	displayGapType(type: string): string {
 		return {
 			method: "方法",
 			paper: "文献",
@@ -614,7 +691,7 @@ export class DashboardView extends ItemView {
 		}[type] || type;
 	}
 
-	displayOkfState(state) {
+	displayOkfState(state: string): string {
 		return {
 			ready: "就绪",
 			pending: "待处理",
@@ -622,14 +699,14 @@ export class DashboardView extends ItemView {
 		}[state] || state;
 	}
 
-	displayRisk(level) {
+	displayRisk(level: string): string {
 		return {
 			watch: "关注",
 			low: "低",
 		}[level] || level;
 	}
 
-	displayDepth(label) {
+	displayDepth(label: string): string {
 		return {
 			"metadata-only": "仅元数据",
 			"abstract-level": "摘要级",
@@ -638,8 +715,8 @@ export class DashboardView extends ItemView {
 		}[label] || label;
 	}
 
-	formatClassToken(value) {
-		return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+	formatClassToken(value: unknown): string {
+		return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
 	}
 }
 

@@ -1,11 +1,70 @@
-// @ts-nocheck
-
-import { normalizePath } from "obsidian";
+import { normalizePath, type App, type TFile } from "obsidian";
 
 import { ACTIONS } from "../actions";
+import type { PluginHost, VaultRecord } from "../types/contracts";
+
+export interface DashboardVaultChange {
+	type: "upsert" | "delete";
+	path: string;
+	file?: TFile | null;
+}
+
+interface PaperDepth {
+	metadataOnly: number;
+	ingested: number;
+	abstractLevel: number;
+	xray: number;
+	needXray: number;
+}
+
+interface KnowledgeGap {
+	id?: string;
+	type: string;
+	title: string;
+	severity: "high" | "medium" | "low";
+	score: number;
+	actionId: string;
+	actionInput?: string;
+	source?: string;
+	evidence?: string[];
+	status?: string;
+}
+
+interface Coverage {
+	methodNodes: number;
+	synthesisNodes: number;
+	missingMethodPages: number;
+	recentHubs: string[];
+}
+
+interface LinkReport {
+	total: number;
+	broken: Array<{ source: string; target: string }>;
+}
+
+interface AgentRun {
+	agent: string;
+	task: string;
+	status: string;
+	time: string;
+	runId?: string;
+}
+
+interface MethodGapCandidate {
+	title: string;
+	paths: string[];
+}
+
+interface DashboardDataHost extends PluginHost {}
 
 export class DashboardDataService {
-	constructor(app, plugin) {
+	private readonly app: App;
+	private readonly plugin: DashboardDataHost;
+	private recordByPath: Map<string, VaultRecord>;
+	private initialized: boolean;
+	private loadVersion: number;
+
+	constructor(app: App, plugin: DashboardDataHost) {
 		this.app = app;
 		this.plugin = plugin;
 		this.recordByPath = new Map();
@@ -13,7 +72,7 @@ export class DashboardDataService {
 		this.loadVersion = 0;
 	}
 
-	async load(changes = []) {
+	async load(changes: DashboardVaultChange[] = []) {
 		const version = ++this.loadVersion;
 		const nextRecords = new Map(this.recordByPath);
 		if (!this.initialized) {
@@ -87,7 +146,7 @@ export class DashboardDataService {
 					unit: "",
 					tone: healthScore === null ? "neutral" : healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
 					detail: lintSummary
-						? `上次体检 ${this.formatExportTime(lintStatus.latest.generated_at)}：${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告${lintStale ? "；此后知识库有更新" : ""}`
+						? `上次体检 ${this.formatExportTime(lintStatus.latest?.generated_at)}：${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告${lintStale ? "；此后知识库有更新" : ""}`
 						: lintStatus.error
 							? "上次体检报告无法读取"
 							: "尚无体检结果，请运行知识库体检",
@@ -124,7 +183,7 @@ export class DashboardDataService {
 		return version === this.loadVersion ? result : null;
 	}
 
-	async readRecord(file) {
+	async readRecord(file: TFile): Promise<VaultRecord> {
 		const text = await this.app.vault.cachedRead(file);
 		const cachedFrontmatter = this.app.metadataCache?.getFileCache?.(file)?.frontmatter;
 		const frontmatter = cachedFrontmatter && typeof cachedFrontmatter === "object"
@@ -145,7 +204,7 @@ export class DashboardDataService {
 		};
 	}
 
-	parseFrontmatter(text) {
+	parseFrontmatter(text: string): Record<string, unknown> {
 		if (!text.startsWith("---")) {
 			return {};
 		}
@@ -154,7 +213,7 @@ export class DashboardDataService {
 			return {};
 		}
 		const raw = text.slice(3, end).trim();
-		const data = {};
+		const data: Record<string, unknown> = {};
 		let currentKey = "";
 		for (const line of raw.split(/\r?\n/)) {
 			const keyMatch = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
@@ -168,13 +227,13 @@ export class DashboardDataService {
 				if (!Array.isArray(data[currentKey])) {
 					data[currentKey] = data[currentKey] ? [data[currentKey]] : [];
 				}
-				data[currentKey].push(this.cleanYamlScalar(listMatch[1]));
+				(data[currentKey] as unknown[]).push(this.cleanYamlScalar(listMatch[1]));
 			}
 		}
 		return data;
 	}
 
-	parseYamlValue(value) {
+	parseYamlValue(value: string): string | string[] {
 		const trimmed = value.trim();
 		if (!trimmed) {
 			return "";
@@ -189,11 +248,11 @@ export class DashboardDataService {
 		return this.cleanYamlScalar(trimmed);
 	}
 
-	cleanYamlScalar(value) {
+	cleanYamlScalar(value: unknown): string {
 		return String(value).trim().replace(/^['"]|['"]$/g, "");
 	}
 
-	normalizeTags(tags) {
+	normalizeTags(tags: unknown): string[] {
 		if (Array.isArray(tags)) {
 			return tags.map((tag) => String(tag));
 		}
@@ -203,7 +262,7 @@ export class DashboardDataService {
 		return [];
 	}
 
-	inferType(path) {
+	inferType(path: string): string {
 		const normalized = normalizePath(path);
 		if (normalized.startsWith("wiki/sources/")) return "source";
 		if (normalized.startsWith("wiki/methods/")) return "method";
@@ -215,7 +274,7 @@ export class DashboardDataService {
 		return "note";
 	}
 
-	computePaperDepth(sourceRecords) {
+	computePaperDepth(sourceRecords: VaultRecord[]): PaperDepth {
 		const counts = {
 			metadataOnly: 0,
 			ingested: 0,
@@ -245,7 +304,7 @@ export class DashboardDataService {
 		return counts;
 	}
 
-	computeProcessingDepth(paperDepth, staticReadCount) {
+	computeProcessingDepth(paperDepth: PaperDepth, staticReadCount: number) {
 		const rows = [
 			{ label: "metadata-only", count: paperDepth.metadataOnly },
 			{ label: "abstract-level", count: paperDepth.abstractLevel },
@@ -259,12 +318,12 @@ export class DashboardDataService {
 		}));
 	}
 
-	computeActivity(records) {
+	computeActivity(records: VaultRecord[]) {
 		const now = new Date();
 		const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 		const start = new Date(2026, 6, 1);
-		const counts = new Map();
-		const tracks = new Map();
+		const counts = new Map<string, number>();
+		const tracks = new Map<string, string>();
 
 		for (const record of records) {
 			if (!record.path.startsWith("wiki/")) {
@@ -304,7 +363,7 @@ export class DashboardDataService {
 		};
 	}
 
-	trackForRecord(record) {
+	trackForRecord(record: VaultRecord): string {
 		if (record.path.startsWith("wiki/sources/")) return "文献";
 		if (record.path.startsWith("wiki/methods/")) return "方法";
 		if (record.path.startsWith("wiki/synthesis/")) return "综合";
@@ -312,7 +371,7 @@ export class DashboardDataService {
 		return "笔记";
 	}
 
-	countToLevel(count) {
+	countToLevel(count: number): number {
 		if (count >= 12) return 4;
 		if (count >= 7) return 3;
 		if (count >= 3) return 2;
@@ -320,7 +379,7 @@ export class DashboardDataService {
 		return 0;
 	}
 
-	async computeAgentRuns(recordByPath) {
+	async computeAgentRuns(recordByPath: Map<string, VaultRecord>): Promise<AgentRun[]> {
 		const logRecord = recordByPath.get("wiki/log.md");
 		const persistedRuns = this.plugin.getTaskRuns().map((run) => ({
 			agent: run.agent,
@@ -329,7 +388,7 @@ export class DashboardDataService {
 			time: this.formatRunTime(run.startedAt),
 			runId: run.id,
 		}));
-		const logRuns = [];
+		const logRuns: AgentRun[] = [];
 		if (logRecord) {
 			const headingPattern = /^##\s+\[([^\]]+)\]\s+([^|\n]+)(?:\|\s*(.+))?$/gm;
 			let match;
@@ -352,7 +411,7 @@ export class DashboardDataService {
 		return [{ agent: "research-vault", task: "尚无智能体运行记录", status: "planned", time: "待处理" }];
 	}
 
-	formatRunTime(value) {
+	formatRunTime(value: string): string {
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return "未知时间";
 		return new Intl.DateTimeFormat("zh-CN", {
@@ -364,7 +423,7 @@ export class DashboardDataService {
 		}).format(date);
 	}
 
-	agentForCategory(category) {
+	agentForCategory(category: string): string {
 		const value = category.toLowerCase();
 		if (value.includes("x-ray")) return "paper_xray";
 		if (value.includes("code")) return "code_reader";
@@ -375,9 +434,12 @@ export class DashboardDataService {
 		return "research-vault";
 	}
 
-	async computeKnowledgeGaps(records, sourceRecords) {
-		const candidates = [];
-		const methodCandidates = new Map();
+	async computeKnowledgeGaps(
+		records: VaultRecord[],
+		sourceRecords: VaultRecord[],
+	): Promise<KnowledgeGap[]> {
+		const candidates: KnowledgeGap[] = [];
+		const methodCandidates = new Map<string, MethodGapCandidate>();
 		for (const record of records) {
 			const matches = record.text.matchAll(/[-*]\s+([^。\n]+?)（待建方法页/g);
 			for (const match of matches) {
@@ -463,7 +525,7 @@ export class DashboardDataService {
 		} else if (Number(okfStatus.latest.unresolved_link_count || 0) > 0) {
 			candidates.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium", score: 50, actionId: "okf-export" });
 		}
-		const deduplicated = new Map();
+		const deduplicated = new Map<string, KnowledgeGap>();
 		for (const gap of candidates) {
 			const id = gap.id || this.makeGapId(gap.type, gap.title);
 			const normalized = {
@@ -483,14 +545,14 @@ export class DashboardDataService {
 			.slice(0, 8);
 	}
 
-	normalizeGapKey(value) {
+	normalizeGapKey(value: unknown): string {
 		return String(value || "")
 			.toLowerCase()
 			.replace(/\[\[|\]\]/g, "")
 			.replace(/[^\p{L}\p{N}]+/gu, "");
 	}
 
-	makeGapId(type, value) {
+	makeGapId(type: string, value: unknown): string {
 		const input = `${type}:${this.normalizeGapKey(value)}`;
 		let hash = 2166136261;
 		for (let index = 0; index < input.length; index += 1) {
@@ -500,7 +562,7 @@ export class DashboardDataService {
 		return `${type}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 	}
 
-	methodHubExists(records, title) {
+	methodHubExists(records: VaultRecord[], title: string): boolean {
 		const candidate = this.normalizeGapKey(title);
 		if (!candidate) return false;
 		return records.some((record) => {
@@ -518,8 +580,8 @@ export class DashboardDataService {
 		});
 	}
 
-	computeInboundReferenceCounts(records) {
-		const counts = new Map();
+	computeInboundReferenceCounts(records: VaultRecord[]): Map<string, number> {
+		const counts = new Map<string, number>();
 		for (const record of records) {
 			for (const match of record.text.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
 				const target = normalizePath(match[1]).replace(/\.md$/i, "");
@@ -535,7 +597,7 @@ export class DashboardDataService {
 		return counts;
 	}
 
-	paperGapScore(record, inboundCount) {
+	paperGapScore(record: VaultRecord, inboundCount: number): number {
 		const status = String(record.frontmatter.status || "").toLowerCase();
 		const depth = String(record.frontmatter.analysis_depth || "").toLowerCase();
 		const depthScore = status === "abstract-level" || depth === "abstract-level" ? 70 : 55;
@@ -545,7 +607,7 @@ export class DashboardDataService {
 		return depthScore + Math.min(20, inboundCount * 4) + missingEvidence * 3;
 	}
 
-	buildMethodGapInput(title) {
+	buildMethodGapInput(title: string): string {
 		return [
 			`处理知识缺口：创建或更新“${title}”方法页。`,
 			"请使用 research-vault-synthesis 检查现有 source note、代码笔记、方法页和索引，基于已有证据建立规范的方法枢纽。",
@@ -553,7 +615,7 @@ export class DashboardDataService {
 		].join("\n");
 	}
 
-	buildPaperGapInput(record, title) {
+	buildPaperGapInput(record: VaultRecord, title: unknown): string {
 		return [
 			`处理知识缺口：对“${title}”执行全文 x-ray 深读。`,
 			`Source note：knowledge-base/${record.path}`,
@@ -561,11 +623,15 @@ export class DashboardDataService {
 		].join("\n");
 	}
 
-	computeCoverage(methodRecords, synthesisRecords, knowledgeGaps) {
+	computeCoverage(
+		methodRecords: VaultRecord[],
+		synthesisRecords: VaultRecord[],
+		knowledgeGaps: KnowledgeGap[],
+	): Coverage {
 		const recentHubs = [...methodRecords, ...synthesisRecords]
 			.sort((a, b) => b.mtime - a.mtime)
 			.slice(0, 4)
-			.map((record) => record.frontmatter.title || record.name);
+			.map((record) => String(record.frontmatter.title || record.name));
 		const missingMethodPages = knowledgeGaps.filter((gap) => gap.type === "method").length;
 		return {
 			methodNodes: methodRecords.length,
@@ -575,7 +641,12 @@ export class DashboardDataService {
 		};
 	}
 
-	computeOkfReadiness(records, linkReport, missingFrontmatter, coverage) {
+	computeOkfReadiness(
+		records: VaultRecord[],
+		linkReport: LinkReport,
+		missingFrontmatter: number,
+		coverage: Coverage,
+	) {
 		const wikiRecords = records.filter((record) => record.path.startsWith("wiki/") && !record.path.endsWith("index.md") && !record.path.endsWith("log.md"));
 		const typedRecords = wikiRecords.filter((record) => Boolean(record.frontmatter.type));
 		const typePercent = wikiRecords.length === 0 ? 100 : Math.round((typedRecords.length / wikiRecords.length) * 100);
@@ -615,8 +686,8 @@ export class DashboardDataService {
 		};
 	}
 
-	formatExportTime(value) {
-		const date = new Date(value);
+	formatExportTime(value: unknown): string {
+		const date = new Date(String(value || ""));
 		if (Number.isNaN(date.getTime())) return "时间未知";
 		return new Intl.DateTimeFormat("zh-CN", {
 			month: "2-digit",
@@ -627,7 +698,7 @@ export class DashboardDataService {
 		}).format(date);
 	}
 
-	computeLinkReport(records) {
+	computeLinkReport(records: VaultRecord[]): LinkReport {
 		const knownPaths = new Set();
 		const knownBasenames = new Set();
 		for (const record of records) {
@@ -635,7 +706,7 @@ export class DashboardDataService {
 			knownPaths.add(withoutExt);
 			knownBasenames.add(record.name);
 		}
-		const broken = [];
+		const broken: LinkReport["broken"] = [];
 		let total = 0;
 		for (const record of records) {
 			if (!record.path.startsWith("wiki/") && !record.path.includes("索引")) {
@@ -659,27 +730,27 @@ export class DashboardDataService {
 		return { total, broken };
 	}
 
-	stripCode(text) {
+	stripCode(text: string): string {
 		return text
 			.replace(/^(```+|~~~+)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, "")
 			.replace(/`[^`\n]*`/g, "");
 	}
 
-	formatTime(date) {
+	formatTime(date: Date): string {
 		return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 	}
 
-	formatMonthYear(date) {
+	formatMonthYear(date: Date): string {
 		return new Intl.DateTimeFormat("zh-CN", { month: "short", year: "numeric" }).format(date);
 	}
 
-	addDays(date, count) {
+	addDays(date: Date, count: number): Date {
 		const next = new Date(date);
 		next.setDate(next.getDate() + count);
 		return next;
 	}
 
-	mondayStart(date) {
+	mondayStart(date: Date): Date {
 		const next = new Date(date);
 		const day = next.getDay();
 		const offset = day === 0 ? -6 : 1 - day;
@@ -687,7 +758,7 @@ export class DashboardDataService {
 		return next;
 	}
 
-	sundayEnd(date) {
+	sundayEnd(date: Date): Date {
 		const next = new Date(date);
 		const day = next.getDay();
 		const offset = day === 0 ? 0 : 7 - day;
@@ -695,7 +766,7 @@ export class DashboardDataService {
 		return next;
 	}
 
-	toISODate(date) {
+	toISODate(date: Date): string {
 		const year = String(date.getFullYear());
 		const month = String(date.getMonth() + 1).padStart(2, "0");
 		const day = String(date.getDate()).padStart(2, "0");

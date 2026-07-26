@@ -57,6 +57,26 @@ for (const modalSource of [
 		`${modalSource} should remain under strict TypeScript checking`,
 	);
 }
+for (const strictSource of [
+	"providers/adapters.ts",
+	"services/dashboard-data.ts",
+	"settings/settings-tab.ts",
+	"views/code-practice.ts",
+	"views/dashboard.ts",
+	"views/query-wiki.ts",
+	"types/contracts.ts",
+]) {
+	assert.ok(fs.existsSync(path.join(pluginSourceRoot, strictSource)));
+	assert.ok(
+		!fs.readFileSync(path.join(pluginSourceRoot, strictSource), "utf8").includes("@ts-nocheck"),
+		`${strictSource} should remain under strict TypeScript checking`,
+	);
+}
+assert.ok(
+	fs.readFileSync(path.join(pluginSourceRoot, "types/contracts.ts"), "utf8")
+		.includes("export interface PluginHost"),
+	"shared runtime contracts should expose the PluginHost boundary",
+);
 
 const plugin = Object.create(AgentDashboardPlugin.prototype);
 plugin.taskRuns = [

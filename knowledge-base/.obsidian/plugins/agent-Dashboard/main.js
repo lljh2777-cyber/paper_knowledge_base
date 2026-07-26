@@ -150,9 +150,9 @@ var ACTION_BY_ID = new Map(ACTIONS.map((action) => [action.id, action]));
 
 // src/runtime/settings.ts
 var fs = __toESM(require("node:fs"));
-var path2 = __toESM(require("node:path"));
+var path = __toESM(require("node:path"));
 var LEGACY_CODEX_EXECUTABLE = "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
-var MANAGED_CODEX_BIN_ROOT = path2.join(
+var MANAGED_CODEX_BIN_ROOT = path.join(
   process.env.LOCALAPPDATA || "",
   "OpenAI",
   "Codex",
@@ -162,11 +162,11 @@ function findPreferredCodexExecutable() {
   const candidates = /* @__PURE__ */ new Set();
   if (process.env.CODEX_CLI_PATH) candidates.add(process.env.CODEX_CLI_PATH);
   if (fs.existsSync(MANAGED_CODEX_BIN_ROOT)) {
-    const direct = path2.join(MANAGED_CODEX_BIN_ROOT, "codex.exe");
+    const direct = path.join(MANAGED_CODEX_BIN_ROOT, "codex.exe");
     if (fs.existsSync(direct)) candidates.add(direct);
     try {
       fs.readdirSync(MANAGED_CODEX_BIN_ROOT, { withFileTypes: true }).filter((entry) => entry.isDirectory()).forEach((entry) => {
-        const executable = path2.join(MANAGED_CODEX_BIN_ROOT, entry.name, "codex.exe");
+        const executable = path.join(MANAGED_CODEX_BIN_ROOT, entry.name, "codex.exe");
         if (fs.existsSync(executable)) candidates.add(executable);
       });
     } catch (error) {
@@ -184,10 +184,10 @@ function findPreferredCodexExecutable() {
 }
 function isManagedCodexExecutable(executable) {
   if (!executable) return false;
-  const normalized = path2.resolve(String(executable)).toLowerCase();
-  const legacy = path2.resolve(LEGACY_CODEX_EXECUTABLE).toLowerCase();
-  const managedRoot = path2.resolve(MANAGED_CODEX_BIN_ROOT).toLowerCase();
-  return normalized === legacy || normalized === managedRoot || normalized.startsWith(`${managedRoot}${path2.sep}`);
+  const normalized = path.resolve(String(executable)).toLowerCase();
+  const legacy = path.resolve(LEGACY_CODEX_EXECUTABLE).toLowerCase();
+  const managedRoot = path.resolve(MANAGED_CODEX_BIN_ROOT).toLowerCase();
+  return normalized === legacy || normalized === managedRoot || normalized.startsWith(`${managedRoot}${path.sep}`);
 }
 var DEFAULT_SETTINGS = {
   projectRoot: "",
@@ -208,7 +208,7 @@ var VIEW_TYPE = "agent-dashboard-research-vault";
 var CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 var QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 var MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
-var MAX_QUERY_IMAGE_ATTACHMENTS2 = 6;
+var MAX_QUERY_IMAGE_ATTACHMENTS = 6;
 var MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
 var VAULT_IMAGE_MIME_TYPES = {
   ".png": "image/png",
@@ -216,12 +216,12 @@ var VAULT_IMAGE_MIME_TYPES = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp"
 };
-var MODEL_OPTIONS2 = [
+var MODEL_OPTIONS = [
   { id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
   { id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
   { id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "快速代码模型", supportsFast: false }
 ];
-var REASONING_OPTIONS2 = [
+var REASONING_OPTIONS = [
   { id: "low", label: "低" },
   { id: "medium", label: "中" },
   { id: "high", label: "高" },
@@ -269,7 +269,7 @@ var PROVIDER_TYPES = [
     capabilities: { streaming: true, pdf: false, vision: false }
   }
 ];
-var PROVIDER_TYPE_BY_ID2 = new Map(
+var PROVIDER_TYPE_BY_ID = new Map(
   PROVIDER_TYPES.map((provider) => [provider.id, provider])
 );
 var CONNECTION_TEST_MESSAGES = [
@@ -292,20 +292,20 @@ function asRecord(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function providerMetadata(type) {
-  return PROVIDER_TYPE_BY_ID2.get(String(type || "openai")) || PROVIDER_TYPES[0];
+  return PROVIDER_TYPE_BY_ID.get(String(type || "openai")) || PROVIDER_TYPES[0];
 }
-function modelHasKnownVisionSupport2(model) {
+function modelHasKnownVisionSupport(model) {
   return /^(qwen3\.[567]-(plus|flash)|qwen3-vl|qwen-vl|qvq)/i.test(
     String(model || "").trim()
   );
 }
-function modelIsQwen37Plus2(model) {
+function modelIsQwen37Plus(model) {
   return /^qwen3\.7-plus(?:$|-)/i.test(String(model || "").trim());
 }
 function profileHasConfiguredQwenWebSearch(profile) {
   const source = asRecord(profile);
   const webSearch = asRecord(source.webSearch);
-  return source.type === "openai-compatible" && modelIsQwen37Plus2(source.model) && webSearch.enabled === true && webSearch.protocol === "qwen-chat-completions";
+  return source.type === "openai-compatible" && modelIsQwen37Plus(source.model) && webSearch.enabled === true && webSearch.protocol === "qwen-chat-completions";
 }
 function profileSupportsDirectWebSearch(profile) {
   const source = asRecord(profile);
@@ -373,7 +373,7 @@ function normalizeProviderProfile(profile) {
   const model = String(source.model || metadata.defaultModel).trim().slice(0, 160);
   const visionConfigured = capabilities.visionConfigured === true;
   const webSearchConfigured = webSearch.configured === true;
-  const webSearchEnabled = webSearchConfigured ? webSearch.enabled === true : modelIsQwen37Plus2(model);
+  const webSearchEnabled = webSearchConfigured ? webSearch.enabled === true : modelIsQwen37Plus(model);
   const strategy = String(webSearch.searchStrategy || "");
   const webSearchStrategy = strategy === "max" || strategy === "agent" ? strategy : "turbo";
   const webSearchTimeout = Number.parseInt(String(webSearch.timeoutSeconds || ""), 10);
@@ -403,7 +403,7 @@ function normalizeProviderProfile(profile) {
     capabilities: {
       streaming: typeof capabilities.streaming === "boolean" ? capabilities.streaming : metadata.capabilities.streaming,
       pdf: typeof capabilities.pdf === "boolean" ? capabilities.pdf : metadata.capabilities.pdf,
-      vision: visionConfigured ? capabilities.vision === true : capabilities.vision === true || metadata.capabilities.vision || modelHasKnownVisionSupport2(model),
+      vision: visionConfigured ? capabilities.vision === true : capabilities.vision === true || metadata.capabilities.vision || modelHasKnownVisionSupport(model),
       visionConfigured
     },
     webSearch: {
@@ -472,7 +472,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     new import_obsidian.Setting(containerEl).setName("全局默认推理强度").setDesc("仅在按钮没有指定推理强度时使用；按钮默认值和本次运行覆盖优先。").addDropdown((dropdown) => {
-      REASONING_OPTIONS2.forEach((option) => dropdown.addOption(option.id, option.label));
+      REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
       dropdown.setValue(this.plugin.settings.codexReasoningEffort).onChange(async (value) => {
         this.plugin.settings.codexReasoningEffort = value;
         await this.plugin.saveSettings();
@@ -643,14 +643,15 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
           profile.model = next.defaultModel;
         }
         profile.type = next.id;
-        profile.capabilities = { ...next.capabilities };
+        profile.capabilities = { ...next.capabilities, visionConfigured: false };
         profile.webSearch = {
           enabled: false,
           configured: false,
           protocol: "qwen-chat-completions",
           forcedSearch: true,
           searchStrategy: "turbo",
-          assignedSites: []
+          assignedSites: [],
+          timeoutSeconds: 60
         };
         profile.name = profile.name === previous.label ? next.label : profile.name;
         this.invalidateProviderProfile(profile);
@@ -717,7 +718,8 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
               status: normalized.status,
               endpoint: normalized.endpoint || profile.baseUrl,
               model: profile.model,
-              responseTimeMs: 0
+              responseTimeMs: 0,
+              testedAt: (/* @__PURE__ */ new Date()).toISOString()
             }
           });
         }
@@ -974,6 +976,7 @@ var PracticeNoteModal = class extends import_obsidian2.Modal {
 };
 
 // src/views/code-practice.ts
+var import_node_path = __toESM(require("node:path"));
 var import_obsidian3 = require("obsidian");
 var CodePracticeView = class extends import_obsidian3.ItemView {
   constructor(leaf, plugin) {
@@ -1278,7 +1281,7 @@ var CodePracticeView = class extends import_obsidian3.ItemView {
     figures.forEach((figurePath) => {
       const item = grid.createEl("figure");
       const dataUrl = this.plugin.readPracticeFigure(figurePath);
-      if (dataUrl) item.createEl("img", { attr: { src: dataUrl, alt: path.basename(figurePath) } });
+      if (dataUrl) item.createEl("img", { attr: { src: dataUrl, alt: import_node_path.default.basename(figurePath) } });
       item.createEl("figcaption", { text: figurePath, attr: { title: figurePath } });
     });
   }
@@ -1294,7 +1297,9 @@ var CodePracticeView = class extends import_obsidian3.ItemView {
     this.cells.slice(index).forEach((candidate) => {
       candidate.result = null;
       candidate.executionCount = null;
-      const output = this.contentEl.querySelector(`[data-cell-id="${candidate.id}"] .code-practice-cell-output`);
+      const output = this.contentEl.querySelector(
+        `[data-cell-id="${candidate.id}"] .code-practice-cell-output`
+      );
       if (output) output.empty();
     });
   }
@@ -1338,7 +1343,9 @@ var CodePracticeView = class extends import_obsidian3.ItemView {
   }
   focusCell(cellId) {
     window.setTimeout(() => {
-      this.contentEl.querySelector(`[data-cell-id="${cellId}"] .code-practice-cell-editor`)?.focus();
+      this.contentEl.querySelector(
+        `[data-cell-id="${cellId}"] .code-practice-cell-editor`
+      )?.focus();
     }, 0);
   }
   async runCell(cellId, focusNext = false) {
@@ -1545,7 +1552,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       text: `使用按钮默认 · ${this.plugin.getModelLabel(actionDefault.model)}`,
       attr: { value: "" }
     });
-    const modelOptions = [...MODEL_OPTIONS2];
+    const modelOptions = [...MODEL_OPTIONS];
     if (!modelOptions.some((option) => option.id === this.plugin.settings.codexModel)) {
       modelOptions.unshift({
         id: this.plugin.settings.codexModel,
@@ -1563,7 +1570,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       text: `使用按钮默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`,
       attr: { value: "" }
     });
-    REASONING_OPTIONS2.forEach((option) => {
+    REASONING_OPTIONS.forEach((option) => {
       reasoningSelect.createEl("option", { text: option.label, attr: { value: option.id } });
     });
     const speedField = section.createDiv({ cls: "agent-dashboard-run-config-field" });
@@ -1659,7 +1666,10 @@ var TaskResultModal = class extends import_obsidian5.Modal {
       const config = contentEl.createDiv({ cls: "agent-dashboard-result-config" });
       const items = [
         ["模型", this.plugin.getModelLabel(this.run.executionConfig.model)],
-        ["推理强度", this.plugin.getReasoningLabel(this.run.executionConfig.reasoningEffort)],
+        [
+          "推理强度",
+          this.plugin.getReasoningLabel(this.run.executionConfig.reasoningEffort || "")
+        ],
         ["速度", this.run.executionConfig.serviceTier === "fast" ? "快速" : "标准"]
       ];
       items.forEach(([label, value]) => {
@@ -1806,7 +1816,7 @@ var DashboardDataService = class {
           value: healthScore === null ? "—" : String(healthScore),
           unit: "",
           tone: healthScore === null ? "neutral" : healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
-          detail: lintSummary ? `上次体检 ${this.formatExportTime(lintStatus.latest.generated_at)}：${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告${lintStale ? "；此后知识库有更新" : ""}` : lintStatus.error ? "上次体检报告无法读取" : "尚无体检结果，请运行知识库体检"
+          detail: lintSummary ? `上次体检 ${this.formatExportTime(lintStatus.latest?.generated_at)}：${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告${lintStale ? "；此后知识库有更新" : ""}` : lintStatus.error ? "上次体检报告无法读取" : "尚无体检结果，请运行知识库体检"
         },
         {
           label: "文献流程",
@@ -2232,7 +2242,7 @@ var DashboardDataService = class {
     ].join("\n");
   }
   computeCoverage(methodRecords, synthesisRecords, knowledgeGaps) {
-    const recentHubs = [...methodRecords, ...synthesisRecords].sort((a, b) => b.mtime - a.mtime).slice(0, 4).map((record) => record.frontmatter.title || record.name);
+    const recentHubs = [...methodRecords, ...synthesisRecords].sort((a, b) => b.mtime - a.mtime).slice(0, 4).map((record) => String(record.frontmatter.title || record.name));
     const missingMethodPages = knowledgeGaps.filter((gap) => gap.type === "method").length;
     return {
       methodNodes: methodRecords.length,
@@ -2281,7 +2291,7 @@ var DashboardDataService = class {
     };
   }
   formatExportTime(value) {
-    const date = new Date(value);
+    const date = new Date(String(value || ""));
     if (Number.isNaN(date.getTime())) return "时间未知";
     return new Intl.DateTimeFormat("zh-CN", {
       month: "2-digit",
@@ -2361,6 +2371,10 @@ var DashboardDataService = class {
 // src/views/dashboard.ts
 var import_obsidian7 = require("obsidian");
 var DashboardView = class extends import_obsidian7.ItemView {
+  get currentData() {
+    if (!this.data) throw new Error("Dashboard data is not loaded");
+    return this.data;
+  }
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -2423,7 +2437,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
     this.pendingVaultChanges.set(filePath, {
       type,
       path: filePath,
-      file: type === "upsert" ? file : null
+      file: type === "upsert" && file instanceof import_obsidian7.TFile ? file : null
     });
     this.scheduleReload();
   }
@@ -2500,17 +2514,17 @@ var DashboardView = class extends import_obsidian7.ItemView {
   renderHeader(parent) {
     const header = parent.createEl("header", { cls: "agent-dashboard-header" });
     const titleBlock = header.createDiv({ cls: "agent-dashboard-title-block" });
-    titleBlock.createEl("p", { cls: "agent-dashboard-eyebrow", text: this.data.header.scope });
-    titleBlock.createEl("h1", { text: this.data.header.title });
+    titleBlock.createEl("p", { cls: "agent-dashboard-eyebrow", text: this.currentData.header.scope });
+    titleBlock.createEl("h1", { text: this.currentData.header.title });
     const status = header.createDiv({ cls: "agent-dashboard-header-status", attr: { "aria-label": "知识库状态" } });
     const pill = status.createEl("button", {
       cls: "agent-dashboard-status-pill agent-dashboard-local-pill",
-      text: this.data.header.status,
+      text: this.currentData.header.status,
       attr: { "aria-pressed": "true" }
     });
     pill.type = "button";
-    status.createSpan({ cls: "agent-dashboard-vault-chip", text: this.data.header.vault });
-    status.createSpan({ cls: "agent-dashboard-scan-time", text: this.data.header.lastScan });
+    status.createSpan({ cls: "agent-dashboard-vault-chip", text: this.currentData.header.vault });
+    status.createSpan({ cls: "agent-dashboard-scan-time", text: this.currentData.header.lastScan });
     const refresh = status.createEl("button", {
       cls: "agent-dashboard-refresh-button",
       text: "刷新",
@@ -2523,7 +2537,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   renderActions(parent) {
     const rail = parent.createEl("nav", { cls: "agent-dashboard-action-rail", attr: { "aria-label": "研究知识库操作" } });
-    this.data.actions.filter((action) => action.showInRail !== false).forEach((action) => {
+    this.currentData.actions.filter((action) => action.showInRail !== false).forEach((action) => {
       const isRunning = this.plugin.isActionRunning(action.id);
       const runningTask = isRunning ? this.plugin.getRunningTaskRun(action.id) : null;
       const isStopping = Boolean(runningTask && this.stoppingRunIds.has(runningTask.id));
@@ -2567,7 +2581,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   renderStats(parent) {
     const grid = parent.createEl("section", { cls: "agent-dashboard-metric-grid", attr: { "aria-label": "知识库摘要指标" } });
-    this.data.metrics.forEach((metric) => {
+    this.currentData.metrics.forEach((metric) => {
       const card = grid.createEl("article", { cls: `agent-dashboard-metric-card agent-dashboard-tone-${metric.tone}` });
       card.createDiv({ cls: "agent-dashboard-metric-label", text: metric.label });
       const value = card.createDiv({ cls: "agent-dashboard-metric-value" });
@@ -2579,15 +2593,15 @@ var DashboardView = class extends import_obsidian7.ItemView {
     });
   }
   renderHeatmap(parent) {
-    const panel = this.createPanel(parent, "agent-dashboard-panel-wide agent-dashboard-heatmap-panel", "知识活动", this.data.activity.title, this.data.activity.rangeLabel);
+    const panel = this.createPanel(parent, "agent-dashboard-panel-wide agent-dashboard-heatmap-panel", "知识活动", this.currentData.activity.title, this.currentData.activity.rangeLabel);
     const stage = panel.createDiv({ cls: "agent-dashboard-heatmap-scroll", attr: { role: "img", "aria-label": "基于本地 Markdown 修改记录的每日知识库活动热力图" } }).createDiv({ cls: "agent-dashboard-heatmap-stage" });
     const monthRow = stage.createDiv({ cls: "agent-dashboard-month-row", attr: { "aria-hidden": "true" } });
     const graph = stage.createDiv({ cls: "agent-dashboard-heatmap-graph" });
     const weekdayLabels = graph.createDiv({ cls: "agent-dashboard-weekday-labels", attr: { "aria-hidden": "true" } });
     ["一", "", "三", "", "五", "", "日"].forEach((label) => weekdayLabels.createSpan({ text: label }));
     const cells = graph.createDiv({ cls: "agent-dashboard-heatmap-cells" });
-    this.renderMonthMarkers(monthRow, this.data.activity.days);
-    this.data.activity.days.forEach((day) => {
+    this.renderMonthMarkers(monthRow, this.currentData.activity.days);
+    this.currentData.activity.days.forEach((day) => {
       const label = day.inRange ? `${day.date}: ${day.count} 个${day.track}笔记更新` : `${day.date}: 不在统计范围内`;
       const cell = cells.createSpan({
         cls: `agent-dashboard-heat-cell agent-dashboard-heat-level-${day.inRange ? day.level : 0}`,
@@ -2599,7 +2613,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
     });
     const footer = panel.createDiv({ cls: "agent-dashboard-heatmap-footer" });
     const tracks = footer.createDiv({ cls: "agent-dashboard-track-legend" });
-    this.data.activity.tracks.forEach((track) => tracks.createSpan({ cls: "agent-dashboard-track-token", text: track }));
+    this.currentData.activity.tracks.forEach((track) => tracks.createSpan({ cls: "agent-dashboard-track-token", text: track }));
     const legend = footer.createDiv({ cls: "agent-dashboard-density-legend", attr: { "aria-label": "活动密度图例" } });
     legend.createSpan({ text: "少" });
     [0, 1, 2, 3, 4].forEach((level) => legend.createSpan({ cls: `agent-dashboard-density agent-dashboard-density-${level}` }));
@@ -2620,7 +2634,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   renderProcessingDepth(parent) {
     const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "处理深度", "证据深度分布");
     const bar = panel.createDiv({ cls: "agent-dashboard-stacked-bar", attr: { "aria-label": "证据处理深度分布" } });
-    this.data.processingDepth.forEach((row) => {
+    this.currentData.processingDepth.forEach((row) => {
       const segment = bar.createSpan({
         cls: `agent-dashboard-bar-segment agent-dashboard-bar-${this.formatClassToken(row.label)}`,
         attr: { "aria-label": `${this.displayDepth(row.label)}: ${row.percent}%` }
@@ -2628,7 +2642,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
       segment.style.width = `${Math.max(row.percent, 2)}%`;
     });
     const list = panel.createDiv({ cls: "agent-dashboard-count-list" });
-    this.data.processingDepth.forEach((row) => {
+    this.currentData.processingDepth.forEach((row) => {
       const item = list.createDiv({ cls: "agent-dashboard-count-item" });
       item.createSpan({ cls: "agent-dashboard-count-name", text: this.displayDepth(row.label) });
       item.createSpan({ cls: "agent-dashboard-count-value", text: `${row.count} / ${row.percent}%` });
@@ -2638,21 +2652,21 @@ var DashboardView = class extends import_obsidian7.ItemView {
     const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "知识枢纽", "方法 / 综合覆盖");
     const stats = panel.createDiv({ cls: "agent-dashboard-coverage-stats" });
     [
-      ["方法", this.data.coverage.methodNodes],
-      ["综合", this.data.coverage.synthesisNodes],
-      ["待建", this.data.coverage.missingMethodPages]
+      ["方法", this.currentData.coverage.methodNodes],
+      ["综合", this.currentData.coverage.synthesisNodes],
+      ["待建", this.currentData.coverage.missingMethodPages]
     ].forEach(([label, value]) => {
       const stat = stats.createDiv({ cls: "agent-dashboard-coverage-stat" });
       stat.createSpan({ cls: "agent-dashboard-coverage-number", text: String(value) });
       stat.createSpan({ cls: "agent-dashboard-coverage-label", text: String(label) });
     });
     const hubs = panel.createDiv({ cls: "agent-dashboard-hub-list" });
-    this.data.coverage.recentHubs.forEach((hub) => hubs.createDiv({ cls: "agent-dashboard-hub-item" }).createSpan({ cls: "agent-dashboard-hub-name", text: hub }));
+    this.currentData.coverage.recentHubs.forEach((hub) => hubs.createDiv({ cls: "agent-dashboard-hub-item" }).createSpan({ cls: "agent-dashboard-hub-name", text: hub }));
   }
   renderOkfReadiness(parent) {
-    const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度", this.data.okf.latestLabel);
-    this.renderOkfList(panel, this.data.okf);
-    this.renderRiskBox(panel, this.data.okf);
+    const panel = this.createPanel(parent, "agent-dashboard-tri-panel", "可移植输出", "OKF 就绪度", this.currentData.okf.latestLabel);
+    this.renderOkfList(panel, this.currentData.okf);
+    this.renderRiskBox(panel, this.currentData.okf);
   }
   renderFilterGroup(panel, type) {
     const heading = panel.find(".agent-dashboard-panel-heading");
@@ -2680,18 +2694,19 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   renderAgentRunsList(parent) {
     parent.empty();
-    const visibleRuns = this.data.agentRuns.filter((run) => this.isVisibleAgentRun(run));
+    const visibleRuns = this.currentData.agentRuns.filter((run) => this.isVisibleAgentRun(run));
     if (visibleRuns.length === 0) {
       parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有运行记录。" });
       return;
     }
     visibleRuns.forEach((run) => {
       const row = run.runId ? parent.createEl("button", { cls: "agent-dashboard-data-row agent-dashboard-run-row" }) : parent.createEl("article", { cls: "agent-dashboard-data-row" });
-      if (run.runId) {
+      if (run.runId && row instanceof HTMLButtonElement) {
+        const runId = run.runId;
         row.type = "button";
         row.setAttr("title", "查看任务输出");
         this.registerDomEvent(row, "click", () => {
-          const taskRun = this.plugin.getTaskRun(run.runId);
+          const taskRun = this.plugin.getTaskRun(runId);
           if (taskRun) this.openTaskResult(taskRun);
         });
       }
@@ -2702,7 +2717,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   renderKnowledgeGapsList(parent) {
     parent.empty();
-    const visibleGaps = this.data.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
+    const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
     if (visibleGaps.length === 0) {
       parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有待处理的知识缺口。" });
       return;
@@ -2921,26 +2936,26 @@ ${result.stderr.trim()}`);
     }[label] || label;
   }
   formatClassToken(value) {
-    return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
   }
 };
 
 // src/query/normalization.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function asRecord2(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeVaultImageAttachment(value) {
   const source = asRecord2(value);
   const attachmentPath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
-  const extension = import_node_path.default.posix.extname(attachmentPath).toLowerCase();
+  const extension = import_node_path2.default.posix.extname(attachmentPath).toLowerCase();
   const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
   if (!attachmentPath || !mimeType) return null;
   const size = Number(source.size || 0);
   const sourceNotePath = String(source.sourceNotePath || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   return {
     path: attachmentPath.slice(0, 1e3),
-    name: String(source.name || import_node_path.default.posix.basename(attachmentPath)).slice(0, 240),
+    name: String(source.name || import_node_path2.default.posix.basename(attachmentPath)).slice(0, 240),
     mimeType,
     size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
     sourceNotePath: sourceNotePath.toLowerCase().endsWith(".md") ? sourceNotePath.slice(0, 1e3) : ""
@@ -2956,7 +2971,7 @@ function normalizeVaultImageAttachments(values) {
     if (seen.has(key)) continue;
     seen.add(key);
     normalized.push(attachment);
-    if (normalized.length >= MAX_QUERY_IMAGE_ATTACHMENTS2) break;
+    if (normalized.length >= MAX_QUERY_IMAGE_ATTACHMENTS) break;
   }
   return normalized;
 }
@@ -2970,7 +2985,7 @@ function normalizeQueryVaultSources(values) {
     seen.add(sourcePath.toLowerCase());
     normalized.push({
       path: sourcePath.slice(0, 1e3),
-      title: String(source.title || import_node_path.default.posix.basename(sourcePath, import_node_path.default.posix.extname(sourcePath))).trim().slice(0, 500),
+      title: String(source.title || import_node_path2.default.posix.basename(sourcePath, import_node_path2.default.posix.extname(sourcePath))).trim().slice(0, 500),
       cited: source.cited === true
     });
     if (normalized.length >= 30) break;
@@ -3104,7 +3119,7 @@ var VaultImagePickerModal = class extends import_obsidian8.Modal {
     this.setTitle("添加 Vault 图片");
     contentEl.createEl("p", {
       cls: "query-wiki-image-picker-description",
-      text: `每轮最多 ${MAX_QUERY_IMAGE_ATTACHMENTS2} 张。将鼠标移到图片上可查看大图和引用笔记；会话历史只保存 Vault 相对路径。`
+      text: `每轮最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张。将鼠标移到图片上可查看大图和引用笔记；会话历史只保存 Vault 相对路径。`
     });
     const toolbar = contentEl.createDiv({ cls: "query-wiki-image-picker-toolbar" });
     const search = toolbar.createEl("input", {
@@ -3358,7 +3373,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const restoreInputFocus = Boolean(
       previousInput?.isConnected && previousInputSessionId === session.id && typeof document !== "undefined" && document.activeElement === previousInput
     );
-    const previousSelection = restoreInputFocus ? {
+    const previousSelection = restoreInputFocus && previousInput ? {
       start: previousInput.selectionStart,
       end: previousInput.selectionEnd
     } : null;
@@ -3642,7 +3657,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     for (const image of images) {
       const file = this.app.vault.getAbstractFileByPath(image.path);
       const figure = gallery.createEl("figure", { cls: "query-wiki-message-image" });
-      if (file) {
+      if (file instanceof import_obsidian9.TFile) {
         figure.createEl("img", {
           attr: {
             src: this.app.vault.getResourcePath(file),
@@ -3876,7 +3891,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       this.pendingImages.forEach((image, index) => {
         const preview = previews.createDiv({ cls: "query-wiki-pending-image" });
         const file = this.app.vault.getAbstractFileByPath(image.path);
-        if (file) {
+        if (file instanceof import_obsidian9.TFile) {
           preview.createEl("img", {
             attr: {
               src: this.app.vault.getResourcePath(file),
@@ -3914,8 +3929,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       this.pendingImages.length ? "继续添加 Vault 图片" : "附加 Vault 图片"
     );
     attach.addClass("query-wiki-attach");
-    attach.disabled = Boolean(this.activeRunId) || !canAttachImage || this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS2;
-    attach.title = canAttachImage ? this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS2 ? `最多附加 ${MAX_QUERY_IMAGE_ATTACHMENTS2} 张图片` : `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS2}）` : directProfile ? "当前 Direct API 配置或适配器未启用视觉输入" : "图片附件目前仅支持 Direct API";
+    attach.disabled = Boolean(this.activeRunId) || !canAttachImage || this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS;
+    attach.title = canAttachImage ? this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS ? `最多附加 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张图片` : `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS}）` : directProfile ? "当前 Direct API 配置或适配器未启用视觉输入" : "图片附件目前仅支持 Direct API";
     attach.addEventListener("click", () => {
       if (attach.disabled) return;
       const draft = this.inputEl?.value || "";
@@ -4002,6 +4017,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
   }
   renderExecutionSettings(parent) {
     const action = ACTION_BY_ID.get("vault-retrieval");
+    if (!action) return;
     const directProfiles = this.plugin.getVerifiedProviderProfiles();
     const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
     const directProfile = backendId === "codex-cli" ? null : directProfiles.find((profile) => profile.id === backendId) || null;
@@ -4052,29 +4068,30 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const sync = () => {
       const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
       const usingDirect = Boolean(selectedProfile);
-      model.parentElement.hidden = usingDirect;
-      reasoning.parentElement.hidden = usingDirect;
-      speed.parentElement.hidden = usingDirect;
+      if (model.parentElement) model.parentElement.hidden = usingDirect;
+      if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect;
+      if (speed.parentElement) speed.parentElement.hidden = usingDirect;
       directNotice.toggleClass("is-visible", usingDirect);
       directNotice.setText(
-        usingDirect ? [
+        selectedProfile ? [
           `将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。`,
-          profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS2} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
+          profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
           profileSupportsDirectWebSearch(selectedProfile) ? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。" : "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
           "Direct API 不执行 Codex skill 或文件写入。"
         ].join("") : ""
       );
-      if (usingDirect) {
+      if (selectedProfile) {
         summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
         return;
       }
       const selectedModel = model.value || this.plugin.resolveActionExecutionConfig(action).model;
       if (!this.plugin.supportsFast(selectedModel) && speed.value === "fast") speed.value = "default";
-      speed.querySelector('option[value="fast"]').disabled = !this.plugin.supportsFast(selectedModel);
+      const fastOption = speed.querySelector('option[value="fast"]');
+      if (fastOption) fastOption.disabled = !this.plugin.supportsFast(selectedModel);
       this.executionOverrides = {
         model: model.value,
         reasoningEffort: reasoning.value,
-        serviceTier: speed.value
+        serviceTier: speed.value === "fast" ? "fast" : "default"
       };
       const next = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
       summaryText.setText(`Codex CLI · ${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
@@ -4115,6 +4132,10 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
   async submitQuestion(question) {
     if (!question || this.activeRunId || this.plugin.isActionRunning("vault-retrieval")) return;
     const action = ACTION_BY_ID.get("vault-retrieval");
+    if (!action) {
+      new import_obsidian9.Notice("知识库检索操作未注册");
+      return;
+    }
     const session = this.session;
     const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
     const directProfile = backendId === "codex-cli" ? null : this.plugin.getProviderProfile(backendId);
@@ -4127,7 +4148,12 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       new import_obsidian9.Notice("当前执行后端未启用视觉输入，无法发送图片");
       return;
     }
-    let linkedImageResult = { attachments: [], notePaths: [], discoveredCount: 0 };
+    let linkedImageResult = {
+      attachments: [],
+      notePaths: [],
+      discoveredCount: 0,
+      totalBytes: 0
+    };
     if (profileSupportsQueryImage(directProfile)) {
       try {
         linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
@@ -4201,7 +4227,9 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       await this.plugin.updateQueryMessage(session.id, assistantMessage.id, { runId: run.id });
       await this.render({ scrollToBottom: true });
       const hooks = {
-        onEvent: (event) => this.handleRunnerEvent(session.id, assistantMessage.id, event)
+        onEvent: (event) => {
+          this.handleRunnerEvent(session.id, assistantMessage.id, event);
+        }
       };
       const result = directProfile ? await this.plugin.runDirectVaultQuery(
         run.id,
@@ -4210,7 +4238,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         priorMessages,
         retrievalMode,
         hooks,
-        userMessage.attachments
+        userMessage.attachments || []
       ) : await this.plugin.runVaultAction(
         run.id,
         action,
@@ -4235,7 +4263,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         webSources: normalizeQueryWebSources(structuredResult?.web_sources),
         citationValidation: normalizeQueryCitationValidation(structuredResult?.citation_validation),
         retrievalPath: normalizeQueryRetrievalPath(structuredResult?.retrieval_path),
-        retrievalMode: traceEvent?.mode || retrievalMode,
+        retrievalMode: traceEvent?.mode === "vault" ? "vault" : traceEvent?.mode === "web" ? "web" : retrievalMode,
         queryBackendId: backendId,
         providerName: directProfile?.name || "Codex CLI",
         model: executionConfig.model
@@ -4280,12 +4308,13 @@ ${result.stderr.trim()}` : ""
   handleRunnerEvent(sessionId, messageId, event) {
     if (!event || typeof event !== "object") return;
     if (event.type === "retrieval-preflight") {
+      const trace = event.payload || {};
       void this.plugin.updateQueryMessage(sessionId, messageId, {
         retrievalTrace: event.payload || null,
         retrievalMode: event.mode === "vault" ? "vault" : "web",
-        progress: this.progressFromTrace(event.payload)
+        progress: this.progressFromTrace(trace)
       }, "debounced").then(() => this.render({ scrollToBottom: true }));
-      this.updateProgressText(this.progressFromTrace(event.payload));
+      this.updateProgressText(this.progressFromTrace(trace));
       return;
     }
     if (event.type === "assistant-reset") {
@@ -4338,7 +4367,7 @@ ${result.stderr.trim()}` : ""
     }
   }
   updateProgressText(value) {
-    if (this.statusEl?.isConnected) this.statusEl.setText(value);
+    if (this.statusEl?.isConnected) this.statusEl.setText(String(value || ""));
   }
   progressFromTrace(trace) {
     if (!trace || typeof trace !== "object") return "已完成检索预检";
@@ -4365,6 +4394,10 @@ ${result.stderr.trim()}` : ""
   }
   openSynthesisHandoff() {
     const action = ACTION_BY_ID.get("synthesis");
+    if (!action) {
+      new import_obsidian9.Notice("综合分析操作未注册");
+      return;
+    }
     const session = this.session;
     const transcript = session.messages.filter((message) => message.status === "done" && message.content).slice(-10).map((message) => `${message.role === "user" ? "用户" : "知识库回答"}：
 ${message.content}`).join("\n\n");
@@ -4424,13 +4457,14 @@ ${result.stderr.trim()}` : ""
     if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
   }
   displayRetrievalStage(stage) {
+    const stageKey = String(stage || "");
     return {
       "lexical-seed+graph-expansion": "词法种子 → 关系扩展",
       "lexical-seed+ppr": "词法种子 → PPR 图扩展",
       "llm-keyword+ppr": "LLM 关键词扩展 → PPR 图扩展",
       "no-match-fallback": "无匹配 → 方向索引回退",
       "preflight-unavailable": "预检不可用，交由检索 skill 回退"
-    }[stage] || stage || "未知";
+    }[stageKey] || stageKey || "未知";
   }
   formatTime(value) {
     const date = new Date(value);
@@ -4494,7 +4528,8 @@ function extractOpenAIText(payload) {
 }
 function parseProviderJson(value) {
   try {
-    return JSON.parse(String(value || ""));
+    const parsed = JSON.parse(String(value || ""));
+    return parsed !== null && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
   }
@@ -4520,15 +4555,19 @@ function normalizeProviderModelList(payload) {
 }
 
 // src/providers/adapters.ts
+function contentAsText(content) {
+  if (typeof content === "string") return content;
+  return content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+}
 var LLMProvider = class {
   constructor(plugin, config) {
     this.plugin = plugin;
     this.config = config;
-    const metadata = PROVIDER_TYPE_BY_ID2.get(config.type) || {};
+    const metadata = config.type === "codex-cli" ? void 0 : PROVIDER_TYPE_BY_ID.get(config.type);
     this.capabilities = {
-      streaming: config.capabilities?.streaming ?? metadata.capabilities?.streaming ?? false,
-      pdf: config.capabilities?.pdf ?? metadata.capabilities?.pdf ?? false,
-      vision: config.capabilities?.vision ?? metadata.capabilities?.vision ?? false,
+      streaming: config.capabilities?.streaming ?? metadata?.capabilities.streaming ?? false,
+      pdf: config.capabilities?.pdf ?? metadata?.capabilities.pdf ?? false,
+      vision: config.capabilities?.vision ?? metadata?.capabilities.vision ?? false,
       webSearch: profileHasConfiguredQwenWebSearch(config)
     };
   }
@@ -4680,13 +4719,13 @@ var LLMProvider = class {
   async listModels() {
     throw new ProviderConnectionError("unsupported", "该供应商尚未实现模型发现");
   }
-  async complete() {
+  async complete(_request, _options = {}) {
     throw new ProviderConnectionError("unsupported", "该供应商尚未实现文本生成");
   }
-  async stream() {
+  async stream(_request, _onDelta, _options = {}) {
     throw new ProviderConnectionError("unsupported", "该供应商尚未实现流式文本生成");
   }
-  async probeStreaming() {
+  async probeStreaming(_request) {
     return false;
   }
 };
@@ -4735,7 +4774,9 @@ var OpenAIProvider = class extends LLMProvider {
       onEvent: (data) => {
         if (data === "[DONE]") return;
         const payload = parseProviderJson(data);
-        const delta = payload?.type === "response.output_text.delta" ? payload.delta : payload?.choices?.[0]?.delta?.content;
+        const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+        const firstChoice = asRecord3(choices[0]);
+        const delta = payload?.type === "response.output_text.delta" ? payload.delta : asRecord3(firstChoice.delta).content;
         text += emitProviderDelta(onDelta, delta);
       }
     });
@@ -4769,7 +4810,7 @@ var AnthropicProvider = class extends LLMProvider {
     return normalizeProviderModelList(this.requireJson(result, "模型列表"));
   }
   messageBody(request, stream = false) {
-    const system = request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n");
+    const system = request.messages.filter((message) => message.role === "system").map((message) => contentAsText(message.content)).join("\n");
     const messages = request.messages.filter((message) => message.role !== "system").map((message) => ({ role: message.role, content: message.content }));
     return {
       model: request.model || this.config.model,
@@ -4787,7 +4828,7 @@ var AnthropicProvider = class extends LLMProvider {
       registerCancel: options.registerCancel
     });
     const payload = this.requireJson(result, "文本生成");
-    const text = Array.isArray(payload.content) ? payload.content.map((item) => item?.text || "").filter(Boolean).join("\n") : "";
+    const text = Array.isArray(payload.content) ? payload.content.map((item) => String(asRecord3(item).text || "")).filter(Boolean).join("\n") : "";
     return { text, raw: payload };
   }
   async stream(request, onDelta, options = {}) {
@@ -4802,7 +4843,7 @@ var AnthropicProvider = class extends LLMProvider {
       registerCancel: options.registerCancel,
       onEvent: (data) => {
         const payload = parseProviderJson(data);
-        const delta = payload?.type === "content_block_delta" ? payload?.delta?.text : "";
+        const delta = payload?.type === "content_block_delta" ? asRecord3(payload.delta).text : "";
         text += emitProviderDelta(onDelta, delta);
       }
     });
@@ -4837,18 +4878,19 @@ var OpenAICompatibleProvider = class extends LLMProvider {
       stream
     };
     if (request.webSearch === true) {
-      if (!profileHasConfiguredQwenWebSearch(this.config)) {
+      const webSearch = this.config.webSearch;
+      if (!webSearch || !profileHasConfiguredQwenWebSearch(this.config)) {
         throw new ProviderConnectionError(
           "unsupported",
           "当前配置没有启用 Qwen3.7-Plus Chat Completions 联网搜索"
         );
       }
-      const strategy = ["turbo", "max", "agent"].includes(this.config.webSearch.searchStrategy) ? this.config.webSearch.searchStrategy : "turbo";
+      const strategy = ["turbo", "max", "agent"].includes(webSearch.searchStrategy) ? webSearch.searchStrategy : "turbo";
       const searchOptions = {
-        forced_search: this.config.webSearch.forcedSearch !== false,
+        forced_search: webSearch.forcedSearch !== false,
         search_strategy: strategy
       };
-      const assignedSites = normalizeAssignedSites(this.config.webSearch.assignedSites);
+      const assignedSites = normalizeAssignedSites(webSearch.assignedSites);
       if (strategy === "turbo" && assignedSites.length) {
         searchOptions.assigned_site_list = assignedSites;
       }
@@ -4858,11 +4900,12 @@ var OpenAICompatibleProvider = class extends LLMProvider {
     return body;
   }
   async complete(request, options = {}) {
+    const webSearchTimeout = request.webSearch === true ? this.config.webSearch?.timeoutSeconds : void 0;
     const result = await this.request("v1/chat/completions", {
       method: "POST",
       headers: await this.headers(),
       body: this.chatBody(request),
-      timeoutMs: request.webSearch === true ? this.config.webSearch.timeoutSeconds * 1e3 : void 0,
+      timeoutMs: webSearchTimeout ? webSearchTimeout * 1e3 : void 0,
       registerCancel: options.registerCancel
     });
     const payload = this.requireJson(result, "文本生成");
@@ -4870,18 +4913,21 @@ var OpenAICompatibleProvider = class extends LLMProvider {
   }
   async stream(request, onDelta, options = {}) {
     let text = "";
+    const webSearchTimeout = request.webSearch === true ? this.config.webSearch?.timeoutSeconds : void 0;
     await this.plugin.providerHttpStream({
       url: buildProviderUrl(this.config.baseUrl, "v1/chat/completions"),
       method: "POST",
       headers: await this.headers(),
       body: this.chatBody(request, true),
-      timeoutMs: request.webSearch === true ? this.config.webSearch.timeoutSeconds * 1e3 : this.config.timeoutSeconds * 1e3,
+      timeoutMs: (webSearchTimeout || this.config.timeoutSeconds) * 1e3,
       format: "sse",
       registerCancel: options.registerCancel,
       onEvent: (data) => {
         if (data === "[DONE]") return;
         const payload = parseProviderJson(data);
-        text += emitProviderDelta(onDelta, payload?.choices?.[0]?.delta?.content);
+        const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+        const firstChoice = asRecord3(choices[0]);
+        text += emitProviderDelta(onDelta, asRecord3(firstChoice.delta).content);
       }
     });
     return { text };
@@ -4923,7 +4969,7 @@ var OllamaProvider = class extends LLMProvider {
       registerCancel: options.registerCancel
     });
     const payload = this.requireJson(result, "文本生成");
-    return { text: payload.message?.content || "", raw: payload };
+    return { text: String(asRecord3(payload.message).content || ""), raw: payload };
   }
   async stream(request, onDelta, options = {}) {
     let text = "";
@@ -4937,7 +4983,7 @@ var OllamaProvider = class extends LLMProvider {
       registerCancel: options.registerCancel,
       onEvent: (data) => {
         const payload = parseProviderJson(data);
-        text += emitProviderDelta(onDelta, payload?.message?.content);
+        text += emitProviderDelta(onDelta, asRecord3(payload?.message).content);
       }
     });
     return { text };
@@ -4963,13 +5009,13 @@ var CodexCliProvider = class extends LLMProvider {
     });
   }
   async listModels() {
-    return MODEL_OPTIONS2.map((model) => ({
+    return MODEL_OPTIONS.map((model) => ({
       id: model.id,
       name: model.label,
       ownedBy: "Codex"
     }));
   }
-  async complete() {
+  async complete(_request, _options = {}) {
     throw new ProviderConnectionError(
       "delegated",
       "Codex CLI 生成仍由现有 dashboard runner 管理，不通过 Direct API 适配器调用"
@@ -5332,7 +5378,7 @@ Execution interrupted before the plugin restarted.`.trim();
       this.settings.codexModel = "gpt-5.6-terra";
       changed = true;
     }
-    if (!REASONING_OPTIONS2.some((option) => option.id === this.settings.codexReasoningEffort)) {
+    if (!REASONING_OPTIONS.some((option) => option.id === this.settings.codexReasoningEffort)) {
       this.settings.codexReasoningEffort = DEFAULT_SETTINGS.codexReasoningEffort;
       changed = true;
     }
@@ -5867,7 +5913,7 @@ Execution interrupted before the plugin restarted.`.trim();
             ok: true,
             type: "success",
             modelExists: null,
-            modelCount: MODEL_OPTIONS2.length,
+            modelCount: MODEL_OPTIONS.length,
             streaming: { supported: false, verified: false },
             pdf: { supported: true, verified: false },
             vision: { supported: true, verified: false },
@@ -6115,20 +6161,20 @@ Execution interrupted before the plugin restarted.`.trim();
     return this.taskRuns.some((run) => actionIds.has(run.actionId) && (run.status === "running" || run.status === "queued"));
   }
   getModelLabel(model) {
-    return MODEL_OPTIONS2.find((option) => option.id === model)?.label || model;
+    return MODEL_OPTIONS.find((option) => option.id === model)?.label || model;
   }
   getReasoningLabel(reasoningEffort) {
-    return REASONING_OPTIONS2.find((option) => option.id === reasoningEffort)?.label || reasoningEffort;
+    return REASONING_OPTIONS.find((option) => option.id === reasoningEffort)?.label || reasoningEffort;
   }
   supportsFast(model) {
-    return MODEL_OPTIONS2.find((option) => option.id === model)?.supportsFast === true;
+    return MODEL_OPTIONS.find((option) => option.id === model)?.supportsFast === true;
   }
   resolveActionExecutionConfig(action, overrides = {}) {
     const buttonModel = action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel;
     const buttonReasoning = action.reasoningEffort || this.settings.codexReasoningEffort || DEFAULT_SETTINGS.codexReasoningEffort;
     const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
     const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
-    const reasoningEffort = REASONING_OPTIONS2.some((option) => option.id === requestedReasoning) ? requestedReasoning : buttonReasoning;
+    const reasoningEffort = REASONING_OPTIONS.some((option) => option.id === requestedReasoning) ? requestedReasoning : buttonReasoning;
     return {
       model: requestedModel || buttonModel,
       reasoningEffort,
@@ -6723,7 +6769,7 @@ Execution interrupted before the plugin restarted.`.trim();
         discoveredCount += 1;
         const size = Number(file.stat?.size || 0);
         if (size > MAX_VAULT_IMAGE_BYTES) continue;
-        if (existing.length + attachments.length >= MAX_QUERY_IMAGE_ATTACHMENTS2) continue;
+        if (existing.length + attachments.length >= MAX_QUERY_IMAGE_ATTACHMENTS) continue;
         if (totalBytes + size > MAX_QUERY_IMAGE_TOTAL_BYTES) continue;
         const attachment = normalizeVaultImageAttachment({
           path: file.path,

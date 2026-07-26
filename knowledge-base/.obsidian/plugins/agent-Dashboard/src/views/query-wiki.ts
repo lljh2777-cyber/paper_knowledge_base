@@ -1,13 +1,27 @@
-// @ts-nocheck
+import {
+	ItemView,
+	MarkdownRenderer,
+	Notice,
+	TFile,
+	setIcon,
+	type WorkspaceLeaf,
+} from "obsidian";
 
-import { ItemView, MarkdownRenderer, Notice, setIcon } from "obsidian";
-
-import { ACTIONS, ACTION_BY_ID } from "../actions";
+import {
+	ACTIONS,
+	ACTION_BY_ID,
+	type DashboardAction,
+} from "../actions";
 import {
 	MAX_QUERY_IMAGE_ATTACHMENTS,
+	MODEL_OPTIONS,
 	QUERY_WIKI_VIEW_TYPE,
+	REASONING_OPTIONS,
 } from "../config";
-import { ActionInputModal } from "../modals/action-input";
+import {
+	ActionInputModal,
+	type ExecutionOverrides,
+} from "../modals/action-input";
 import { TaskResultModal } from "../modals/task-result";
 import { VaultImagePickerModal } from "../modals/vault-image-picker";
 import {
@@ -16,13 +30,135 @@ import {
 	normalizeQueryVaultSources,
 	normalizeQueryWebSources,
 	normalizeVaultImageAttachments,
+	type VaultImageAttachment,
 } from "../query/normalization";
 import {
 	profileSupportsDirectWebSearch,
 	profileSupportsQueryImage,
+	type ProviderProfile,
 } from "../providers/profile";
+import type {
+	DashboardProcessEvent,
+	DashboardProcessResult,
+	ExecutionConfig,
+	PluginHost,
+	QueryMessage as PersistedQueryMessage,
+	QueryRetrievalMode,
+	QuerySession,
+	ServiceTier,
+} from "../types/contracts";
+
+type RetrievalTrace = Record<string, unknown> & {
+	stage?: string;
+	retrieval_label?: string;
+	lexical_seeds?: TraceCandidate[];
+	graph_expansion?: TraceCandidate[];
+	context_pages?: string[];
+	keyword_expansion?: {
+		terms?: string[];
+		attempted?: boolean;
+		error?: string;
+	};
+	fallback?: {
+		used?: boolean;
+		paths?: string[];
+		reason?: string;
+	};
+};
+
+interface TraceCandidate {
+	path?: string;
+	title?: string;
+	title_zh?: string;
+}
+
+interface QueryExecutionOverrides {
+	model: string;
+	reasoningEffort: string;
+	serviceTier: ServiceTier;
+}
+
+interface QuestionImageResolution {
+	attachments: VaultImageAttachment[];
+	notePaths: string[];
+	discoveredCount: number;
+	totalBytes: number;
+}
+
+interface QueryRunnerHooks {
+	onEvent?: (event: DashboardProcessEvent) => void;
+}
+
+interface QueryViewHost extends PluginHost {
+	querySessions: QuerySession[];
+	isQueryExecutionActive(runId: string, backendId?: string): boolean;
+	appendQueryMessages(
+		sessionId: string,
+		messages: PersistedQueryMessage[],
+		firstQuestion?: string,
+	): Promise<void>;
+	updateQueryMessage(
+		sessionId: string,
+		messageId: string,
+		updates: Partial<PersistedQueryMessage>,
+		saveMode?: "immediate" | "debounced",
+	): Promise<PersistedQueryMessage | null>;
+	createQueryMessageId(): string;
+	setActiveQueryMode(mode: QueryRetrievalMode | string): Promise<void>;
+	setActiveQueryBackend(backendId: string): Promise<void>;
+	resolveQueryBackendId(backendId?: string): string;
+	getProviderProfile(profileId: string): ProviderProfile | null;
+	getVerifiedProviderProfiles(): ProviderProfile[];
+	buildVaultImageReferenceIndex(
+		files: TFile[],
+	): Map<string, Array<{ title: string; path: string; count: number }>>;
+	resolveDirectQueryExecutionConfig(profile: ProviderProfile): ExecutionConfig;
+	resolveQuestionImageAttachments(
+		question: string,
+		existingAttachments?: VaultImageAttachment[],
+	): Promise<QuestionImageResolution>;
+	buildQueryActionInput(
+		question: string,
+		priorMessages: PersistedQueryMessage[],
+		mode?: QueryRetrievalMode,
+	): string;
+	runDirectVaultQuery(
+		runId: string,
+		providerId: string,
+		question: string,
+		priorMessages: PersistedQueryMessage[],
+		mode?: QueryRetrievalMode,
+		hooks?: QueryRunnerHooks,
+		attachments?: VaultImageAttachment[],
+	): Promise<DashboardProcessResult>;
+	runVaultAction(
+		runId: string,
+		action: DashboardAction,
+		input: string,
+		executionConfig?: ExecutionConfig | null,
+		hooks?: QueryRunnerHooks,
+	): Promise<DashboardProcessResult>;
+	stopDirectVaultQuery(runId: string): boolean;
+	stopVaultAction(runId: string): boolean;
+	supportsFast(model: string): boolean;
+}
+
 export class QueryWikiView extends ItemView {
-	constructor(leaf, plugin) {
+	private readonly plugin: QueryViewHost;
+	private initialQuestion: string;
+	private activeRunId: string;
+	private activeMessageId: string;
+	private stopRequested: boolean;
+	private renderVersion: number;
+	private inputEl: HTMLTextAreaElement | null;
+	private inputSessionId: string;
+	private statusEl: HTMLSpanElement | null;
+	private pendingImages: VaultImageAttachment[];
+	private readonly queryDrafts: Map<string, string>;
+	private navigatorFrame: number;
+	private executionOverrides: QueryExecutionOverrides;
+
+	constructor(leaf: WorkspaceLeaf, plugin: QueryViewHost) {
 		super(leaf);
 		this.plugin = plugin;
 		this.initialQuestion = "";
@@ -43,31 +179,31 @@ export class QueryWikiView extends ItemView {
 		};
 	}
 
-	getViewType() {
+	getViewType(): string {
 		return QUERY_WIKI_VIEW_TYPE;
 	}
 
-	getDisplayText() {
+	getDisplayText(): string {
 		return "知识库对话";
 	}
 
-	getIcon() {
+	getIcon(): string {
 		return "messages-square";
 	}
 
-	async onOpen() {
+	async onOpen(): Promise<void> {
 		this.syncActiveRunFromSession();
 		await this.render();
 		window.requestAnimationFrame(() => this.activateComposerInput());
 	}
 
-	async onClose() {
+	async onClose(): Promise<void> {
 		if (this.navigatorFrame) window.cancelAnimationFrame(this.navigatorFrame);
 		this.navigatorFrame = 0;
 		this.contentEl.empty();
 	}
 
-	setInitialQuestion(value) {
+	setInitialQuestion(value: unknown): void {
 		this.initialQuestion = String(value || "").trim();
 		if (this.initialQuestion) {
 			this.queryDrafts.set(this.session.id, this.initialQuestion);
@@ -77,7 +213,7 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	activateComposerInput(moveCursorToEnd = false) {
+	activateComposerInput(moveCursorToEnd = false): void {
 		const input = this.inputEl;
 		if (!input?.isConnected) return;
 		input.disabled = false;
@@ -91,11 +227,11 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	get session() {
+	get session(): QuerySession {
 		return this.plugin.getActiveQuerySession();
 	}
 
-	syncActiveRunFromSession() {
+	syncActiveRunFromSession(): void {
 		const activeMessage = this.session.messages.find((message) => {
 			return ["pending", "stopping"].includes(message.status)
 				&& message.runId
@@ -106,7 +242,7 @@ export class QueryWikiView extends ItemView {
 		this.stopRequested = activeMessage?.status === "stopping";
 	}
 
-	async render(options = {}) {
+	async render(options: { scrollToBottom?: boolean } = {}): Promise<void> {
 		const version = ++this.renderVersion;
 		const session = this.session;
 		const previousInput = this.inputEl;
@@ -117,7 +253,7 @@ export class QueryWikiView extends ItemView {
 			&& typeof document !== "undefined"
 			&& document.activeElement === previousInput,
 		);
-		const previousSelection = restoreInputFocus
+		const previousSelection = restoreInputFocus && previousInput
 			? {
 				start: previousInput.selectionStart,
 				end: previousInput.selectionEnd,
@@ -168,7 +304,11 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	renderConversationNavigator(parent, conversation, messages) {
+	renderConversationNavigator(
+		parent: HTMLElement,
+		conversation: HTMLElement,
+		messages: PersistedQueryMessage[],
+	): void {
 		const navigationMessages = Array.isArray(messages)
 			? messages.filter((message) => message.role === "user")
 			: [];
@@ -179,7 +319,7 @@ export class QueryWikiView extends ItemView {
 			attr: { "aria-label": "快速定位用户问题" },
 		});
 		navigator.style.setProperty("--query-navigator-count", String(navigationMessages.length));
-		const markers = [];
+		const markers: Array<{ marker: HTMLButtonElement; messageId: string }> = [];
 		for (const [index, message] of navigationMessages.entries()) {
 			const snippet = String(
 				message.content
@@ -249,7 +389,7 @@ export class QueryWikiView extends ItemView {
 		scheduleUpdate();
 	}
 
-	renderHeader(parent, session) {
+	renderHeader(parent: HTMLElement, session: QuerySession): void {
 		const header = parent.createEl("header", { cls: "query-wiki-header" });
 		const title = header.createDiv({ cls: "query-wiki-title" });
 		title.createEl("p", { cls: "query-wiki-kicker", text: "VAULT EVIDENCE" });
@@ -310,7 +450,7 @@ export class QueryWikiView extends ItemView {
 		});
 	}
 
-	renderEmptyState(parent) {
+	renderEmptyState(parent: HTMLElement): void {
 		const empty = parent.createDiv({ cls: "query-wiki-empty" });
 		const icon = empty.createDiv({ cls: "query-wiki-empty-icon" });
 		setIcon(icon, "search");
@@ -320,7 +460,7 @@ export class QueryWikiView extends ItemView {
 		});
 	}
 
-	async renderMessage(parent, message) {
+	async renderMessage(parent: HTMLElement, message: PersistedQueryMessage): Promise<void> {
 		const article = parent.createEl("article", {
 			cls: `query-wiki-message is-${message.role} is-${message.status || "done"}`,
 			attr: { "data-message-id": message.id },
@@ -425,14 +565,14 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	renderMessageImages(parent, attachments) {
+	renderMessageImages(parent: HTMLElement, attachments: unknown): void {
 		const images = normalizeVaultImageAttachments(attachments);
 		if (!images.length) return;
 		const gallery = parent.createDiv({ cls: "query-wiki-message-images" });
 		for (const image of images) {
 			const file = this.app.vault.getAbstractFileByPath(image.path);
 			const figure = gallery.createEl("figure", { cls: "query-wiki-message-image" });
-			if (file) {
+			if (file instanceof TFile) {
 				figure.createEl("img", {
 					attr: {
 						src: this.app.vault.getResourcePath(file),
@@ -450,7 +590,7 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	renderRetrievalTrace(parent, trace) {
+	renderRetrievalTrace(parent: HTMLElement, trace: RetrievalTrace): void {
 		const seeds = Array.isArray(trace.lexical_seeds) ? trace.lexical_seeds : [];
 		const graph = Array.isArray(trace.graph_expansion) ? trace.graph_expansion : [];
 		const fallback = trace.fallback && typeof trace.fallback === "object"
@@ -514,7 +654,11 @@ export class QueryWikiView extends ItemView {
 		});
 	}
 
-	renderTraceGroup(parent, title, candidates) {
+	renderTraceGroup(
+		parent: HTMLElement,
+		title: string,
+		candidates: TraceCandidate[],
+	): void {
 		const group = parent.createDiv({ cls: "query-wiki-trace-group" });
 		group.createEl("h3", { text: title });
 		const list = group.createDiv({ cls: "query-wiki-trace-list" });
@@ -533,7 +677,7 @@ export class QueryWikiView extends ItemView {
 		});
 	}
 
-	renderSourcePanel(parent, message) {
+	renderSourcePanel(parent: HTMLElement, message: PersistedQueryMessage): void {
 		const vaultSources = normalizeQueryVaultSources(message.vaultSources);
 		const webSources = normalizeQueryWebSources(message.webSources);
 		const validation = normalizeQueryCitationValidation(message.citationValidation);
@@ -542,7 +686,7 @@ export class QueryWikiView extends ItemView {
 		const summary = details.createEl("summary");
 		const summaryIcon = summary.createSpan({ cls: "query-wiki-sources-icon" });
 		setIcon(summaryIcon, webSources.length ? "globe-2" : "library-big");
-		const summaryParts = [];
+		const summaryParts: string[] = [];
 		if (vaultSources.length) summaryParts.push(`${vaultSources.length} 个知识库页面`);
 		if (webSources.length) summaryParts.push(`${webSources.length} 个联网来源`);
 		summary.createSpan({
@@ -650,7 +794,7 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	renderComposer(parent) {
+	renderComposer(parent: HTMLElement): void {
 		const composer = parent.createEl("section", {
 			cls: "query-wiki-composer",
 			attr: { "aria-label": "知识库查询输入" },
@@ -686,7 +830,7 @@ export class QueryWikiView extends ItemView {
 			this.pendingImages.forEach((image, index) => {
 				const preview = previews.createDiv({ cls: "query-wiki-pending-image" });
 				const file = this.app.vault.getAbstractFileByPath(image.path);
-				if (file) {
+				if (file instanceof TFile) {
 					preview.createEl("img", {
 						attr: {
 							src: this.app.vault.getResourcePath(file),
@@ -784,7 +928,7 @@ export class QueryWikiView extends ItemView {
 		this.renderExecutionSettings(composer);
 	}
 
-	renderRetrievalModeSwitch(parent) {
+	renderRetrievalModeSwitch(parent: HTMLElement): void {
 		const currentMode = this.session.retrievalMode === "vault" ? "vault" : "web";
 		const control = parent.createDiv({
 			cls: "query-wiki-mode-switch",
@@ -830,8 +974,9 @@ export class QueryWikiView extends ItemView {
 		});
 	}
 
-	renderExecutionSettings(parent) {
+	renderExecutionSettings(parent: HTMLElement): void {
 		const action = ACTION_BY_ID.get("vault-retrieval");
+		if (!action) return;
 		const directProfiles = this.plugin.getVerifiedProviderProfiles();
 		const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
 		const directProfile = backendId === "codex-cli"
@@ -886,12 +1031,12 @@ export class QueryWikiView extends ItemView {
 		const sync = () => {
 			const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
 			const usingDirect = Boolean(selectedProfile);
-			model.parentElement.hidden = usingDirect;
-			reasoning.parentElement.hidden = usingDirect;
-			speed.parentElement.hidden = usingDirect;
+			if (model.parentElement) model.parentElement.hidden = usingDirect;
+			if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect;
+			if (speed.parentElement) speed.parentElement.hidden = usingDirect;
 			directNotice.toggleClass("is-visible", usingDirect);
 			directNotice.setText(
-				usingDirect
+				selectedProfile
 					? [
 						`将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。`,
 						profileSupportsQueryImage(selectedProfile)
@@ -904,17 +1049,18 @@ export class QueryWikiView extends ItemView {
 					].join("")
 					: "",
 			);
-			if (usingDirect) {
+			if (selectedProfile) {
 				summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
 				return;
 			}
 			const selectedModel = model.value || this.plugin.resolveActionExecutionConfig(action).model;
 			if (!this.plugin.supportsFast(selectedModel) && speed.value === "fast") speed.value = "default";
-			speed.querySelector('option[value="fast"]').disabled = !this.plugin.supportsFast(selectedModel);
+			const fastOption = speed.querySelector<HTMLOptionElement>('option[value="fast"]');
+			if (fastOption) fastOption.disabled = !this.plugin.supportsFast(selectedModel);
 			this.executionOverrides = {
 				model: model.value,
 				reasoningEffort: reasoning.value,
-				serviceTier: speed.value,
+				serviceTier: speed.value === "fast" ? "fast" : "default",
 			};
 			const next = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
 			summaryText.setText(`Codex CLI · ${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
@@ -944,13 +1090,17 @@ export class QueryWikiView extends ItemView {
 		sync();
 	}
 
-	createSelectField(parent, labelText) {
+	createSelectField(parent: HTMLElement, labelText: string): HTMLSelectElement {
 		const label = parent.createEl("label", { cls: "query-wiki-settings-field" });
 		label.createSpan({ text: labelText });
 		return label.createEl("select");
 	}
 
-	createIconButton(parent, icon, label) {
+	createIconButton(
+		parent: HTMLElement,
+		icon: string,
+		label: string,
+	): HTMLButtonElement {
 		const button = parent.createEl("button", {
 			cls: "query-wiki-icon-button",
 			attr: { type: "button", title: label, "aria-label": label },
@@ -959,9 +1109,13 @@ export class QueryWikiView extends ItemView {
 		return button;
 	}
 
-	async submitQuestion(question) {
+	async submitQuestion(question: string): Promise<void> {
 		if (!question || this.activeRunId || this.plugin.isActionRunning("vault-retrieval")) return;
 		const action = ACTION_BY_ID.get("vault-retrieval");
+		if (!action) {
+			new Notice("知识库检索操作未注册");
+			return;
+		}
 		const session = this.session;
 		const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
 		const directProfile = backendId === "codex-cli"
@@ -976,7 +1130,12 @@ export class QueryWikiView extends ItemView {
 			new Notice("当前执行后端未启用视觉输入，无法发送图片");
 			return;
 		}
-		let linkedImageResult = { attachments: [], notePaths: [], discoveredCount: 0 };
+		let linkedImageResult: QuestionImageResolution = {
+			attachments: [],
+			notePaths: [],
+			discoveredCount: 0,
+			totalBytes: 0,
+		};
 		if (profileSupportsQueryImage(directProfile)) {
 			try {
 				linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
@@ -999,13 +1158,13 @@ export class QueryWikiView extends ItemView {
 					: `已从链接笔记附加 ${addedCount} 张图片`,
 			);
 		}
-		const retrievalMode = session.retrievalMode === "web"
+		const retrievalMode: QueryRetrievalMode = session.retrievalMode === "web"
 			&& (backendId === "codex-cli" || profileSupportsDirectWebSearch(directProfile))
 			? "web"
 			: "vault";
 		const priorMessages = session.messages.filter((message) => message.status === "done");
 		const now = new Date().toISOString();
-		const userMessage = {
+		const userMessage: PersistedQueryMessage = {
 			id: this.plugin.createQueryMessageId(),
 			role: "user",
 			content: question,
@@ -1014,7 +1173,7 @@ export class QueryWikiView extends ItemView {
 			createdAt: now,
 			retrievalMode,
 		};
-		const assistantMessage = {
+		const assistantMessage: PersistedQueryMessage = {
 			id: this.plugin.createQueryMessageId(),
 			role: "assistant",
 			content: "",
@@ -1036,10 +1195,10 @@ export class QueryWikiView extends ItemView {
 		this.activeRunId = "starting";
 		this.activeMessageId = assistantMessage.id;
 		this.stopRequested = false;
-		const executionConfig = directProfile
+		const executionConfig: ExecutionConfig = directProfile
 			? this.plugin.resolveDirectQueryExecutionConfig(directProfile)
 			: {
-				backend: "codex-cli",
+				backend: "codex-cli" as const,
 				...this.plugin.resolveActionExecutionConfig(action, this.executionOverrides),
 			};
 		assistantMessage.model = executionConfig.model;
@@ -1056,8 +1215,10 @@ export class QueryWikiView extends ItemView {
 			this.activeRunId = run.id;
 			await this.plugin.updateQueryMessage(session.id, assistantMessage.id, { runId: run.id });
 			await this.render({ scrollToBottom: true });
-			const hooks = {
-				onEvent: (event) => this.handleRunnerEvent(session.id, assistantMessage.id, event),
+			const hooks: QueryRunnerHooks = {
+				onEvent: (event: DashboardProcessEvent) => {
+					this.handleRunnerEvent(session.id, assistantMessage.id, event);
+				},
 			};
 			const result = directProfile
 				? await this.plugin.runDirectVaultQuery(
@@ -1067,7 +1228,7 @@ export class QueryWikiView extends ItemView {
 					priorMessages,
 					retrievalMode,
 					hooks,
-					userMessage.attachments,
+					userMessage.attachments || [],
 				)
 				: await this.plugin.runVaultAction(
 					run.id,
@@ -1103,7 +1264,11 @@ export class QueryWikiView extends ItemView {
 				webSources: normalizeQueryWebSources(structuredResult?.web_sources),
 				citationValidation: normalizeQueryCitationValidation(structuredResult?.citation_validation),
 				retrievalPath: normalizeQueryRetrievalPath(structuredResult?.retrieval_path),
-				retrievalMode: traceEvent?.mode || retrievalMode,
+				retrievalMode: traceEvent?.mode === "vault"
+					? "vault"
+					: traceEvent?.mode === "web"
+						? "web"
+						: retrievalMode,
 				queryBackendId: backendId,
 				providerName: directProfile?.name || "Codex CLI",
 				model: executionConfig.model,
@@ -1145,15 +1310,16 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	handleRunnerEvent(sessionId, messageId, event) {
+	handleRunnerEvent(sessionId: string, messageId: string, event: DashboardProcessEvent): void {
 		if (!event || typeof event !== "object") return;
 		if (event.type === "retrieval-preflight") {
+			const trace = (event.payload || {}) as RetrievalTrace;
 			void this.plugin.updateQueryMessage(sessionId, messageId, {
 				retrievalTrace: event.payload || null,
 				retrievalMode: event.mode === "vault" ? "vault" : "web",
-				progress: this.progressFromTrace(event.payload),
+				progress: this.progressFromTrace(trace),
 			}, "debounced").then(() => this.render({ scrollToBottom: true }));
-			this.updateProgressText(this.progressFromTrace(event.payload));
+			this.updateProgressText(this.progressFromTrace(trace));
 			return;
 		}
 		if (event.type === "assistant-reset") {
@@ -1206,11 +1372,11 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	updateProgressText(value) {
-		if (this.statusEl?.isConnected) this.statusEl.setText(value);
+	updateProgressText(value: unknown): void {
+		if (this.statusEl?.isConnected) this.statusEl.setText(String(value || ""));
 	}
 
-	progressFromTrace(trace) {
+	progressFromTrace(trace: RetrievalTrace): string {
 		if (!trace || typeof trace !== "object") return "已完成检索预检";
 		if (trace.fallback?.used) return "未找到可靠种子，正在检查方向索引";
 		const seedCount = Array.isArray(trace.lexical_seeds) ? trace.lexical_seeds.length : 0;
@@ -1218,7 +1384,7 @@ export class QueryWikiView extends ItemView {
 		return `${trace.retrieval_label || "检索完成"}：${seedCount} 个种子，${graphCount} 个关联页面`;
 	}
 
-	stopQuery() {
+	stopQuery(): void {
 		if (!this.activeRunId || this.activeRunId === "starting" || this.stopRequested) return;
 		const message = this.session.messages.find((item) => item.id === this.activeMessageId);
 		this.stopRequested = message?.queryBackendId && message.queryBackendId !== "codex-cli"
@@ -1237,8 +1403,12 @@ export class QueryWikiView extends ItemView {
 		}
 	}
 
-	openSynthesisHandoff() {
+	openSynthesisHandoff(): void {
 		const action = ACTION_BY_ID.get("synthesis");
+		if (!action) {
+			new Notice("综合分析操作未注册");
+			return;
+		}
 		const session = this.session;
 		const transcript = session.messages
 			.filter((message) => message.status === "done" && message.content)
@@ -1265,7 +1435,11 @@ export class QueryWikiView extends ItemView {
 		).open();
 	}
 
-	async executeSynthesisHandoff(action, input, overrides) {
+	async executeSynthesisHandoff(
+		action: DashboardAction,
+		input: string,
+		overrides: ExecutionOverrides,
+	): Promise<void> {
 		if (this.plugin.isActionRunning(action.id)) {
 			new Notice("综合分析正在运行");
 			return;
@@ -1301,17 +1475,18 @@ export class QueryWikiView extends ItemView {
 		if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
 	}
 
-	displayRetrievalStage(stage) {
+	displayRetrievalStage(stage: unknown): string {
+		const stageKey = String(stage || "");
 		return {
 			"lexical-seed+graph-expansion": "词法种子 → 关系扩展",
 			"lexical-seed+ppr": "词法种子 → PPR 图扩展",
 			"llm-keyword+ppr": "LLM 关键词扩展 → PPR 图扩展",
 			"no-match-fallback": "无匹配 → 方向索引回退",
 			"preflight-unavailable": "预检不可用，交由检索 skill 回退",
-		}[stage] || stage || "未知";
+		}[stageKey] || stageKey || "未知";
 	}
 
-	formatTime(value) {
+	formatTime(value: string): string {
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return "";
 		return new Intl.DateTimeFormat("zh-CN", {

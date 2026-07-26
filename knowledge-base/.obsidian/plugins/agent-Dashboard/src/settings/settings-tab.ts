@@ -1,26 +1,59 @@
-// @ts-nocheck
-
 import {
+	App,
 	Notice,
+	Plugin,
 	PluginSettingTab,
 	SecretComponent,
 	Setting,
 	setIcon,
 } from "obsidian";
 
-import { PROVIDER_TYPES, REASONING_OPTIONS } from "../config";
+import {
+	MAX_QUERY_IMAGE_ATTACHMENTS,
+	PROVIDER_TYPES,
+	PROVIDER_TYPE_BY_ID,
+	REASONING_OPTIONS,
+	type ProviderTypeId,
+} from "../config";
 import {
 	makeProviderProfile,
+	modelHasKnownVisionSupport,
+	modelIsQwen37Plus,
 	normalizeAssignedSites,
 	profileHasConfiguredQwenWebSearch,
+	type ProviderProfile,
 } from "../providers/profile";
+import type { ProviderModel } from "../providers/shared";
+import type {
+	PluginHost,
+	ProviderConnectionTestResult,
+} from "../types/contracts";
+
+interface ProviderRuntimeEntry {
+	status?: "idle" | "models" | "testing" | "done";
+	models?: ProviderModel[];
+	result?: ProviderConnectionTestResult;
+}
+
+interface SettingsPluginHost extends PluginHost {
+	providerRuntimeState: Map<string, ProviderRuntimeEntry>;
+	providerEditorProfileId: string;
+	saveSettings(): Promise<void>;
+	checkRuntime(): { ready: boolean; message: string };
+	listProviderModels(profileId: string): Promise<ProviderModel[]>;
+	testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult>;
+	getProviderErrorLabel(type: string): string;
+}
+
 export class AgentDashboardSettingTab extends PluginSettingTab {
-	constructor(app, plugin) {
+	declare plugin: Plugin & SettingsPluginHost;
+
+	constructor(app: App, plugin: Plugin & SettingsPluginHost) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
-	display() {
+	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 		containerEl.createEl("h2", { text: "Agent Dashboard" });
@@ -138,7 +171,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			);
 	}
 
-	renderProviderSettings(containerEl) {
+	renderProviderSettings(containerEl: HTMLElement): void {
 		this.createProviderSectionHeader(
 			containerEl,
 			"模型调用",
@@ -241,7 +274,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.renderProviderProfile(containerEl, selectedProfile);
 	}
 
-	getEditorProviderProfile() {
+	getEditorProviderProfile(): ProviderProfile | null {
 		const profiles = this.plugin.settings.providerProfiles;
 		if (!profiles.length) {
 			this.plugin.providerEditorProfileId = "";
@@ -255,7 +288,12 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		return profile;
 	}
 
-	createProviderSectionHeader(containerEl, title, description = "", status = "") {
+	createProviderSectionHeader(
+		containerEl: HTMLElement,
+		title: string,
+		description = "",
+		status = "",
+	): HTMLElement {
 		const header = containerEl.createDiv({ cls: "agent-dashboard-settings-section" });
 		const heading = header.createDiv({ cls: "agent-dashboard-settings-section-heading" });
 		heading.createEl("h3", { text: title });
@@ -264,7 +302,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		return header;
 	}
 
-	renderProviderProfile(containerEl, profile) {
+	renderProviderProfile(containerEl: HTMLElement, profile: ProviderProfile): void {
 		const metadata = PROVIDER_TYPE_BY_ID.get(profile.type) || PROVIDER_TYPES[0];
 		const verificationStatus = profile.lastTest?.ok
 			? this.plugin.settings.activeProviderId === profile.id
@@ -315,7 +353,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				PROVIDER_TYPES.forEach((provider) => dropdown.addOption(provider.id, provider.label));
 				dropdown.setValue(profile.type).onChange(async (value) => {
 					const previous = PROVIDER_TYPE_BY_ID.get(profile.type) || metadata;
-					const next = PROVIDER_TYPE_BY_ID.get(value) || PROVIDER_TYPES[0];
+					const next = PROVIDER_TYPE_BY_ID.get(value as ProviderTypeId) || PROVIDER_TYPES[0];
 					if (!profile.baseUrl || profile.baseUrl === previous.defaultBaseUrl) {
 						profile.baseUrl = next.defaultBaseUrl;
 					}
@@ -323,7 +361,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						profile.model = next.defaultModel;
 					}
 					profile.type = next.id;
-					profile.capabilities = { ...next.capabilities };
+					profile.capabilities = { ...next.capabilities, visionConfigured: false };
 					profile.webSearch = {
 						enabled: false,
 						configured: false,
@@ -331,6 +369,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						forcedSearch: true,
 						searchStrategy: "turbo",
 						assignedSites: [],
+						timeoutSeconds: 60,
 					};
 					profile.name = profile.name === previous.label ? next.label : profile.name;
 					this.invalidateProviderProfile(profile);
@@ -424,6 +463,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 								endpoint: normalized.endpoint || profile.baseUrl,
 								model: profile.model,
 								responseTimeMs: 0,
+								testedAt: new Date().toISOString(),
 							},
 						});
 					}
@@ -567,7 +607,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						.addOption("agent", "agent · 多轮搜索")
 						.setValue(profile.webSearch.searchStrategy)
 						.onChange(async (value) => {
-							profile.webSearch.searchStrategy = value;
+							profile.webSearch.searchStrategy = value as "turbo" | "max" | "agent";
 							if (value !== "turbo") profile.webSearch.assignedSites = [];
 							this.invalidateProviderProfile(profile);
 							await this.plugin.saveSettings();
@@ -647,7 +687,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		if (result) this.renderConnectionResult(containerEl, result);
 	}
 
-	invalidateProviderProfile(profile) {
+	invalidateProviderProfile(profile: ProviderProfile): void {
 		profile.lastTest = null;
 		profile.updatedAt = new Date().toISOString();
 		if (this.plugin.settings.activeProviderId === profile.id) {
@@ -655,7 +695,10 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		}
 	}
 
-	renderConnectionResult(parent, result) {
+	renderConnectionResult(
+		parent: HTMLElement,
+		result: ProviderConnectionTestResult,
+	): void {
 		const panel = parent.createDiv({
 			cls: `agent-dashboard-provider-result ${result.ok ? "is-success" : "is-error"}`,
 		});
@@ -664,7 +707,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		setIcon(icon, result.ok ? "circle-check" : "circle-alert");
 		heading.createEl("strong", { text: result.ok ? "连接成功" : "连接失败" });
 		const grid = panel.createDiv({ cls: "agent-dashboard-provider-result-grid" });
-		const addRow = (label, value) => {
+		const addRow = (label: string, value: unknown) => {
 			const row = grid.createDiv();
 			row.createSpan({ text: label });
 			row.createEl("strong", { text: String(value || "—") });

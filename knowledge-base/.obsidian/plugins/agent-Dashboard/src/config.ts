@@ -107,9 +107,21 @@ export const PROVIDER_TYPE_BY_ID = new Map(
 	PROVIDER_TYPES.map((provider) => [provider.id, provider]),
 );
 
+export interface ChatTextContent {
+	type: "text";
+	text: string;
+}
+
+export interface ChatImageContent {
+	type: "image_url";
+	image_url: {
+		url: string;
+	};
+}
+
 export interface ChatMessage {
 	role: "system" | "user" | "assistant";
-	content: string;
+	content: string | readonly (ChatTextContent | ChatImageContent)[];
 }
 
 export const CONNECTION_TEST_MESSAGES: readonly ChatMessage[] = [

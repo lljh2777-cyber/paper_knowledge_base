@@ -1,37 +1,83 @@
-// @ts-nocheck
-
 import {
 	CONNECTION_TEST_MESSAGES,
 	MODEL_OPTIONS,
 	PROVIDER_TYPE_BY_ID,
 	WEB_SEARCH_TEST_MESSAGES,
+	type ChatMessage,
+	type ProviderCapabilities,
 } from "../config";
+import type {
+	PluginHost,
+	ProviderChatRequest,
+	ProviderCompletion,
+	ProviderConnectionTestResult,
+	ProviderHttpRequestOptions,
+	ProviderRequestOptions,
+	ProviderRuntimeConfig,
+} from "../types/contracts";
 import {
 	normalizeAssignedSites,
 	profileHasConfiguredQwenWebSearch,
 } from "./profile";
 import {
 	ProviderConnectionError,
+	asRecord,
 	buildProviderUrl,
 	emitProviderDelta,
 	extractOpenAIText,
 	normalizeProviderModelList,
 	parseProviderJson,
+	type ProviderModel,
+	type UnknownRecord,
 } from "./shared";
+
+type ProviderDeltaHandler = (delta: string) => void;
+
+interface ProviderRuntimeCapabilities extends ProviderCapabilities {
+	webSearch: boolean;
+}
+
+interface ProviderRequestBody {
+	model: string;
+	messages: readonly ChatMessage[];
+	max_tokens: number;
+	stream: boolean;
+	enable_search?: boolean;
+	search_options?: {
+		forced_search: boolean;
+		search_strategy: "turbo" | "max" | "agent";
+		assigned_site_list?: string[];
+	};
+}
+
+function contentAsText(content: ChatMessage["content"]): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter((item) => item.type === "text")
+		.map((item) => item.text)
+		.join("\n");
+}
+
 export class LLMProvider {
-	constructor(plugin, config) {
+	readonly plugin: PluginHost;
+	readonly config: ProviderRuntimeConfig;
+	readonly capabilities: ProviderRuntimeCapabilities;
+
+	constructor(plugin: PluginHost, config: ProviderRuntimeConfig) {
 		this.plugin = plugin;
 		this.config = config;
-		const metadata = PROVIDER_TYPE_BY_ID.get(config.type) || {};
+		const metadata = config.type === "codex-cli"
+			? undefined
+			: PROVIDER_TYPE_BY_ID.get(config.type);
 		this.capabilities = {
-			streaming: config.capabilities?.streaming ?? metadata.capabilities?.streaming ?? false,
-			pdf: config.capabilities?.pdf ?? metadata.capabilities?.pdf ?? false,
-			vision: config.capabilities?.vision ?? metadata.capabilities?.vision ?? false,
+			streaming: config.capabilities?.streaming ?? metadata?.capabilities.streaming ?? false,
+			pdf: config.capabilities?.pdf ?? metadata?.capabilities.pdf ?? false,
+			vision: config.capabilities?.vision ?? metadata?.capabilities.vision ?? false,
 			webSearch: profileHasConfiguredQwenWebSearch(config),
 		};
 	}
 
-	async testConnection() {
+	async testConnection(): Promise<ProviderConnectionTestResult> {
 		const startedAt = Date.now();
 		try {
 			this.validateConfiguration();
@@ -145,7 +191,7 @@ export class LLMProvider {
 		}
 	}
 
-	async getSecret(required = false) {
+	async getSecret(required = false): Promise<string> {
 		const secretId = String(this.config.secretId || "").trim();
 		if (!secretId) {
 			if (required) throw new ProviderConnectionError("missing-secret", "请选择或创建 SecretStorage 凭据");
@@ -161,7 +207,10 @@ export class LLMProvider {
 		return secret || "";
 	}
 
-	async request(route, options = {}) {
+	async request(
+		route: string,
+		options: Omit<ProviderHttpRequestOptions, "url"> = {},
+	) {
 		return this.plugin.providerHttpRequest({
 			url: buildProviderUrl(this.config.baseUrl, route),
 			method: options.method || "GET",
@@ -172,7 +221,10 @@ export class LLMProvider {
 		});
 	}
 
-	requireJson(result, operation) {
+	requireJson(
+		result: Awaited<ReturnType<PluginHost["providerHttpRequest"]>>,
+		operation: string,
+	): UnknownRecord {
 		if (!result?.json || typeof result.json !== "object") {
 			throw new ProviderConnectionError(
 				"protocol",
@@ -183,37 +235,47 @@ export class LLMProvider {
 		return result.json;
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		throw new ProviderConnectionError("unsupported", "该供应商尚未实现模型发现");
 	}
 
-	async complete() {
+	async complete(
+		_request: ProviderChatRequest,
+		_options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		throw new ProviderConnectionError("unsupported", "该供应商尚未实现文本生成");
 	}
 
-	async stream() {
+	async stream(
+		_request: ProviderChatRequest,
+		_onDelta: ProviderDeltaHandler,
+		_options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		throw new ProviderConnectionError("unsupported", "该供应商尚未实现流式文本生成");
 	}
 
-	async probeStreaming() {
+	async probeStreaming(_request: ProviderChatRequest): Promise<boolean> {
 		return false;
 	}
 }
 
 export class OpenAIProvider extends LLMProvider {
-	async headers() {
+	async headers(): Promise<Record<string, string>> {
 		return {
 			Authorization: `Bearer ${await this.getSecret(true)}`,
 			"Content-Type": "application/json",
 		};
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		const result = await this.request("v1/models", { headers: await this.headers() });
 		return normalizeProviderModelList(this.requireJson(result, "模型列表"));
 	}
 
-	async complete(request, options = {}) {
+	async complete(
+		request: ProviderChatRequest,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		const result = await this.request("v1/responses", {
 			method: "POST",
 			headers: await this.headers(),
@@ -229,7 +291,11 @@ export class OpenAIProvider extends LLMProvider {
 		return { text: extractOpenAIText(payload), raw: payload };
 	}
 
-	async stream(request, onDelta, options = {}) {
+	async stream(
+		request: ProviderChatRequest,
+		onDelta: ProviderDeltaHandler,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		let text = "";
 		await this.plugin.providerHttpStream({
 			url: buildProviderUrl(this.config.baseUrl, "v1/responses"),
@@ -248,16 +314,18 @@ export class OpenAIProvider extends LLMProvider {
 			onEvent: (data) => {
 				if (data === "[DONE]") return;
 				const payload = parseProviderJson(data);
+				const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+				const firstChoice = asRecord(choices[0]);
 				const delta = payload?.type === "response.output_text.delta"
 					? payload.delta
-					: payload?.choices?.[0]?.delta?.content;
+					: asRecord(firstChoice.delta).content;
 				text += emitProviderDelta(onDelta, delta);
 			},
 		});
 		return { text };
 	}
 
-	async probeStreaming(request) {
+	async probeStreaming(request: ProviderChatRequest): Promise<boolean> {
 		await this.request("v1/responses", {
 			method: "POST",
 			headers: await this.headers(),
@@ -274,7 +342,7 @@ export class OpenAIProvider extends LLMProvider {
 }
 
 export class AnthropicProvider extends LLMProvider {
-	async headers() {
+	async headers(): Promise<Record<string, string>> {
 		return {
 			"x-api-key": await this.getSecret(true),
 			"anthropic-version": "2023-06-01",
@@ -282,15 +350,15 @@ export class AnthropicProvider extends LLMProvider {
 		};
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		const result = await this.request("v1/models?limit=1000", { headers: await this.headers() });
 		return normalizeProviderModelList(this.requireJson(result, "模型列表"));
 	}
 
-	messageBody(request, stream = false) {
+	messageBody(request: ProviderChatRequest, stream = false) {
 		const system = request.messages
 			.filter((message) => message.role === "system")
-			.map((message) => message.content)
+			.map((message) => contentAsText(message.content))
 			.join("\n");
 		const messages = request.messages
 			.filter((message) => message.role !== "system")
@@ -304,7 +372,10 @@ export class AnthropicProvider extends LLMProvider {
 		};
 	}
 
-	async complete(request, options = {}) {
+	async complete(
+		request: ProviderChatRequest,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		const result = await this.request("v1/messages", {
 			method: "POST",
 			headers: await this.headers(),
@@ -313,12 +384,19 @@ export class AnthropicProvider extends LLMProvider {
 		});
 		const payload = this.requireJson(result, "文本生成");
 		const text = Array.isArray(payload.content)
-			? payload.content.map((item) => item?.text || "").filter(Boolean).join("\n")
+			? payload.content
+				.map((item) => String(asRecord(item).text || ""))
+				.filter(Boolean)
+				.join("\n")
 			: "";
 		return { text, raw: payload };
 	}
 
-	async stream(request, onDelta, options = {}) {
+	async stream(
+		request: ProviderChatRequest,
+		onDelta: ProviderDeltaHandler,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		let text = "";
 		await this.plugin.providerHttpStream({
 			url: buildProviderUrl(this.config.baseUrl, "v1/messages"),
@@ -331,7 +409,7 @@ export class AnthropicProvider extends LLMProvider {
 			onEvent: (data) => {
 				const payload = parseProviderJson(data);
 				const delta = payload?.type === "content_block_delta"
-					? payload?.delta?.text
+					? asRecord(payload.delta).text
 					: "";
 				text += emitProviderDelta(onDelta, delta);
 			},
@@ -339,7 +417,7 @@ export class AnthropicProvider extends LLMProvider {
 		return { text };
 	}
 
-	async probeStreaming(request) {
+	async probeStreaming(request: ProviderChatRequest): Promise<boolean> {
 		await this.request("v1/messages", {
 			method: "POST",
 			headers: await this.headers(),
@@ -350,7 +428,7 @@ export class AnthropicProvider extends LLMProvider {
 }
 
 export class OpenAICompatibleProvider extends LLMProvider {
-	async headers() {
+	async headers(): Promise<Record<string, string>> {
 		const secret = await this.getSecret(false);
 		return {
 			...(secret ? { Authorization: `Bearer ${secret}` } : {}),
@@ -358,33 +436,34 @@ export class OpenAICompatibleProvider extends LLMProvider {
 		};
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		const result = await this.request("v1/models", { headers: await this.headers() });
 		return normalizeProviderModelList(this.requireJson(result, "模型列表"));
 	}
 
-	chatBody(request, stream = false) {
-		const body = {
+	chatBody(request: ProviderChatRequest, stream = false): ProviderRequestBody {
+		const body: ProviderRequestBody = {
 			model: request.model || this.config.model,
 			messages: request.messages,
 			max_tokens: request.maxTokens || 256,
 			stream,
 		};
 		if (request.webSearch === true) {
-			if (!profileHasConfiguredQwenWebSearch(this.config)) {
+			const webSearch = this.config.webSearch;
+			if (!webSearch || !profileHasConfiguredQwenWebSearch(this.config)) {
 				throw new ProviderConnectionError(
 					"unsupported",
 					"当前配置没有启用 Qwen3.7-Plus Chat Completions 联网搜索",
 				);
 			}
-			const strategy = ["turbo", "max", "agent"].includes(this.config.webSearch.searchStrategy)
-				? this.config.webSearch.searchStrategy
+			const strategy = ["turbo", "max", "agent"].includes(webSearch.searchStrategy)
+				? webSearch.searchStrategy
 				: "turbo";
-			const searchOptions = {
-				forced_search: this.config.webSearch.forcedSearch !== false,
+			const searchOptions: NonNullable<ProviderRequestBody["search_options"]> = {
+				forced_search: webSearch.forcedSearch !== false,
 				search_strategy: strategy,
 			};
-			const assignedSites = normalizeAssignedSites(this.config.webSearch.assignedSites);
+			const assignedSites = normalizeAssignedSites(webSearch.assignedSites);
 			if (strategy === "turbo" && assignedSites.length) {
 				searchOptions.assigned_site_list = assignedSites;
 			}
@@ -394,42 +473,53 @@ export class OpenAICompatibleProvider extends LLMProvider {
 		return body;
 	}
 
-	async complete(request, options = {}) {
+	async complete(
+		request: ProviderChatRequest,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
+		const webSearchTimeout = request.webSearch === true
+			? this.config.webSearch?.timeoutSeconds
+			: undefined;
 		const result = await this.request("v1/chat/completions", {
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request),
-			timeoutMs: request.webSearch === true
-				? this.config.webSearch.timeoutSeconds * 1000
-				: undefined,
+			timeoutMs: webSearchTimeout ? webSearchTimeout * 1000 : undefined,
 			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
 		return { text: extractOpenAIText(payload), raw: payload };
 	}
 
-	async stream(request, onDelta, options = {}) {
+	async stream(
+		request: ProviderChatRequest,
+		onDelta: ProviderDeltaHandler,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		let text = "";
+		const webSearchTimeout = request.webSearch === true
+			? this.config.webSearch?.timeoutSeconds
+			: undefined;
 		await this.plugin.providerHttpStream({
 			url: buildProviderUrl(this.config.baseUrl, "v1/chat/completions"),
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request, true),
-			timeoutMs: request.webSearch === true
-				? this.config.webSearch.timeoutSeconds * 1000
-				: this.config.timeoutSeconds * 1000,
+			timeoutMs: (webSearchTimeout || this.config.timeoutSeconds) * 1000,
 			format: "sse",
 			registerCancel: options.registerCancel,
 			onEvent: (data) => {
 				if (data === "[DONE]") return;
 				const payload = parseProviderJson(data);
-				text += emitProviderDelta(onDelta, payload?.choices?.[0]?.delta?.content);
+				const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+				const firstChoice = asRecord(choices[0]);
+				text += emitProviderDelta(onDelta, asRecord(firstChoice.delta).content);
 			},
 		});
 		return { text };
 	}
 
-	async probeStreaming(request) {
+	async probeStreaming(request: ProviderChatRequest): Promise<boolean> {
 		await this.request("v1/chat/completions", {
 			method: "POST",
 			headers: await this.headers(),
@@ -440,7 +530,7 @@ export class OpenAICompatibleProvider extends LLMProvider {
 }
 
 export class OllamaProvider extends LLMProvider {
-	async headers() {
+	async headers(): Promise<Record<string, string>> {
 		const secret = await this.getSecret(false);
 		return {
 			...(secret ? { Authorization: `Bearer ${secret}` } : {}),
@@ -448,12 +538,12 @@ export class OllamaProvider extends LLMProvider {
 		};
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		const result = await this.request("api/tags", { headers: await this.headers() });
 		return normalizeProviderModelList(this.requireJson(result, "模型列表"));
 	}
 
-	chatBody(request, stream = false) {
+	chatBody(request: ProviderChatRequest, stream = false) {
 		return {
 			model: request.model || this.config.model,
 			messages: request.messages,
@@ -462,7 +552,10 @@ export class OllamaProvider extends LLMProvider {
 		};
 	}
 
-	async complete(request, options = {}) {
+	async complete(
+		request: ProviderChatRequest,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		const result = await this.request("api/chat", {
 			method: "POST",
 			headers: await this.headers(),
@@ -470,10 +563,14 @@ export class OllamaProvider extends LLMProvider {
 			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
-		return { text: payload.message?.content || "", raw: payload };
+		return { text: String(asRecord(payload.message).content || ""), raw: payload };
 	}
 
-	async stream(request, onDelta, options = {}) {
+	async stream(
+		request: ProviderChatRequest,
+		onDelta: ProviderDeltaHandler,
+		options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		let text = "";
 		await this.plugin.providerHttpStream({
 			url: buildProviderUrl(this.config.baseUrl, "api/chat"),
@@ -485,13 +582,13 @@ export class OllamaProvider extends LLMProvider {
 			registerCancel: options.registerCancel,
 			onEvent: (data) => {
 				const payload = parseProviderJson(data);
-				text += emitProviderDelta(onDelta, payload?.message?.content);
+				text += emitProviderDelta(onDelta, asRecord(payload?.message).content);
 			},
 		});
 		return { text };
 	}
 
-	async probeStreaming(request) {
+	async probeStreaming(request: ProviderChatRequest): Promise<boolean> {
 		await this.request("api/chat", {
 			method: "POST",
 			headers: await this.headers(),
@@ -504,7 +601,10 @@ export class OllamaProvider extends LLMProvider {
 export class LMStudioProvider extends OpenAICompatibleProvider {}
 
 export class CodexCliProvider extends LLMProvider {
-	constructor(plugin, config) {
+	constructor(
+		plugin: PluginHost,
+		config: Omit<ProviderRuntimeConfig, "type" | "baseUrl">,
+	) {
 		super(plugin, {
 			...config,
 			type: "codex-cli",
@@ -513,7 +613,7 @@ export class CodexCliProvider extends LLMProvider {
 		});
 	}
 
-	async listModels() {
+	async listModels(): Promise<ProviderModel[]> {
 		return MODEL_OPTIONS.map((model) => ({
 			id: model.id,
 			name: model.label,
@@ -521,14 +621,17 @@ export class CodexCliProvider extends LLMProvider {
 		}));
 	}
 
-	async complete() {
+	async complete(
+		_request: ProviderChatRequest,
+		_options: ProviderRequestOptions = {},
+	): Promise<ProviderCompletion> {
 		throw new ProviderConnectionError(
 			"delegated",
 			"Codex CLI 生成仍由现有 dashboard runner 管理，不通过 Direct API 适配器调用",
 		);
 	}
 
-	async testConnection() {
+	async testConnection(): Promise<ProviderConnectionTestResult> {
 		return this.plugin.probeCodexCliConnection();
 	}
 }

@@ -1,11 +1,98 @@
-// @ts-nocheck
+import path from "node:path";
 
-import { ItemView, Notice, setIcon } from "obsidian";
+import {
+	ItemView,
+	Notice,
+	setIcon,
+	type TFile,
+	type WorkspaceLeaf,
+} from "obsidian";
 
 import { CODE_PRACTICE_VIEW_TYPE } from "../config";
 import { PracticeNoteModal } from "../modals/practice-note";
+import type { PluginHost } from "../types/contracts";
+
+type PracticeLanguage = "python" | "r";
+type PracticeStatus =
+	| "idle"
+	| "running"
+	| "success"
+	| "failed"
+	| "timeout"
+	| "stopped";
+
+interface CodePracticeResult {
+	run_id: string;
+	status: PracticeStatus;
+	language: PracticeLanguage;
+	exit_code: number | null;
+	duration_ms: number;
+	stdout: string;
+	stderr: string;
+	figures: string[];
+}
+
+interface CodePracticeCell {
+	id: string;
+	code: string;
+	placeholder: string;
+	result: CodePracticeResult | null;
+	executionCount: number | null;
+}
+
+interface CodePracticeRequest {
+	run_id: string;
+	language: PracticeLanguage;
+	context_code: string;
+	code: string;
+	working_directory: string;
+	timeout_seconds: number;
+}
+
+interface CodePracticeHost extends PluginHost {
+	createPracticeRunId(): string;
+	runCodePractice(request: CodePracticeRequest): Promise<CodePracticeResult>;
+	stopCodePractice(runId: string): void;
+	readPracticeFigure(figurePath: string): string;
+	savePracticeNote(payload: {
+		title: string;
+		goal: string;
+		notes: string;
+		language: PracticeLanguage;
+		cells: Array<{
+			code: string;
+			result: CodePracticeResult | null;
+			executionCount: number | null;
+		}>;
+		relatedNotePath: string;
+	}): Promise<TFile>;
+}
+
+interface NotebookControls {
+	add: HTMLButtonElement;
+	run: HTMLButtonElement;
+	stop: HTMLButtonElement;
+	clear: HTMLButtonElement;
+	clearCode: HTMLButtonElement;
+	resetCells: HTMLButtonElement;
+	save: HTMLButtonElement;
+	addFooter: HTMLButtonElement;
+}
+
 export class CodePracticeView extends ItemView {
-	constructor(leaf, plugin) {
+	private readonly plugin: CodePracticeHost;
+	private language: PracticeLanguage;
+	private nextCellId: number;
+	private cellsByLanguage: Record<PracticeLanguage, CodePracticeCell[]>;
+	private activeRunId: string;
+	private activeCellId: string;
+	private stopRequested: boolean;
+	private runningAll: boolean;
+	private executionCounter: number;
+	private relatedNotePath: string;
+	private notebookControls: NotebookControls | null;
+
+	constructor(leaf: WorkspaceLeaf, plugin: CodePracticeHost) {
 		super(leaf);
 		this.plugin = plugin;
 		this.language = "python";
@@ -23,47 +110,47 @@ export class CodePracticeView extends ItemView {
 		this.notebookControls = null;
 	}
 
-	createCell(code = "", placeholder = "") {
+	createCell(code = "", placeholder = ""): CodePracticeCell {
 		return { id: `cell-${this.nextCellId++}`, code, placeholder, result: null, executionCount: null };
 	}
 
-	createDefaultCells(language) {
+	createDefaultCells(language: PracticeLanguage): CodePracticeCell[] {
 		return language === "r"
 			? [this.createCell("", "values <- c(1, 2, 3, 4)"), this.createCell("", "mean(values)")]
 			: [this.createCell("", "values = [1, 2, 3, 4]"), this.createCell("", "sum(values) / len(values)")];
 	}
 
-	get cells() {
+	get cells(): CodePracticeCell[] {
 		return this.cellsByLanguage[this.language];
 	}
 
-	getViewType() {
+	getViewType(): string {
 		return CODE_PRACTICE_VIEW_TYPE;
 	}
 
-	getDisplayText() {
+	getDisplayText(): string {
 		return "代码练习";
 	}
 
-	getIcon() {
+	getIcon(): string {
 		return "square-code";
 	}
 
-	async onOpen() {
+	async onOpen(): Promise<void> {
 		this.render();
 	}
 
-	async onClose() {
+	async onClose(): Promise<void> {
 		if (this.activeRunId) this.plugin.stopCodePractice(this.activeRunId);
 		this.contentEl.empty();
 	}
 
-	setRelatedNote(file) {
+	setRelatedNote(file: TFile | null): void {
 		this.relatedNotePath = file?.extension === "md" ? file.path : "";
 		if (this.containerEl?.isConnected) this.render();
 	}
 
-	render() {
+	render(): void {
 		const scrollTop = this.contentEl.scrollTop;
 		const scrollLeft = this.contentEl.scrollLeft;
 		this.contentEl.empty();
@@ -81,7 +168,7 @@ export class CodePracticeView extends ItemView {
 		});
 	}
 
-	renderHeader(parent) {
+	renderHeader(parent: HTMLElement): void {
 		const header = parent.createEl("header", { cls: "code-practice-header" });
 		const title = header.createDiv({ cls: "code-practice-title" });
 		title.createEl("p", { cls: "agent-dashboard-eyebrow", text: "本地运行" });
@@ -95,7 +182,7 @@ export class CodePracticeView extends ItemView {
 		});
 	}
 
-	renderRuntime(parent) {
+	renderRuntime(parent: HTMLElement): void {
 		const bar = parent.createDiv({ cls: "code-practice-runtime" });
 		const warning = bar.createDiv({
 			cls: "code-practice-security-notice",
@@ -114,7 +201,7 @@ export class CodePracticeView extends ItemView {
 			});
 			button.type = "button";
 			button.disabled = Boolean(this.activeRunId);
-			button.addEventListener("click", () => this.setLanguage(value));
+			button.addEventListener("click", () => this.setLanguage(value as PracticeLanguage));
 		});
 		const details = bar.createDiv({ cls: "code-practice-runtime-details" });
 		this.createRuntimeDetail(details, "解释器", this.currentInterpreter());
@@ -122,13 +209,13 @@ export class CodePracticeView extends ItemView {
 		this.createRuntimeDetail(details, "权限边界", "当前 Windows 用户；可访问工作目录外路径");
 	}
 
-	createRuntimeDetail(parent, label, value) {
+	createRuntimeDetail(parent: HTMLElement, label: string, value: string): void {
 		const detail = parent.createDiv({ cls: "code-practice-runtime-detail" });
 		detail.createSpan({ text: label });
 		detail.createEl("code", { text: value || "未配置", attr: { title: value || "未配置" } });
 	}
 
-	renderNotebook(parent) {
+	renderNotebook(parent: HTMLElement): void {
 		const section = parent.createEl("section", { cls: "code-practice-notebook" });
 		const toolbar = section.createDiv({ cls: "code-practice-toolbar" });
 		const heading = toolbar.createDiv({ cls: "code-practice-notebook-heading" });
@@ -171,7 +258,7 @@ export class CodePracticeView extends ItemView {
 		this.updateNotebookControls();
 	}
 
-	updateNotebookControls() {
+	updateNotebookControls(): void {
 		if (!this.notebookControls) return;
 		const busy = Boolean(this.activeRunId);
 		const { add, run, stop, clear, clearCode, resetCells, save, addFooter } = this.notebookControls;
@@ -185,7 +272,12 @@ export class CodePracticeView extends ItemView {
 		save.disabled = busy || !this.cells.some((cell) => cell.result && cell.result.status !== "running");
 	}
 
-	createCommandButton(parent, icon, label, className = "") {
+	createCommandButton(
+		parent: HTMLElement,
+		icon: string,
+		label: string,
+		className = "",
+	): HTMLButtonElement {
 		const button = parent.createEl("button", {
 			cls: `code-practice-command ${className}`.trim(),
 			attr: { title: label, "aria-label": label },
@@ -196,7 +288,7 @@ export class CodePracticeView extends ItemView {
 		return button;
 	}
 
-	renderCell(parent, cell, index) {
+	renderCell(parent: HTMLElement, cell: CodePracticeCell, index: number): void {
 		const article = parent.createEl("article", { cls: "code-practice-cell", attr: { "data-cell-id": cell.id } });
 		if (cell.id === this.activeCellId) article.addClass("is-running");
 		const inputRow = article.createDiv({ cls: "code-practice-cell-input-row" });
@@ -284,7 +376,7 @@ export class CodePracticeView extends ItemView {
 		this.renderCellOutput(output, cell);
 	}
 
-	resizeCellEditor(editor) {
+	resizeCellEditor(editor: HTMLTextAreaElement): void {
 		const minimumHeight = 132;
 		const maximumHeight = Math.max(240, Math.min(520, Math.round(window.innerHeight * 0.6)));
 		editor.style.height = `${minimumHeight}px`;
@@ -293,7 +385,11 @@ export class CodePracticeView extends ItemView {
 		editor.style.overflowY = contentHeight > maximumHeight ? "auto" : "hidden";
 	}
 
-	createIconButton(parent, icon, label) {
+	createIconButton(
+		parent: HTMLElement,
+		icon: string,
+		label: string,
+	): HTMLButtonElement {
 		const button = parent.createEl("button", {
 			cls: "code-practice-icon-button",
 			attr: { title: label, "aria-label": label },
@@ -303,7 +399,7 @@ export class CodePracticeView extends ItemView {
 		return button;
 	}
 
-	renderCellOutput(parent, cell) {
+	renderCellOutput(parent: HTMLElement, cell: CodePracticeCell): void {
 		if (!cell.result) return;
 		const row = parent.createDiv({ cls: "code-practice-cell-output-row" });
 		const prompt = row.createDiv({ cls: "code-practice-cell-prompt is-output" });
@@ -322,19 +418,24 @@ export class CodePracticeView extends ItemView {
 		this.renderFigures(content, cell.result.figures || []);
 	}
 
-	stderrPresentation(status) {
+	stderrPresentation(status: PracticeStatus): { title: string; tone: string } {
 		if (["failed", "timeout"].includes(status)) return { title: "错误与诊断（stderr）", tone: "error" };
 		if (status === "stopped") return { title: "运行消息（stderr）", tone: "message" };
 		return { title: "消息与警告（stderr）", tone: "message" };
 	}
 
-	renderStream(parent, title, value, tone = "output") {
+	renderStream(
+		parent: HTMLElement,
+		title: string,
+		value: string,
+		tone = "output",
+	): void {
 		const block = parent.createDiv({ cls: `code-practice-stream is-${tone}` });
 		block.createEl("h3", { text: title });
 		block.createEl("pre", { text: value || "（无）" });
 	}
 
-	renderFigures(parent, figures) {
+	renderFigures(parent: HTMLElement, figures: string[]): void {
 		if (!figures.length) return;
 		const block = parent.createDiv({ cls: "code-practice-figures" });
 		block.createEl("h3", { text: "生成图片" });
@@ -347,26 +448,28 @@ export class CodePracticeView extends ItemView {
 		});
 	}
 
-	setLanguage(language) {
+	setLanguage(language: PracticeLanguage): void {
 		if (this.activeRunId || language === this.language) return;
 		this.language = language;
 		this.render();
 	}
 
-	currentInterpreter() {
+	currentInterpreter(): string {
 		return this.language === "python" ? this.plugin.settings.pythonExecutable : this.plugin.settings.rscriptExecutable;
 	}
 
-	invalidateCellsFrom(index) {
+	invalidateCellsFrom(index: number): void {
 		this.cells.slice(index).forEach((candidate) => {
 			candidate.result = null;
 			candidate.executionCount = null;
-			const output = this.contentEl.querySelector(`[data-cell-id="${candidate.id}"] .code-practice-cell-output`);
+			const output = this.contentEl.querySelector<HTMLElement>(
+				`[data-cell-id="${candidate.id}"] .code-practice-cell-output`,
+			);
 			if (output) output.empty();
 		});
 	}
 
-	clearAllCellCode() {
+	clearAllCellCode(): void {
 		if (this.activeRunId) return;
 		this.cells.forEach((cell) => {
 			cell.code = "";
@@ -377,14 +480,14 @@ export class CodePracticeView extends ItemView {
 		new Notice("已清空当前语言的代码和输出");
 	}
 
-	resetCellsToTwo() {
+	resetCellsToTwo(): void {
 		if (this.activeRunId) return;
 		this.cellsByLanguage[this.language] = this.createDefaultCells(this.language);
 		this.render();
 		new Notice("已重置为两个空单元格");
 	}
 
-	addCell(afterIndex) {
+	addCell(afterIndex: number): void {
 		if (this.activeRunId) return;
 		const cell = this.createCell("", this.language === "r" ? "# 在此输入 R 代码" : "# 在此输入 Python 代码");
 		this.cells.splice(afterIndex + 1, 0, cell);
@@ -392,7 +495,7 @@ export class CodePracticeView extends ItemView {
 		this.focusCell(cell.id);
 	}
 
-	removeCell(index) {
+	removeCell(index: number): void {
 		if (this.activeRunId || this.cells.length === 1) return;
 		this.cells.splice(index, 1);
 		this.invalidateCellsFrom(index);
@@ -400,7 +503,7 @@ export class CodePracticeView extends ItemView {
 		this.focusCell(this.cells[Math.min(index, this.cells.length - 1)].id);
 	}
 
-	moveCell(from, to) {
+	moveCell(from: number, to: number): void {
 		if (this.activeRunId || to < 0 || to >= this.cells.length) return;
 		const [cell] = this.cells.splice(from, 1);
 		this.cells.splice(to, 0, cell);
@@ -409,13 +512,18 @@ export class CodePracticeView extends ItemView {
 		this.focusCell(cell.id);
 	}
 
-	focusCell(cellId) {
+	focusCell(cellId: string): void {
 		window.setTimeout(() => {
-			this.contentEl.querySelector(`[data-cell-id="${cellId}"] .code-practice-cell-editor`)?.focus();
+			this.contentEl.querySelector<HTMLTextAreaElement>(
+				`[data-cell-id="${cellId}"] .code-practice-cell-editor`,
+			)?.focus();
 		}, 0);
 	}
 
-	async runCell(cellId, focusNext = false) {
+	async runCell(
+		cellId: string,
+		focusNext = false,
+	): Promise<CodePracticeResult | null> {
 		if (this.activeRunId) return null;
 		const index = this.cells.findIndex((cell) => cell.id === cellId);
 		if (index < 0) return null;
@@ -479,7 +587,7 @@ export class CodePracticeView extends ItemView {
 		return cell.result;
 	}
 
-	async runAllCells() {
+	async runAllCells(): Promise<void> {
 		if (this.activeRunId || this.runningAll) return;
 		this.runningAll = true;
 		try {
@@ -494,7 +602,7 @@ export class CodePracticeView extends ItemView {
 		}
 	}
 
-	stopCode() {
+	stopCode(): void {
 		if (!this.activeRunId || this.stopRequested) return;
 		this.stopRequested = true;
 		this.plugin.stopCodePractice(this.activeRunId);
@@ -502,7 +610,7 @@ export class CodePracticeView extends ItemView {
 		this.render();
 	}
 
-	openSaveModal() {
+	openSaveModal(): void {
 		if (this.activeRunId || !this.cells.some((cell) => cell.result)) return;
 		const defaultTitle = `${this.language === "python" ? "Python" : "R"} 练习 ${new Date().toLocaleDateString("zh-CN")}`;
 		new PracticeNoteModal(this.app, defaultTitle, async (form) => {
@@ -525,7 +633,7 @@ export class CodePracticeView extends ItemView {
 		}).open();
 	}
 
-	displayStatus(status) {
+	displayStatus(status: PracticeStatus): string {
 		return {
 			idle: "未运行",
 			running: this.stopRequested ? "正在停止" : "运行中",
@@ -536,7 +644,7 @@ export class CodePracticeView extends ItemView {
 		}[status] || status;
 	}
 
-	formatDuration(durationMs) {
+	formatDuration(durationMs: number): string {
 		if (!Number.isFinite(Number(durationMs))) return "-";
 		return Number(durationMs) < 1000 ? `${durationMs} ms` : `${(Number(durationMs) / 1000).toFixed(2)} s`;
 	}
