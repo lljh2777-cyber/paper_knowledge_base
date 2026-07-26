@@ -28,9 +28,20 @@ const pluginPath = path.resolve(
 	__dirname,
 	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/main.js",
 );
+const pluginSourcePath = path.resolve(
+	__dirname,
+	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/main.ts",
+);
+const dashboardDataSourcePath = path.resolve(
+	__dirname,
+	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/services/dashboard-data.ts",
+);
 const AgentDashboardPlugin = require(pluginPath);
 Module._load = originalLoad;
-const pluginSource = fs.readFileSync(pluginPath, "utf8");
+const pluginSource = [
+	fs.readFileSync(pluginSourcePath, "utf8"),
+	fs.readFileSync(dashboardDataSourcePath, "utf8"),
+].join("\n");
 
 const plugin = Object.create(AgentDashboardPlugin.prototype);
 plugin.taskRuns = [

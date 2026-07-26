@@ -1,11 +1,19 @@
 {
   "name": "agent-dashboard",
-  "version": "0.17.5",
+  "version": "0.18.0",
   "private": true,
   "description": "Obsidian Research Vault dashboard plugin",
   "scripts": {
-    "build": "node --check main.js",
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit",
     "test": "node ../../../../tool-library/tests/run_dashboard_tests.js",
-    "verify": "node --check main.js && node ../../../../tool-library/tests/run_dashboard_tests.js"
+    "verify": "tsc --noEmit && node esbuild.config.mjs && node ../../../../tool-library/tests/run_dashboard_tests.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.13.1",
+    "typescript": "^7.0.2"
   }
 }

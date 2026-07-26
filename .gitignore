@@ -19,6 +19,18 @@ tool-library/scripts/update_source_conclusions.py
 .obsidian/
 .claudian/
 
+# Keep the Agent Dashboard implementation versioned while excluding local state.
+!knowledge-base/
+knowledge-base/*
+!knowledge-base/.obsidian/
+knowledge-base/.obsidian/*
+!knowledge-base/.obsidian/plugins/
+knowledge-base/.obsidian/plugins/*
+!knowledge-base/.obsidian/plugins/agent-Dashboard/
+!knowledge-base/.obsidian/plugins/agent-Dashboard/**
+knowledge-base/.obsidian/plugins/agent-Dashboard/data.json
+knowledge-base/.obsidian/plugins/agent-Dashboard/node_modules/
+
 # Local dashboard implementation notes retained as workspace references
 /stateless-code-execution.md
 /本地Codex+Obsidian搭建AgentDashboard智能体操作中心.md
@@ -30,6 +42,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pnpm-store/
 
 # OS/editor noise
 .DS_Store
