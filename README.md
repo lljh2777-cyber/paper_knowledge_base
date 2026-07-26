@@ -1,120 +1,265 @@
-# Paper Knowledge Base
+# Research Vault 与 Agent Dashboard
 
-这是一个面向科研论文处理的 Obsidian 知识库工作流仓库。仓库只保存适合复用和版本管理的部分：项目级 AI 规则、工具脚本、模板和流程说明；原始论文、转换全文、个人 Obsidian 知识库和本机文献元数据默认不提交。
+这是一个面向科研论文、代码项目和可复用技术知识的本地优先工作区。项目将 Obsidian 知识库、Codex 智能体工作流、确定性 Python 工具和自研 Agent Dashboard 插件组合在一起，用于完成文献入库、PDF 深读、代码分析、知识检索、跨文献综合、知识库体检和结构化导出。
 
-## Workspace Layout
+项目并不把聊天记录当作知识库。可复用结论会被整理为带来源、处理深度、链接关系和索引的 Markdown 页面；原始 PDF、本地元数据、API 凭据和个人知识内容默认留在本机。
 
-本地工作区采用“tool-library + knowledge-base”的双目录结构：
+## 核心能力
 
-```text
-AGENTS.md               # 项目级 AI 操作规则
-README.md
-tool-library/                  # 可复用工具、模板、脚本和说明
-knowledge-base/                  # Obsidian vault，本地知识内容，默认不提交
-```
+- **文献工作流**：管理 DOI、URL、Zotero、BibTeX、RIS 和本地 PDF，执行去重、元数据规范化、全文转换和 source note 写作。
+- **证据分层**：明确区分 `metadata-only`、`abstract-level` 和 `x-ray`，防止把摘要阅读包装成全文深读。
+- **PDF 深读**：检查全文、方法、数据、图表、局限和证据链，并将关键图像嵌入对应的 source note。
+- **代码知识化**：静态分析 R/Python 项目，以“关键代码片段 + 中文解释”的形式生成项目页和脚本页。
+- **知识关联**：通过 source、method、concept、dataset、project、code、R 和 Linux 页面连接论文、方法与实现。
+- **透明检索**：使用“词法种子 → 图扩展 → 无匹配回退”的只读检索级联，展示实际检查过的 Vault 页面。
+- **质量控制**：检查 frontmatter、链接、孤立页、索引、证据深度、代码关系和 OKF 导出状态。
+- **本地代码练习**：在 Obsidian 中使用 Python/R 单元格，逐格运行、查看输出、停止任务并保存练习笔记。
+- **开放导出**：将 `knowledge-base/wiki/` 导出为 Open Knowledge Format v0.1 bundle。
 
-推荐在 Obsidian 中只打开：
-
-```text
-D:\Obsidian Vault\paper-knowledge-base\knowledge-base
-```
-
-这样 Obsidian 图谱主要展示处理后的知识文件，而不是工具、脚本、流程说明和中间产物。
-
-## Repository Scope
-
-提交到 Git 的内容包括：
-
-- `AGENTS.md`：当前工作区的 AI 操作约束、skill 路由、证据来源策略和目录规则。
-- `README.md`：仓库说明。
-- `tool-library/docs/`：流程、工具和说明文档。
-- `tool-library/scripts/`：适合公开复用的通用验证和维护脚本。
-- `tool-library/templates/`：source note、研究项目和综合分析模板。
-
-默认不提交：
-
-- `knowledge-base/`：Obsidian vault、知识笔记、本地插件配置。
-- `tool-library/raw/`：PDF、网页剪藏、导入包等原始材料。
-- `tool-library/converted/`：PDF/HTML/TeX 转换得到的全文 Markdown。
-- `tool-library/output/`：生成报告和临时输出。
-- `tool-library/metadata/`：`papers.csv`、导入报告等本机处理记录。
-- `tool-library/references.bib`：可能包含本机 Zotero key、PDF 路径或个人文献库信息。
-
-## Skill Architecture
-
-本工作区使用一个总控 skill 和多个子 skill。`research-vault` 只做路由；具体任务由 focused child skill 执行。
+## 系统组成
 
 ```text
-research-vault                  # 总控路由
-research-vault-ingest           # 入库、元数据、Zotero/BibTeX、去重
-research-vault-convert          # PDF/HTML/TeX/OCR 转 Markdown
-research-vault-source-note      # source note 生成、结构修复、中文正文
-research-vault-xray             # 全文深读、图表/方法/数据级分析
-research-vault-retrieval        # 只基于 vault 证据回答问题
-research-vault-synthesis        # 综述、MOC、项目、概念/方法页
-research-vault-lint             # 链接、重复、元数据、流程话术、unsupported claims 检查
+Codex / 自定义智能体
+        │
+        ├── research-vault* skills
+        ├── paper_xray / code_reader agents
+        │
+        ▼
+Agent Dashboard（Obsidian 插件）
+        │
+        ├── Codex CLI 执行后端
+        ├── Direct API Provider
+        ├── Python/R 本地执行器
+        └── 检索、体检和 OKF 确定性脚本
+        │
+        ▼
+Obsidian Research Vault
+sources / methods / concepts / code / projects / synthesis
 ```
 
-本地 skill 默认位于：
+工作区分为两层：
+
+- `tool-library/` 保存脚本、模板、流程和中间产物。
+- `knowledge-base/` 是 Obsidian Vault，只承载最终知识页面和插件。
+
+在 Obsidian 中应打开 `knowledge-base/`，而不是整个仓库根目录。
+
+## Agent Dashboard
+
+仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.22.0`。
+
+操作中心提供以下入口：
+
+| 操作 | 执行方式 | 主要边界 |
+|---|---|---|
+| 文献入库 | Codex CLI | 更新入库元数据、索引和日志，不生成论文结论 |
+| PDF 深读 | `paper_xray` 智能体 | 完成全文证据检查后才允许标记为 `x-ray` |
+| 代码分析 | `code_reader` 智能体 | 默认只做静态阅读，不运行或修改项目代码 |
+| 知识库检索 | Codex CLI 或 Direct API | 只读检索，支持连续对话、来源面板和图片输入 |
+| 综合分析 | Codex CLI | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面 |
+| 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
+| 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
+| OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
+| 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
+
+### 模型后端
+
+插件支持两种查询后端：
+
+1. **Codex CLI**：默认模式，复用本机 Codex 的认证、模型和沙箱配置。
+2. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
+
+Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
+
+## Skills 与智能体
+
+`research-vault` 仅负责路由，具体文件操作由对应阶段的子 skill 完成。
 
 ```text
-%USERPROFILE%\.codex\skills\
+research-vault-ingest       文献身份、元数据、去重和入库记录
+research-vault-convert      PDF/HTML/TeX/OCR 转 Markdown
+research-vault-source-note  source note 创建、规范化和修复
+research-vault-xray         全文深读、证据链和图表核验
+analyze-paper-figures       复杂多面板图像的专门分析
+research-vault-retrieval    基于 Vault 证据回答
+research-vault-synthesis    跨文献综合和知识枢纽页面
+research-vault-code         R/Python 项目静态分析
+research-vault-r            R 包、函数、概念和配方
+research-vault-linux        Linux、Shell、软件和文件格式
+research-vault-lint         结构、链接、证据和索引审计
 ```
 
-## Evidence Policy
-
-`AGENTS.md` 明确区分三种证据来源：
-
-- `Vault Evidence`：来自 `knowledge-base/`、`tool-library/converted/markdown/`、元数据记录和明确检查过的原始来源。
-- `Model Knowledge`：适合稳定的通用概念、方法、技术背景说明。
-- `Web Evidence`：适合当前信息、权威链接、数据库/工具文档、近期论文、标准和指南。
-
-如果用户询问的是通用 concept、method、tool 或背景知识，不必强行从已导入文献中找说明；可以使用模型知识，必要时联网核验。若把这些内容保存进 vault，需要明确标注为外部知识或通用背景，不能冒充 vault 文献证据。
-
-## Processing Depth
-
-论文处理必须区分深度：
-
-- `metadata-only`：只记录元数据、BibTeX、CSV、索引和缺口，不写论文结论。
-- `abstract-level`：基于摘要、标题页、highlights 或转换稿写保守结论。
-- `x-ray`：读全文、方法、图表、数据、局限和证据链后，才能写强结论和跨文献判断。
-
-当前批量导入笔记通常是 `abstract-level`，不能等同于全文深读。
-
-## Important Rules
-
-- Python 命令使用 `D:\python\python.exe`。
-- Markdown 读写使用 UTF-8。
-- 最终写入 Obsidian/vault 的 Markdown 正文默认使用简体中文。
-- 英文论文标题、路径、DOI、BibTeX/Zotero key、数据集编号、代码和 URL 保持原样。
-- Zotero 默认只读；除非明确要求，不向 Zotero 写入 PDF 或新条目。
-- `tool-library/raw/` 视为原始输入，不主动修改。
-- 禁止批量删除文件或目录。
-
-## Scripts
-
-当前提交到仓库的通用脚本包括：
+项目级持久智能体位于：
 
 ```text
-tool-library/scripts/validate_vault.py
+.codex/agents/paper_xray.toml
+.codex/agents/code_reader.toml
 ```
 
-本地工作区可能还有一次性批处理脚本，例如 Zotero 批量导入、本地 PDF 导入、旧笔记修复或结论重排脚本。这些脚本可能包含本机路径、个人文献库信息或一次性改写内容，默认不作为公开仓库内容提交。
+仓库级 R/Linux skills 位于 `.agents/skills/`。当前核心 `research-vault*` skills 由本机 Codex 从 `%USERPROFILE%\.codex\skills\` 加载；完整路由、写入所有权和交接规则见 [AGENTS.md](AGENTS.md)。
 
-本地验证：
+## 知识模型
+
+Obsidian 页面按职责分开：
+
+```text
+knowledge-base/
+  文献索引.md
+  研究主题索引.md
+  研究方法索引.md
+  代码项目索引.md
+  R知识索引.md
+  Linux与命令行索引.md
+  wiki/
+    sources/       单篇论文或来源
+    methods/       方法、模型、协议和统计流程
+    concepts/      理论、机制和概念
+    datasets/      数据集、队列和基准
+    entities/      软件、基因、疾病和其他实体
+    projects/      原子研究任务与研究想法
+    code/          代码项目页和脚本页
+    r/             R 包、函数、概念和配方
+    linux/         命令、Shell、软件和格式
+    mocs/          主题导航图
+    synthesis/     跨文献比较与综述
+```
+
+页面之间使用 Obsidian wikilink 建立关系。索引用于方向导航，图结构用于检索扩展；检索分数和链接本身不被视为科学证据，回答前仍需读取实际页面。
+
+## 证据与处理深度
+
+项目要求明确标注内容依据：
+
+- **Vault Evidence**：来自已读取的 source note、转换全文、元数据或明确检查过的原始材料。
+- **Model Knowledge**：稳定的一般背景知识，不能冒充已导入文献的结论。
+- **Web Evidence**：近期信息、官方文档、标准、数据库和外部论文，需要与 Vault 证据分开。
+
+论文处理深度：
+
+- `metadata-only`：仅支持身份、元数据、索引、缺口和路径。
+- `abstract-level`：支持基于摘要或有限文本的保守结论。
+- `x-ray`：已检查全文、方法、图表、数据、局限和证据链，可支持强论文结论。
+
+## 快速开始
+
+### 1. 环境
+
+推荐环境：
+
+- Windows 10/11
+- Obsidian Desktop `1.8.0` 或更高版本
+- Codex App 或 Codex CLI
+- Python 3
+- R / `Rscript`，仅代码练习或 R 工作流需要
+- Node.js 与 pnpm/npm，仅开发插件时需要
+
+本工作区约定使用：
+
+```text
+D:\python\python.exe
+```
+
+Python、Rscript、Codex CLI 和项目根目录也可以在 Agent Dashboard 设置中调整。
+
+### 2. 获取项目
 
 ```powershell
-D:\python\python.exe tool-library\scripts\validate_vault.py
+git clone https://github.com/lljh2777-cyber/paper_knowledge_base.git
+cd paper_knowledge_base
 ```
 
-验证脚本会检查目录结构、source note 结构、frontmatter、索引覆盖、BibTeX/CSV 关系、Obsidian 图谱配置和常见流程污染。
+### 3. 打开 Vault
 
-## Typical Workflow
+在 Obsidian 中将以下目录作为 Vault 打开：
 
-1. Zotero 或本地 PDF 进入 `research-vault-ingest` 做查重、元数据和路径记录。
-2. 需要全文文本时，用 `research-vault-convert` 生成 `tool-library/converted/markdown/`。
-3. 生成或修复 source note 时，用 `research-vault-source-note`。
-4. 高价值论文需要真正用于研究判断时，用 `research-vault-xray` 做全文深读。
-5. 回答“我们的库里怎么看”时，用 `research-vault-retrieval`。
-6. 写综述、MOC、项目页或概念页时，用 `research-vault-synthesis`。
-7. 批量导入或大改后，用 `research-vault-lint` 和 `validate_vault.py` 审查。
+```text
+<project-root>\knowledge-base
+```
+
+进入 Obsidian 的第三方插件设置，启用 `Agent Dashboard`。插件构建产物已经随仓库提供，普通使用不需要安装 Node.js 依赖。
+
+### 4. 配置执行环境
+
+在 Agent Dashboard 设置中依次检查：
+
+1. 项目根目录。
+2. Python、Rscript 和 Codex CLI 路径。
+3. Codex CLI 连接状态。
+4. 可选的 Direct API Provider、SecretStorage 凭据、模型列表和连接测试。
+
+`.codex/config.toml` 是项目级 Codex 配置，只作用于本项目。开始处理真实文献前，请先阅读 [AGENTS.md](AGENTS.md) 中的安全、证据和写入边界。
+
+## 常用命令
+
+### 知识库体检
+
+```powershell
+D:\python\python.exe tool-library\scripts\lint_vault.py
+```
+
+输出完整 JSON 报告：
+
+```powershell
+D:\python\python.exe tool-library\scripts\lint_vault.py --json
+```
+
+### 只读检索预检
+
+```powershell
+D:\python\python.exe tool-library\scripts\retrieve_vault.py `
+  --project-root . `
+  --query "当前知识库关于 scRNA-seq 质控有哪些依据？"
+```
+
+该脚本只输出检索路由 JSON，不生成回答，也不写入 Vault。
+
+### OKF 预检与导出
+
+```powershell
+D:\python\python.exe tool-library\scripts\export_okf.py --preflight-only
+D:\python\python.exe tool-library\scripts\export_okf.py
+```
+
+### 插件开发与验证
+
+```powershell
+cd knowledge-base\.obsidian\plugins\agent-Dashboard
+pnpm install
+pnpm verify
+```
+
+也可以分别运行：
+
+```powershell
+pnpm typecheck
+pnpm build
+pnpm test
+```
+
+`src/` 是插件源码，`main.js` 是供 Obsidian 加载的生成文件。修改源码后必须重新构建并运行回归测试。
+
+## 数据与隐私边界
+
+Git 默认忽略：
+
+- `knowledge-base/` 中的本地知识内容，但保留 Agent Dashboard 实现。
+- `tool-library/raw/` 中的 PDF、网页剪藏和导入包。
+- `tool-library/converted/` 中的全文转换结果。
+- `tool-library/output/` 和 `tool-library/metadata/` 中的本地报告与记录。
+- `tool-library/references.bib`。
+- Agent Dashboard 的 `data.json`、`node_modules/` 和 SecretStorage 凭据。
+
+`tool-library/raw/` 被视为只读来源。项目禁止递归批量删除，Zotero 默认只读，高影响修复、批量改名、页面合并、schema 变更和依赖安装需要人工确认。
+
+## 项目状态与限制
+
+- Agent Dashboard 当前为桌面端插件，不支持 Obsidian Mobile。
+- 知识库检索不是向量数据库；当前核心是词法检索、wikilink 图扩展和可解释回退。
+- Direct API 联网来源的可验证程度取决于供应商协议。Qwen OpenAI 兼容接口可能只在回答正文中返回链接，插件会将其标记为模型提供、尚未独立核验。
+- 代码练习使用独立进程和累计重放模拟 notebook 单元格，不是持久 Jupyter/R 内核。
+- 仓库不会公开提交个人论文库、PDF、API Key 或本地 Zotero 数据。
+
+## 相关文档
+
+- [AGENTS.md](AGENTS.md)：AI 路由、证据来源、处理深度、目录所有权和安全规则。
+- [Agent Dashboard 源码说明](knowledge-base/.obsidian/plugins/agent-Dashboard/src/README.md)：插件模块结构与构建约束。
