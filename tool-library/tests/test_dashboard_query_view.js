@@ -64,6 +64,11 @@ assert.ok(
 	"code-practice rendering should preserve the current scroll position",
 );
 assert.ok(
+	pluginSource.includes('this.language === "r"')
+		&& pluginSource.includes('editor.setRangeText("<-", editor.selectionStart, editor.selectionEnd, "end")'),
+	"R code-practice cells should support Alt+- for the assignment operator",
+);
+assert.ok(
 	pluginSource.includes('isRunning ? "点击停止" : "空闲"'),
 	"running Dashboard actions should expose a manual stop control",
 );

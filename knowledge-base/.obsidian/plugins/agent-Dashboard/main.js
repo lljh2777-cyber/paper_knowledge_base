@@ -2487,6 +2487,20 @@ class CodePracticeView extends ItemView {
 			this.updateNotebookControls();
 		});
 		editor.addEventListener("keydown", (event) => {
+			const isRAssignmentShortcut = this.language === "r"
+				&& event.altKey
+				&& !event.ctrlKey
+				&& !event.metaKey
+				&& !event.shiftKey
+				&& !event.isComposing
+				&& (event.key === "-" || event.code === "Minus" || event.code === "NumpadSubtract");
+			if (isRAssignmentShortcut) {
+				event.preventDefault();
+				event.stopPropagation();
+				editor.setRangeText("<-", editor.selectionStart, editor.selectionEnd, "end");
+				editor.dispatchEvent(new Event("input", { bubbles: true }));
+				return;
+			}
 			if (event.key === "Tab") {
 				event.preventDefault();
 				const start = editor.selectionStart;
