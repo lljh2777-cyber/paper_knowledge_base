@@ -2748,9 +2748,26 @@
 
 .code-practice-runtime {
 	display: grid;
-	grid-template-columns: auto minmax(0, 1fr);
+	grid-template-columns: minmax(260px, 1fr) auto minmax(0, 1fr);
 	gap: 14px;
 	align-items: center;
+}
+
+.code-practice-security-notice {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	min-width: 0;
+	color: var(--text-warning);
+	font-size: var(--font-ui-small);
+	line-height: 1.45;
+}
+
+.code-practice-security-notice svg {
+	flex: 0 0 auto;
+	width: 16px;
+	height: 16px;
+	margin-top: 2px;
 }
 
 .code-practice-language-switch {

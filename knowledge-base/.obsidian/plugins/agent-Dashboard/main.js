@@ -640,6 +640,7 @@ class LLMProvider {
 			headers: options.headers || {},
 			body: options.body,
 			timeoutMs: options.timeoutMs || this.config.timeoutSeconds * 1000,
+			registerCancel: options.registerCancel,
 		});
 	}
 
@@ -684,7 +685,7 @@ class OpenAIProvider extends LLMProvider {
 		return normalizeProviderModelList(this.requireJson(result, "模型列表"));
 	}
 
-	async complete(request) {
+	async complete(request, options = {}) {
 		const result = await this.request("v1/responses", {
 			method: "POST",
 			headers: await this.headers(),
@@ -694,6 +695,7 @@ class OpenAIProvider extends LLMProvider {
 				max_output_tokens: request.maxTokens || 256,
 				store: false,
 			},
+			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
 		return { text: extractOpenAIText(payload), raw: payload };
@@ -774,11 +776,12 @@ class AnthropicProvider extends LLMProvider {
 		};
 	}
 
-	async complete(request) {
+	async complete(request, options = {}) {
 		const result = await this.request("v1/messages", {
 			method: "POST",
 			headers: await this.headers(),
 			body: this.messageBody(request),
+			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
 		const text = Array.isArray(payload.content)
@@ -863,7 +866,7 @@ class OpenAICompatibleProvider extends LLMProvider {
 		return body;
 	}
 
-	async complete(request) {
+	async complete(request, options = {}) {
 		const result = await this.request("v1/chat/completions", {
 			method: "POST",
 			headers: await this.headers(),
@@ -871,6 +874,7 @@ class OpenAICompatibleProvider extends LLMProvider {
 			timeoutMs: request.webSearch === true
 				? this.config.webSearch.timeoutSeconds * 1000
 				: undefined,
+			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
 		return { text: extractOpenAIText(payload), raw: payload };
@@ -930,11 +934,12 @@ class OllamaProvider extends LLMProvider {
 		};
 	}
 
-	async complete(request) {
+	async complete(request, options = {}) {
 		const result = await this.request("api/chat", {
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request),
+			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
 		return { text: payload.message?.content || "", raw: payload };
@@ -1214,11 +1219,36 @@ class DashboardDataService {
 	constructor(app, plugin) {
 		this.app = app;
 		this.plugin = plugin;
+		this.recordByPath = new Map();
+		this.initialized = false;
+		this.loadVersion = 0;
 	}
 
-	async load() {
-		const files = this.app.vault.getMarkdownFiles();
-		const records = await Promise.all(files.map((file) => this.readRecord(file)));
+	async load(changes = []) {
+		const version = ++this.loadVersion;
+		const nextRecords = new Map(this.recordByPath);
+		if (!this.initialized) {
+			const files = this.app.vault.getMarkdownFiles();
+			const records = await Promise.all(files.map((file) => this.readRecord(file)));
+			if (version !== this.loadVersion) return null;
+			nextRecords.clear();
+			records.forEach((record) => nextRecords.set(record.path, record));
+		} else {
+			for (const change of changes) {
+				if (change.type === "delete") {
+					nextRecords.delete(normalizePath(change.path));
+					continue;
+				}
+				if (change.file?.extension === "md") {
+					const record = await this.readRecord(change.file);
+					nextRecords.set(record.path, record);
+				}
+			}
+			if (version !== this.loadVersion) return null;
+		}
+		this.recordByPath = nextRecords;
+		this.initialized = true;
+		const records = [...nextRecords.values()];
 		const recordByPath = new Map(records.map((record) => [record.path, record]));
 		const sourceRecords = records.filter((record) => record.path.startsWith("wiki/sources/"));
 		const methodRecords = records.filter((record) => record.path.startsWith("wiki/methods/"));
@@ -1247,7 +1277,7 @@ class DashboardDataService {
 			: Math.max(0, Math.min(100, 100 - linkReport.broken.length * 2 - missingFrontmatter));
 		const now = new Date();
 
-		return {
+		const result = {
 			header: {
 				scope: "研究知识库",
 				title: "文献知识库智能体控制台",
@@ -1295,18 +1325,23 @@ class DashboardDataService {
 			coverage,
 			okf,
 		};
+		return version === this.loadVersion ? result : null;
 	}
 
 	async readRecord(file) {
 		const text = await this.app.vault.cachedRead(file);
-		const frontmatter = this.parseFrontmatter(text);
+		const cachedFrontmatter = this.app.metadataCache?.getFileCache?.(file)?.frontmatter;
+		const frontmatter = cachedFrontmatter && typeof cachedFrontmatter === "object"
+			? { ...cachedFrontmatter }
+			: this.parseFrontmatter(text);
 		return {
 			file,
 			path: normalizePath(file.path),
 			name: file.basename,
 			text,
 			frontmatter,
-			hasFrontmatter: text.startsWith("---") && Object.keys(frontmatter).length > 0,
+			hasFrontmatter: Boolean(cachedFrontmatter)
+				|| (text.startsWith("---") && Object.keys(frontmatter).length > 0),
 			type: String(frontmatter.type || this.inferType(file.path)),
 			tags: this.normalizeTags(frontmatter.tags),
 			mtime: file.stat.mtime,
@@ -1545,64 +1580,173 @@ class DashboardDataService {
 	}
 
 	async computeKnowledgeGaps(records, sourceRecords) {
-		const gaps = [];
-		const methodCandidates = new Set();
+		const candidates = [];
+		const methodCandidates = new Map();
 		for (const record of records) {
 			const matches = record.text.matchAll(/[-*]\s+([^。\n]+?)（待建方法页/g);
 			for (const match of matches) {
-				methodCandidates.add(match[1].replace(/\[\[[^\]]+\]\]/g, "").trim());
+				const title = match[1].replace(/\[\[[^\]]+\]\]/g, "").trim();
+				const key = this.normalizeGapKey(title);
+				if (!key || this.methodHubExists(records, title)) continue;
+				const existing = methodCandidates.get(key) || { title, paths: [] };
+				existing.paths.push(record.path);
+				methodCandidates.set(key, existing);
 			}
 		}
-		for (const title of Array.from(methodCandidates).slice(0, 4)) {
-			gaps.push({
+		for (const candidate of methodCandidates.values()) {
+			candidates.push({
+				id: this.makeGapId("method", candidate.title),
 				type: "method",
-				title: `待建方法页：${title}`,
+				title: `待建方法页：${candidate.title}`,
 				severity: "medium",
+				score: 40 + candidate.paths.length * 5,
+				source: "code-handoff",
+				evidence: candidate.paths,
+				status: "open",
 				actionId: "synthesis",
-				actionInput: this.buildMethodGapInput(title),
+				actionInput: this.buildMethodGapInput(candidate.title),
 			});
 		}
+		const inboundCounts = this.computeInboundReferenceCounts(records);
 		const needXray = sourceRecords
 			.filter((record) => {
 				const status = String(record.frontmatter.status || "").toLowerCase();
 				const tags = record.tags.map((tag) => tag.toLowerCase());
 				return status !== "x-ray" && status !== "xray" && !tags.includes("x-ray");
 			})
-			.sort((a, b) => b.mtime - a.mtime)
-			.slice(0, 3);
-		for (const record of needXray) {
+			.map((record) => ({
+				record,
+				score: this.paperGapScore(record, inboundCounts.get(record.path) || 0),
+			}))
+			.sort((a, b) => b.score - a.score)
+			.slice(0, 4);
+		for (const item of needXray) {
+			const record = item.record;
 			const title = record.frontmatter.title || record.name;
-			gaps.push({
+			candidates.push({
+				id: this.makeGapId("paper", record.path),
 				type: "paper",
 				title: `待 x-ray 深读：${title}`,
 				severity: "high",
+				score: item.score,
+				source: "processing-depth",
+				evidence: [record.path],
+				status: "open",
 				actionId: "pdf-xray",
 				actionInput: this.buildPaperGapInput(record, title),
 			});
 		}
-		if (!records.some((record) => record.path.startsWith("wiki/methods/single-cell-rna-seq"))) {
-			const title = "Single-cell RNA-seq";
-			gaps.push({
-				type: "method",
-				title: `缺少 ${title} 方法枢纽`,
-				severity: "high",
-				actionId: "synthesis",
-				actionInput: this.buildMethodGapInput(title),
+		const lintFindings = this.plugin.getLintStatus().latest?.findings;
+		for (const finding of Array.isArray(lintFindings) ? lintFindings : []) {
+			if (!["error", "warning"].includes(finding.severity)) continue;
+			const actionId = finding.fixable === true ? "vault-lint-fix" : "vault-lint";
+			candidates.push({
+				id: this.makeGapId("lint", `${finding.category}:${finding.code}:${finding.path}`),
+				type: "quality",
+				title: `${finding.path || finding.category}：${finding.message}`,
+				severity: finding.severity === "error" ? "high" : "medium",
+				score: finding.severity === "error" ? 95 : 55,
+				source: "lint",
+				evidence: [finding.path].filter(Boolean),
+				status: "open",
+				actionId,
+				actionInput: finding.fixable === true
+					? "读取最新知识库体检报告，逐项核验并修复其中仍然存在且属于低风险的 fixable finding；完成后重新体检。"
+					: "",
 			});
 		}
 		const okfStatus = this.plugin.getOkfExportStatus();
 		if (!okfStatus.exporterAvailable) {
-			gaps.push({ type: "okf", title: "OKF 导出器不可用", severity: "high", actionId: "okf-export" });
+			candidates.push({ type: "okf", title: "OKF 导出器不可用", severity: "high", score: 90, actionId: "okf-export" });
 		} else if (okfStatus.error) {
-			gaps.push({ type: "okf", title: "OKF 最近导出状态无法读取", severity: "high", actionId: "okf-export" });
+			candidates.push({ type: "okf", title: "OKF 最近导出状态无法读取", severity: "high", score: 85, actionId: "okf-export" });
 		} else if (!okfStatus.latest) {
-			gaps.push({ type: "okf", title: "尚未生成 OKF bundle", severity: "medium", actionId: "okf-export" });
+			candidates.push({ type: "okf", title: "尚未生成 OKF bundle", severity: "medium", score: 45, actionId: "okf-export" });
 		} else if (!okfStatus.latest.conformant) {
-			gaps.push({ type: "okf", title: "最近的 OKF bundle 未通过 conformance", severity: "high", actionId: "okf-export" });
+			candidates.push({ type: "okf", title: "最近的 OKF bundle 未通过 conformance", severity: "high", score: 80, actionId: "okf-export" });
 		} else if (Number(okfStatus.latest.unresolved_link_count || 0) > 0) {
-			gaps.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium", actionId: "okf-export" });
+			candidates.push({ type: "okf", title: `OKF 导出存在 ${okfStatus.latest.unresolved_link_count} 个未解析链接`, severity: "medium", score: 50, actionId: "okf-export" });
 		}
-		return gaps.slice(0, 6);
+		const deduplicated = new Map();
+		for (const gap of candidates) {
+			const id = gap.id || this.makeGapId(gap.type, gap.title);
+			const normalized = {
+				source: gap.source || gap.type,
+				evidence: Array.isArray(gap.evidence) ? [...new Set(gap.evidence)] : [],
+				status: "open",
+				...gap,
+				id,
+			};
+			const existing = deduplicated.get(id);
+			if (!existing || Number(normalized.score || 0) > Number(existing.score || 0)) {
+				deduplicated.set(id, normalized);
+			}
+		}
+		return [...deduplicated.values()]
+			.sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+			.slice(0, 8);
+	}
+
+	normalizeGapKey(value) {
+		return String(value || "")
+			.toLowerCase()
+			.replace(/\[\[|\]\]/g, "")
+			.replace(/[^\p{L}\p{N}]+/gu, "");
+	}
+
+	makeGapId(type, value) {
+		const input = `${type}:${this.normalizeGapKey(value)}`;
+		let hash = 2166136261;
+		for (let index = 0; index < input.length; index += 1) {
+			hash ^= input.charCodeAt(index);
+			hash = Math.imul(hash, 16777619);
+		}
+		return `${type}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+	}
+
+	methodHubExists(records, title) {
+		const candidate = this.normalizeGapKey(title);
+		if (!candidate) return false;
+		return records.some((record) => {
+			if (record.type !== "method" && !record.path.startsWith("wiki/methods/")) return false;
+			const values = [
+				record.name,
+				record.frontmatter.title,
+				record.frontmatter.title_zh,
+				...(Array.isArray(record.frontmatter.aliases) ? record.frontmatter.aliases : []),
+			];
+			return values.some((value) => {
+				const key = this.normalizeGapKey(value);
+				return key && (key === candidate || (key.length >= 6 && candidate.includes(key)));
+			});
+		});
+	}
+
+	computeInboundReferenceCounts(records) {
+		const counts = new Map();
+		for (const record of records) {
+			for (const match of record.text.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
+				const target = normalizePath(match[1]).replace(/\.md$/i, "");
+				for (const candidate of records) {
+					const candidatePath = candidate.path.replace(/\.md$/i, "");
+					if (target === candidatePath || target === candidate.name) {
+						counts.set(candidate.path, (counts.get(candidate.path) || 0) + 1);
+						break;
+					}
+				}
+			}
+		}
+		return counts;
+	}
+
+	paperGapScore(record, inboundCount) {
+		const status = String(record.frontmatter.status || "").toLowerCase();
+		const depth = String(record.frontmatter.analysis_depth || "").toLowerCase();
+		const depthScore = status === "abstract-level" || depth === "abstract-level" ? 70 : 55;
+		const missingEvidence = ["source_path", "converted_path", "doi"]
+			.filter((key) => !String(record.frontmatter[key] || "").trim())
+			.length;
+		return depthScore + Math.min(20, inboundCount * 4) + missingEvidence * 3;
 	}
 
 	buildMethodGapInput(title) {
@@ -1979,7 +2123,9 @@ class TaskResultModal extends Modal {
 				text: this.run.summary,
 			});
 		}
-		const output = this.run.output || this.run.error || "该任务尚未产生输出。";
+		const output = this.plugin.getTaskRunOutput(this.run)
+			|| this.run.error
+			|| "该任务尚未产生输出。";
 		contentEl.createEl("pre", {
 			cls: "agent-dashboard-result-output",
 			text: output,
@@ -2180,6 +2326,14 @@ class CodePracticeView extends ItemView {
 
 	renderRuntime(parent) {
 		const bar = parent.createDiv({ cls: "code-practice-runtime" });
+		const warning = bar.createDiv({
+			cls: "code-practice-security-notice",
+			attr: { role: "note" },
+		});
+		setIcon(warning.createSpan(), "shield-alert");
+		warning.createSpan({
+			text: "仅运行可信代码：代码以当前用户权限在本机执行；规则拦截只用于减少误操作，不是安全沙箱。",
+		});
 		const languages = bar.createDiv({ cls: "code-practice-language-switch", attr: { "aria-label": "运行语言" } });
 		[["python", "Python"], ["r", "R"]].forEach(([value, label]) => {
 			const button = languages.createEl("button", {
@@ -2194,6 +2348,7 @@ class CodePracticeView extends ItemView {
 		const details = bar.createDiv({ cls: "code-practice-runtime-details" });
 		this.createRuntimeDetail(details, "解释器", this.currentInterpreter());
 		this.createRuntimeDetail(details, "工作目录", "tool-library/output/code-practice/figures/<run-id>");
+		this.createRuntimeDetail(details, "权限边界", "当前 Windows 用户；可访问工作目录外路径");
 	}
 
 	createRuntimeDetail(parent, label, value) {
@@ -3931,7 +4086,7 @@ class QueryWikiView extends ItemView {
 				retrievalTrace: event.payload || null,
 				retrievalMode: event.mode === "vault" ? "vault" : "web",
 				progress: this.progressFromTrace(event.payload),
-			}).then(() => this.render({ scrollToBottom: true }));
+			}, "debounced").then(() => this.render({ scrollToBottom: true }));
 			this.updateProgressText(this.progressFromTrace(event.payload));
 			return;
 		}
@@ -3975,7 +4130,12 @@ class QueryWikiView extends ItemView {
 			return;
 		}
 		if (event.type === "status" && event.label) {
-			void this.plugin.updateQueryMessage(sessionId, messageId, { progress: String(event.label) });
+			void this.plugin.updateQueryMessage(
+				sessionId,
+				messageId,
+				{ progress: String(event.label) },
+				"debounced",
+			);
 			this.updateProgressText(String(event.label));
 		}
 	}
@@ -4105,6 +4265,9 @@ class DashboardView extends ItemView {
 		this.gapsFilter = "all";
 		this.monthFormatter = new Intl.DateTimeFormat("zh-CN", { month: "short" });
 		this.reloadTimer = null;
+		this.pendingVaultChanges = new Map();
+		this.loadSequence = 0;
+		this.closed = false;
 	}
 
 	getViewType() {
@@ -4120,21 +4283,51 @@ class DashboardView extends ItemView {
 	}
 
 	async onOpen() {
+		this.closed = false;
 		this.renderLoading();
 		this.registerVaultRefreshEvents();
 		await this.loadAndRender();
 	}
 
 	async onClose() {
+		this.closed = true;
+		this.loadSequence += 1;
+		if (this.reloadTimer) window.clearTimeout(this.reloadTimer);
 		this.contentEl.empty();
 	}
 
 	registerVaultRefreshEvents() {
-		const refresh = () => this.scheduleReload();
-		this.registerEvent(this.app.vault.on("create", refresh));
-		this.registerEvent(this.app.vault.on("modify", refresh));
-		this.registerEvent(this.app.vault.on("delete", refresh));
-		this.registerEvent(this.app.vault.on("rename", refresh));
+		this.registerEvent(this.app.vault.on("create", (file) => this.queueVaultChange("upsert", file)));
+		this.registerEvent(this.app.vault.on("modify", (file) => this.queueVaultChange("upsert", file)));
+		this.registerEvent(this.app.vault.on("delete", (file) => this.queueVaultChange("delete", file)));
+		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+			let queuedOldPath = false;
+			if (this.isDashboardWikiPath(oldPath)) {
+				this.pendingVaultChanges.set(normalizePath(oldPath), {
+					type: "delete",
+					path: oldPath,
+				});
+				queuedOldPath = true;
+			}
+			this.queueVaultChange("upsert", file);
+			if (queuedOldPath && !this.isDashboardWikiPath(file?.path)) this.scheduleReload();
+		}));
+	}
+
+	isDashboardWikiPath(value) {
+		const normalized = normalizePath(String(value || ""));
+		return normalized.startsWith("wiki/") && normalized.toLowerCase().endsWith(".md");
+	}
+
+	queueVaultChange(type, file) {
+		const filePath = normalizePath(String(file?.path || ""));
+		if (!this.isDashboardWikiPath(filePath)) return;
+		this.pendingVaultChanges.set(filePath, {
+			type,
+			path: filePath,
+			file: type === "upsert" ? file : null,
+		});
+		this.scheduleReload();
 	}
 
 	scheduleReload() {
@@ -4142,15 +4335,22 @@ class DashboardView extends ItemView {
 			window.clearTimeout(this.reloadTimer);
 		}
 		this.reloadTimer = window.setTimeout(() => {
-			this.loadAndRender();
+			this.reloadTimer = null;
+			const changes = [...this.pendingVaultChanges.values()];
+			this.pendingVaultChanges.clear();
+			void this.loadAndRender(changes);
 		}, 1200);
 	}
 
-	async loadAndRender() {
+	async loadAndRender(changes = []) {
+		const sequence = ++this.loadSequence;
 		try {
-			this.data = await this.dataService.load();
+			const data = await this.dataService.load(changes);
+			if (!data || this.closed || sequence !== this.loadSequence) return;
+			this.data = data;
 			this.renderDashboard();
 		} catch (error) {
+			if (this.closed || sequence !== this.loadSequence) return;
 			console.error("Agent Dashboard failed to load vault data", error);
 			this.renderError(error);
 		}
@@ -4620,6 +4820,7 @@ class DashboardView extends ItemView {
 			method: "方法",
 			paper: "文献",
 			code: "代码",
+			quality: "质量",
 			okf: "OKF",
 		}[type] || type;
 	}
@@ -5350,9 +5551,13 @@ class AgentDashboardSettingTab extends PluginSettingTab {
 module.exports = class AgentDashboardPlugin extends Plugin {
 	async onload() {
 		this.activeProcesses = new Map();
+		this.activeProcessStops = new Map();
 		this.activePracticeRuns = new Map();
 		this.providerRuntimeState = new Map();
 		this.directQueryRuns = new Map();
+		this.settingsSaveQueue = Promise.resolve();
+		this.settingsSaveTimer = null;
+		this.settingsSaveWaiters = [];
 		this.providerEditorProfileId = "";
 		this.lastContextFile = this.app.workspace.getActiveFile();
 		await this.loadSettings();
@@ -5392,17 +5597,19 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	}
 
 	onunload() {
+		void this.flushScheduledSettingsSave();
 		for (const runId of this.activePracticeRuns.keys()) {
 			this.stopCodePractice(runId);
 		}
-		for (const child of this.activeProcesses.values()) {
-			if (!child.killed) child.kill();
+		for (const runId of this.activeProcesses.keys()) {
+			this.requestVaultActionStop(runId);
 		}
 		for (const token of this.directQueryRuns.values()) {
 			token.cancelled = true;
 			if (typeof token.abort === "function") token.abort();
 		}
 		this.activeProcesses.clear();
+		this.activeProcessStops.clear();
 		this.directQueryRuns.clear();
 	}
 
@@ -5648,6 +5855,16 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			this.settings.projectRoot = this.inferProjectRoot();
 		}
 		let changed = false;
+		for (const run of this.taskRuns) {
+			if (!run.outputPath && String(run.output || "").length > 12000) {
+				try {
+					run.outputPath = await this.persistTaskRunOutput(run);
+					changed = true;
+				} catch (error) {
+					console.warn("Could not migrate Dashboard run output", error);
+				}
+			}
+		}
 		if (
 			JSON.stringify(storedSettings.providerProfiles || []) !== JSON.stringify(normalizedProfiles)
 			|| this.hasPlaintextCredentialFields(storedSettings)
@@ -5744,12 +5961,58 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		await this.saveData({
+		const snapshot = JSON.parse(JSON.stringify({
 			settings: this.sanitizeSettingsForStorage(),
-			taskRuns: this.taskRuns,
-			querySessions: this.querySessions,
+			taskRuns: this.taskRuns.map((run) => ({
+				...run,
+				output: String(run.output || "").slice(0, 12000),
+				error: String(run.error || "").slice(0, 4000),
+			})),
+			querySessions: this.querySessions.map((session) => ({
+				...session,
+				messages: session.messages.slice(-30).map((message) => ({
+					...message,
+					content: String(message.content || "").slice(0, 8000),
+					error: String(message.error || "").slice(0, 4000),
+				})),
+			})),
 			activeQuerySessionId: this.activeQuerySessionId,
+		}));
+		this.settingsSaveQueue = (this.settingsSaveQueue || Promise.resolve())
+			.catch((error) => {
+				console.error("Previous Dashboard settings save failed", error);
+			})
+			.then(() => this.saveData(snapshot));
+		await this.settingsSaveQueue;
+	}
+
+	scheduleSettingsSave(delayMs = 400) {
+		if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
+		if (this.settingsSaveTimer === undefined) this.settingsSaveTimer = null;
+		if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
+		return new Promise((resolve, reject) => {
+			this.settingsSaveWaiters.push({ resolve, reject });
+			this.settingsSaveTimer = window.setTimeout(() => {
+				void this.flushScheduledSettingsSave();
+			}, delayMs);
 		});
+	}
+
+	async flushScheduledSettingsSave() {
+		if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
+		if (this.settingsSaveTimer === undefined) this.settingsSaveTimer = null;
+		if (this.settingsSaveTimer !== null) {
+			window.clearTimeout(this.settingsSaveTimer);
+			this.settingsSaveTimer = null;
+		}
+		const waiters = this.settingsSaveWaiters.splice(0);
+		if (!waiters.length) return;
+		try {
+			await this.saveSettings();
+			waiters.forEach(({ resolve }) => resolve());
+		} catch (error) {
+			waiters.forEach(({ reject }) => reject(error));
+		}
 	}
 
 	hasPlaintextCredentialFields(value) {
@@ -5891,89 +6154,132 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	}
 
 	async providerHttpRequest(options) {
-		if (typeof requestUrl !== "function") {
-			throw new ProviderConnectionError(
-				"http-unavailable",
-				"当前 Obsidian 版本不支持 requestUrl",
-				{ endpoint: options.url },
-			);
-		}
 		const timeoutMs = Math.max(3000, Math.min(120000, Number(options.timeoutMs || 20000)));
-		let timer = null;
-		const timeout = new Promise((_, reject) => {
-			timer = window.setTimeout(() => {
-				reject(new ProviderConnectionError(
-					"timeout",
+		const maxResponseBytes = Math.max(
+			65536,
+			Math.min(20 * 1024 * 1024, Number(options.maxResponseBytes || 5 * 1024 * 1024)),
+		);
+		return new Promise((resolve, reject) => {
+			let endpoint;
+			try {
+				endpoint = new URL(options.url);
+			} catch {
+				reject(new ProviderConnectionError("configuration", `无效 endpoint：${options.url}`));
+				return;
+			}
+			const transport = endpoint.protocol === "https:" ? https : http;
+			const body = options.body === undefined ? "" : JSON.stringify(options.body);
+			const headers = {
+				...(options.headers || {}),
+				...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
+			};
+			let settled = false;
+			let phase = "connect";
+			let responseBytes = 0;
+			const chunks = [];
+			const finish = (callback) => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(totalTimer);
+				callback();
+			};
+			const request = transport.request(endpoint, {
+				method: options.method || "GET",
+				headers,
+			}, (response) => {
+				phase = "read";
+				response.setEncoding("utf8");
+				response.on("data", (chunk) => {
+					responseBytes += Buffer.byteLength(chunk);
+					if (responseBytes > maxResponseBytes) {
+						request.destroy(new ProviderConnectionError(
+							"response-too-large",
+							`响应体超过 ${Math.round(maxResponseBytes / 1024 / 1024)} MB 上限`,
+							{ endpoint: options.url },
+						));
+						return;
+					}
+					chunks.push(chunk);
+				});
+				response.on("end", () => {
+					const text = chunks.join("");
+					const json = parseProviderJson(text);
+					const status = Number(response.statusCode || 0);
+					if (status < 200 || status >= 300) {
+						const detail = providerErrorMessage(json, text.slice(0, 500) || `HTTP ${status}`);
+						let type = "http";
+						if (status === 401 || status === 403) type = "authentication";
+						else if (status === 404 && /model/i.test(detail)) type = "model-not-found";
+						else if (status === 404) type = "endpoint-not-found";
+						else if (status === 408 || status === 504) type = "timeout";
+						else if (status === 429) type = "rate-limit";
+						else if (status >= 500) type = "server";
+						finish(() => reject(new ProviderConnectionError(type, detail, {
+							status,
+							endpoint: options.url,
+						})));
+						return;
+					}
+					finish(() => resolve({
+						status,
+						endpoint: options.url,
+						headers: response.headers || {},
+						text,
+						json,
+					}));
+				});
+			});
+			const totalTimer = window.setTimeout(() => {
+				request.destroy(new ProviderConnectionError(
+					phase === "connect" ? "connect-timeout" : "read-timeout",
 					`请求超过 ${Math.round(timeoutMs / 1000)} 秒`,
 					{ endpoint: options.url },
 				));
 			}, timeoutMs);
-		});
-		try {
-			const response = await Promise.race([
-				requestUrl({
-					url: options.url,
-					method: options.method || "GET",
-					headers: options.headers || {},
-					body: options.body === undefined ? undefined : JSON.stringify(options.body),
-					contentType: "application/json",
-					throw: false,
-				}),
-				timeout,
-			]);
-			const text = String(response?.text || "");
-			let json = null;
-			if (text) {
-				try {
-					json = JSON.parse(text);
-				} catch {
-					json = null;
+			request.setTimeout(timeoutMs, () => {
+				request.destroy(new ProviderConnectionError(
+					phase === "connect" ? "connect-timeout" : "read-timeout",
+					`请求超过 ${Math.round(timeoutMs / 1000)} 秒`,
+					{ endpoint: options.url },
+				));
+			});
+			request.on("error", (error) => {
+				if (error instanceof ProviderConnectionError) {
+					finish(() => reject(error));
+					return;
 				}
-			} else {
-				try {
-					json = response?.json || null;
-				} catch {
-					json = null;
-				}
-			}
-			const status = Number(response?.status || 0);
-			if (status < 200 || status >= 300) {
-				const detail = providerErrorMessage(json, text.slice(0, 500) || `HTTP ${status}`);
-				let type = "http";
-				if (status === 401 || status === 403) type = "authentication";
-				else if (status === 404 && /model/i.test(detail)) type = "model-not-found";
-				else if (status === 404) type = "endpoint-not-found";
-				else if (status === 408 || status === 504) type = "timeout";
-				else if (status === 429) type = "rate-limit";
-				else if (status >= 500) type = "server";
-				throw new ProviderConnectionError(type, detail, {
-					status,
+				const message = error instanceof Error ? error.message : String(error);
+				const type = /cancelled|已停止/i.test(message)
+					? "cancelled"
+					: /ECONNREFUSED|connection refused/i.test(message)
+						? "local-service-offline"
+						: /ENOTFOUND|ERR_NAME_NOT_RESOLVED|DNS/i.test(message)
+							? "dns"
+							: "network";
+				finish(() => reject(new ProviderConnectionError(type, message, {
 					endpoint: options.url,
+				})));
+			});
+			if (typeof options.registerCancel === "function") {
+				options.registerCancel(() => {
+					request.destroy(new ProviderConnectionError(
+						"cancelled",
+						"已停止本轮查询",
+						{ endpoint: options.url },
+					));
 				});
 			}
-			return {
-				status,
-				endpoint: options.url,
-				headers: response?.headers || {},
-				text,
-				json,
-			};
-		} catch (error) {
-			if (error instanceof ProviderConnectionError) throw error;
-			const message = error instanceof Error ? error.message : String(error);
-			const type = /ECONNREFUSED|connection refused|Failed to fetch|net::ERR_CONNECTION_REFUSED/i.test(message)
-				? "local-service-offline"
-				: /ENOTFOUND|ERR_NAME_NOT_RESOLVED|DNS/i.test(message)
-					? "dns"
-					: "network";
-			throw new ProviderConnectionError(type, message, { endpoint: options.url });
-		} finally {
-			if (timer !== null) window.clearTimeout(timer);
-		}
+			if (body) request.write(body);
+			request.end();
+		});
 	}
 
 	providerHttpStream(options) {
 		const timeoutMs = Math.max(3000, Math.min(120000, Number(options.timeoutMs || 20000)));
+		const maxResponseBytes = Math.max(
+			65536,
+			Math.min(20 * 1024 * 1024, Number(options.maxResponseBytes || 5 * 1024 * 1024)),
+		);
 		return new Promise((resolve, reject) => {
 			let endpoint;
 			try {
@@ -5991,9 +6297,12 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			let settled = false;
 			let responseText = "";
 			let buffer = "";
+			let responseBytes = 0;
+			let totalTimer = null;
 			const finish = (callback) => {
 				if (settled) return;
 				settled = true;
+				if (totalTimer !== null) window.clearTimeout(totalTimer);
 				callback();
 			};
 			const request = transport.request(endpoint, {
@@ -6003,6 +6312,15 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				const status = Number(response.statusCode || 0);
 				response.setEncoding("utf8");
 				response.on("data", (chunk) => {
+					responseBytes += Buffer.byteLength(chunk);
+					if (responseBytes > maxResponseBytes) {
+						request.destroy(new ProviderConnectionError(
+							"response-too-large",
+							`响应体超过 ${Math.round(maxResponseBytes / 1024 / 1024)} MB 上限`,
+							{ endpoint: options.url },
+						));
+						return;
+					}
 					responseText = `${responseText}${chunk}`.slice(-200000);
 					if (status < 200 || status >= 300) return;
 					buffer += chunk.replace(/\r\n/g, "\n");
@@ -6065,11 +6383,18 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			});
 			request.setTimeout(timeoutMs, () => {
 				request.destroy(new ProviderConnectionError(
-					"timeout",
+					"read-timeout",
 					`请求超过 ${Math.round(timeoutMs / 1000)} 秒`,
 					{ endpoint: options.url },
 				));
 			});
+			totalTimer = window.setTimeout(() => {
+				request.destroy(new ProviderConnectionError(
+					"read-timeout",
+					`请求超过 ${Math.round(timeoutMs / 1000)} 秒`,
+					{ endpoint: options.url },
+				));
+			}, timeoutMs);
 			request.on("error", (error) => {
 				if (settled) return;
 				if (error instanceof ProviderConnectionError) {
@@ -6111,6 +6436,14 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				message: error.message,
 			};
 		}
+		if (error && typeof error === "object" && typeof error.type === "string") {
+			return {
+				type: error.type,
+				status: Number(error.status || 0),
+				endpoint: String(error.endpoint || ""),
+				message: error instanceof Error ? error.message : String(error.message || error.type),
+			};
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		return {
 			type: "unknown",
@@ -6130,6 +6463,9 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			"endpoint-not-found": "Endpoint 不存在",
 			"local-service-offline": "本地服务未启动",
 			timeout: "请求超时",
+			"connect-timeout": "连接超时",
+			"read-timeout": "读取超时",
+			"response-too-large": "响应体过大",
 			"rate-limit": "请求限流",
 			server: "供应商服务错误",
 			dns: "域名解析失败",
@@ -6350,7 +6686,7 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		await this.saveSettings();
 	}
 
-	async updateQueryMessage(sessionId, messageId, updates) {
+	async updateQueryMessage(sessionId, messageId, updates, saveMode = "immediate") {
 		const session = this.querySessions.find((item) => item.id === sessionId);
 		if (!session) return null;
 		const index = session.messages.findIndex((message) => message.id === messageId);
@@ -6366,7 +6702,12 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			session.messages[index].error = session.messages[index].error.slice(0, 12000);
 		}
 		session.updatedAt = new Date().toISOString();
-		await this.saveSettings();
+		if (saveMode === "debounced") {
+			await this.scheduleSettingsSave();
+		} else {
+			await this.flushScheduledSettingsSave();
+			await this.saveSettings();
+		}
 		return session.messages[index];
 	}
 
@@ -6414,6 +6755,50 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 
 	getTaskRun(runId) {
 		return this.taskRuns.find((run) => run.id === runId) || null;
+	}
+
+	getTaskRunOutput(run) {
+		if (run?.outputPath) {
+			const absolutePath = path.join(
+				this.settings.projectRoot,
+				...String(run.outputPath).split("/"),
+			);
+			try {
+				const payload = JSON.parse(fs.readFileSync(absolutePath, "utf8"));
+				if (typeof payload.output === "string") return payload.output;
+			} catch (error) {
+				console.warn("Could not read persisted Dashboard run output", error);
+			}
+		}
+		return String(run?.output || "");
+	}
+
+	async persistTaskRunOutput(run) {
+		const output = String(run?.output || "");
+		if (!output) return "";
+		const relativePath = `tool-library/output/dashboard-runs/${run.id}.json`;
+		const absolutePath = path.join(
+			this.settings.projectRoot,
+			...relativePath.split("/"),
+		);
+		const temporaryPath = `${absolutePath}.tmp`;
+		await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
+		await fs.promises.writeFile(
+			temporaryPath,
+			JSON.stringify({
+				schema_version: 1,
+				run_id: run.id,
+				action_id: run.actionId,
+				status: run.status,
+				exit_code: run.exitCode,
+				started_at: run.startedAt,
+				finished_at: run.finishedAt,
+				output,
+			}, null, 2),
+			"utf8",
+		);
+		await fs.promises.rename(temporaryPath, absolutePath);
+		return relativePath;
 	}
 
 	isActionRunning(actionId) {
@@ -6483,6 +6868,9 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			...updates,
 			finishedAt: new Date().toISOString(),
 		};
+		if (this.taskRuns[index].output) {
+			this.taskRuns[index].outputPath = await this.persistTaskRunOutput(this.taskRuns[index]);
+		}
 		await this.saveSettings();
 		return this.taskRuns[index];
 	}
@@ -6563,10 +6951,11 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		hooks = {},
 		attachments = [],
 	) {
-		const profile = this.getProviderProfile(providerId);
-		if (!profile || profile.lastTest?.ok !== true) {
+		const storedProfile = this.getProviderProfile(providerId);
+		if (!storedProfile || storedProfile.lastTest?.ok !== true) {
 			throw new ProviderConnectionError("configuration", "Direct API 配置不存在或尚未通过连接测试");
 		}
+		const profile = normalizeProviderProfile(storedProfile);
 		if (mode === "web" && !profileSupportsDirectWebSearch(profile)) {
 			throw new ProviderConnectionError(
 				"unsupported",
@@ -6706,7 +7095,12 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				}
 			}
 			if (!response || !String(response.text || streamedText).trim()) {
-				response = await provider.complete(request);
+				response = await provider.complete(request, {
+					registerCancel: (cancel) => {
+						token.abort = cancel;
+					},
+				});
+				token.abort = null;
 			}
 			if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
 			const text = String(response?.text || streamedText || "").trim();
@@ -6738,6 +7132,8 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	}
 
 	buildDirectRetrievalResult(text, evidence, trace, mode, profile) {
+		const normalizedProfile = normalizeProviderProfile(profile || {});
+		const webSearch = normalizedProfile.webSearch;
 		const answer = String(text || "").trim();
 		const vaultSources = (Array.isArray(evidence) ? evidence : [])
 			.filter((item) => {
@@ -6799,15 +7195,15 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				warnings,
 			},
 			provider_search: {
-				provider: profile.name,
-				model: profile.model,
-				protocol: profile.webSearch.protocol,
-				forced_search: profile.webSearch.forcedSearch !== false,
-				search_strategy: profile.webSearch.searchStrategy,
-				assigned_site_list: profile.webSearch.searchStrategy === "turbo"
-					? normalizeAssignedSites(profile.webSearch.assignedSites)
+				provider: normalizedProfile.name,
+				model: normalizedProfile.model,
+				protocol: webSearch.protocol,
+				forced_search: webSearch.forcedSearch !== false,
+				search_strategy: webSearch.searchStrategy,
+				assigned_site_list: webSearch.searchStrategy === "turbo"
+					? normalizeAssignedSites(webSearch.assignedSites)
 					: [],
-				timeout_seconds: profile.webSearch.timeoutSeconds,
+				timeout_seconds: webSearch.timeoutSeconds,
 				source_visibility: "model-text-only",
 			},
 		};
@@ -7342,6 +7738,16 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
 		const timeoutSeconds = Math.max(60, Math.min(14400, Number(this.settings.taskTimeoutMinutes) * 60 || 3600));
 		const effectiveConfig = executionConfig || this.resolveActionExecutionConfig(action);
+		const stopPath = path.join(
+			projectRoot,
+			"tool-library",
+			"output",
+			"dashboard-runs",
+			"stop",
+			`${runId}.stop`,
+		);
+		fs.mkdirSync(path.dirname(stopPath), { recursive: true });
+		if (fs.existsSync(stopPath)) fs.unlinkSync(stopPath);
 		const args = [
 			runner,
 			"--action",
@@ -7360,6 +7766,8 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			this.settings.pythonExecutable,
 			"--timeout-seconds",
 			String(timeoutSeconds),
+			"--stop-file",
+			stopPath,
 		];
 
 		return new Promise((resolve, reject) => {
@@ -7380,6 +7788,16 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				},
 			});
 			this.activeProcesses.set(runId, child);
+			this.activeProcessStops.set(runId, stopPath);
+			const clearRunState = () => {
+				this.activeProcesses.delete(runId);
+				this.activeProcessStops.delete(runId);
+				try {
+					if (fs.existsSync(stopPath)) fs.unlinkSync(stopPath);
+				} catch (error) {
+					console.warn("Could not remove Dashboard stop signal", error);
+				}
+			};
 			const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-160000);
 			const consumeStderrLine = (line, keepNewline = true) => {
 				const normalized = line.replace(/\r$/, "");
@@ -7410,14 +7828,14 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 				if (settled) return;
 				settled = true;
 				window.clearTimeout(timer);
-				this.activeProcesses.delete(runId);
+				clearRunState();
 				reject(error);
 			});
 			child.once("close", (code, signal) => {
 				if (settled) return;
 				settled = true;
 				window.clearTimeout(timer);
-				this.activeProcesses.delete(runId);
+				clearRunState();
 				if (stderrBuffer) consumeStderrLine(stderrBuffer, false);
 				resolve({
 					exitCode: timedOut ? 124 : typeof code === "number" ? code : 1,
@@ -7429,7 +7847,10 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 			});
 			const timer = window.setTimeout(() => {
 				timedOut = true;
-				if (!child.killed) child.kill();
+				this.requestVaultActionStop(runId);
+				window.setTimeout(() => {
+					if (this.activeProcesses.get(runId) === child && !child.killed) child.kill();
+				}, 10000);
 			}, (timeoutSeconds + 15) * 1000);
 			child.stdin.end(input, "utf8");
 		});
@@ -7438,8 +7859,21 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 	stopVaultAction(runId) {
 		const child = this.activeProcesses.get(runId);
 		if (!child || child.killed) return false;
-		child.kill();
-		return true;
+		return this.requestVaultActionStop(runId);
+	}
+
+	requestVaultActionStop(runId) {
+		const child = this.activeProcesses.get(runId);
+		const stopPath = this.activeProcessStops.get(runId);
+		if (!child || child.killed || !stopPath) return false;
+		try {
+			fs.mkdirSync(path.dirname(stopPath), { recursive: true });
+			fs.writeFileSync(stopPath, "stop\n", "utf8");
+			return true;
+		} catch (error) {
+			console.error("Could not request Dashboard action stop", error);
+			return false;
+		}
 	}
 
 	stopDirectVaultQuery(runId) {

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -209,6 +210,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
+    parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-actions", action="store_true")
     args = parser.parse_args()
@@ -217,6 +219,233 @@ def parse_args() -> argparse.Namespace:
     if args.timeout_seconds < 10:
         parser.error("--timeout-seconds must be at least 10")
     return args
+
+
+def subprocess_group_options() -> dict[str, Any]:
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW
+            )
+        }
+    return {"start_new_session": True}
+
+
+def attach_windows_job(process: subprocess.Popen[Any]) -> None:
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class JobObjectBasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JobObjectExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JobObjectBasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+    ]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return
+    information = JobObjectExtendedLimitInformation()
+    information.BasicLimitInformation.LimitFlags = 0x00002000
+    configured = kernel32.SetInformationJobObject(
+        job,
+        9,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    )
+    assigned = configured and kernel32.AssignProcessToJobObject(
+        job,
+        wintypes.HANDLE(process._handle),
+    )
+    if not assigned:
+        kernel32.CloseHandle(job)
+        return
+    process._dashboard_job_handle = job
+
+
+def spawn_managed_process(
+    command: list[str],
+    **options: Any,
+) -> subprocess.Popen[Any]:
+    process = subprocess.Popen(command, **options)
+    attach_windows_job(process)
+    return process
+
+
+def close_process_job(process: subprocess.Popen[Any]) -> bool:
+    job = getattr(process, "_dashboard_job_handle", None)
+    if not job or os.name != "nt":
+        return False
+    import ctypes
+
+    ctypes.windll.kernel32.CloseHandle(job)
+    process._dashboard_job_handle = None
+    return True
+
+
+def stop_requested(stop_file: Path | None) -> bool:
+    return bool(stop_file and stop_file.is_file())
+
+
+def terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Terminate a spawned command and all descendants without using a shell."""
+    if process.poll() is not None:
+        close_process_job(process)
+        return
+    if os.name == "nt":
+        if close_process_job(process):
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+            return
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            creationflags=creationflags,
+        )
+    else:
+        try:
+            os.killpg(process.pid, 15)
+        except ProcessLookupError:
+            return
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            try:
+                os.killpg(process.pid, 9)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=3)
+
+
+def wait_for_process(
+    process: subprocess.Popen[Any],
+    timeout_seconds: int,
+    stop_file: Path | None,
+) -> tuple[int, str]:
+    deadline = time.monotonic() + timeout_seconds
+    while process.poll() is None:
+        if stop_requested(stop_file):
+            terminate_process_tree(process)
+            return 130, "stopped"
+        if time.monotonic() >= deadline:
+            terminate_process_tree(process)
+            return 124, "timeout"
+        time.sleep(0.1)
+    close_process_job(process)
+    return int(process.returncode or 0), "completed"
+
+
+def run_captured_process(
+    command: list[str],
+    project_root: Path,
+    input_text: str,
+    timeout_seconds: int,
+    env: dict[str, str],
+    stop_file: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process = spawn_managed_process(
+        command,
+        cwd=project_root,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        **subprocess_group_options(),
+    )
+    monitor_done = threading.Event()
+    stopped = threading.Event()
+
+    def monitor_stop() -> None:
+        while not monitor_done.is_set() and process.poll() is None:
+            if stop_requested(stop_file):
+                stopped.set()
+                terminate_process_tree(process)
+                return
+            monitor_done.wait(0.1)
+
+    monitor = threading.Thread(target=monitor_stop, daemon=True)
+    monitor.start()
+    try:
+        try:
+            stdout, stderr = process.communicate(
+                input=input_text,
+                timeout=timeout_seconds,
+            )
+            return_code = int(process.returncode or 0)
+        except subprocess.TimeoutExpired:
+            terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            return_code = 124
+    finally:
+        monitor_done.set()
+        monitor.join(timeout=1)
+        close_process_job(process)
+    if stopped.is_set():
+        return_code = 130
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        stdout,
+        stderr,
+    )
 
 
 def resolve_executable(value: str, label: str) -> str:
@@ -367,6 +596,7 @@ def run_retrieval_preflight(
     project_root: Path,
     user_input: str,
     expanded_terms: list[str] | None = None,
+    stop_file: Path | None = None,
 ) -> dict[str, Any]:
     script = project_root / "tool-library" / "scripts" / "retrieve_vault.py"
     if not script.is_file():
@@ -387,18 +617,13 @@ def run_retrieval_preflight(
         ]
         for term in (expanded_terms or [])[:10]:
             command.extend(["--expanded-term", str(term)[:80]])
-        completed = subprocess.run(
+        completed = run_captured_process(
             command,
-            cwd=project_root,
-            input=user_input,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            shell=False,
-            timeout=60,
-            check=False,
+            project_root,
+            user_input,
+            60,
+            env,
+            stop_file,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return {
@@ -459,6 +684,7 @@ def generate_query_keywords_with_codex(
     model: str,
     service_tier: str,
     question: str,
+    stop_file: Path | None = None,
 ) -> tuple[list[str], str]:
     command = build_codex_command(
         codex,
@@ -480,18 +706,13 @@ Question: {json.dumps(question[:2000], ensure_ascii=False)}
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     try:
-        completed = subprocess.run(
+        completed = run_captured_process(
             command,
-            cwd=project_root,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            shell=False,
-            timeout=60,
-            check=False,
+            project_root,
+            prompt,
+            60,
+            env,
+            stop_file,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return [], str(error)
@@ -934,11 +1155,12 @@ def run_retrieval_process(
     timeout_seconds: int,
     stdin_text: str,
     retrieval_mode: str,
+    stop_file: Path | None = None,
 ) -> int:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    process = subprocess.Popen(
+    process = spawn_managed_process(
         command,
         cwd=project_root,
         env=env,
@@ -950,6 +1172,7 @@ def run_retrieval_process(
         errors="replace",
         shell=False,
         bufsize=1,
+        **subprocess_group_options(),
     )
     final_messages: list[str] = []
     observed_urls: set[str] = set()
@@ -1009,19 +1232,29 @@ def run_retrieval_process(
     assert process.stdin is not None
     process.stdin.write(stdin_text)
     process.stdin.close()
-    try:
-        return_code = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        return_code = 124
+    return_code, completion_status = wait_for_process(
+        process,
+        timeout_seconds,
+        stop_file,
+    )
+    if completion_status == "timeout":
         with output_lock:
             print(
                 f"Action timed out after {timeout_seconds} seconds.",
+                file=sys.stderr,
+                flush=True,
+            )
+    elif completion_status == "stopped":
+        emit(
+            {
+                "type": "status",
+                "stage": "stopped",
+                "label": "任务已停止，子进程已清理",
+            }
+        )
+        with output_lock:
+            print(
+                "Action stopped by user; child process tree was terminated.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1087,11 +1320,12 @@ def run_process(
     project_root: Path,
     timeout_seconds: int,
     stdin_text: str | None = None,
+    stop_file: Path | None = None,
 ) -> int:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    process = subprocess.Popen(
+    process = spawn_managed_process(
         command,
         cwd=project_root,
         env=env,
@@ -1100,24 +1334,34 @@ def run_process(
         encoding="utf-8",
         errors="replace",
         shell=False,
+        **subprocess_group_options(),
     )
-    try:
-        if stdin_text is not None and process.stdin is not None:
-            process.stdin.write(stdin_text)
-            process.stdin.close()
-        return process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+    if stdin_text is not None and process.stdin is not None:
+        process.stdin.write(stdin_text)
+        process.stdin.close()
+    return_code, completion_status = wait_for_process(
+        process,
+        timeout_seconds,
+        stop_file,
+    )
+    if completion_status == "timeout":
         print(
             f"Action timed out after {timeout_seconds} seconds.",
             file=sys.stderr,
         )
-        return 124
+    elif completion_status == "stopped":
+        emit_dashboard_event(
+            {
+                "type": "status",
+                "stage": "stopped",
+                "label": "任务已停止，子进程已清理",
+            }
+        )
+        print(
+            "Action stopped by user; child process tree was terminated.",
+            file=sys.stderr,
+        )
+    return return_code
 
 
 def dry_run_payload(
@@ -1218,6 +1462,9 @@ def main() -> int:
         return 0
 
     project_root = validate_project_root(args.project_root)
+    stop_file = args.stop_file.expanduser().resolve() if args.stop_file else None
+    if stop_file and stop_file.exists():
+        stop_file.unlink()
     raw_user_input = sys.stdin.read()
     spec = ACTION_SPECS[args.action]
     user_input, conversation_context, retrieval_mode = normalize_action_input(
@@ -1262,7 +1509,12 @@ def main() -> int:
                     str(project_root / "tool-library" / "output" / "lint" / "latest.json"),
                 ]
             )
-        return run_process(command, project_root, args.timeout_seconds)
+        return run_process(
+            command,
+            project_root,
+            args.timeout_seconds,
+            stop_file=stop_file,
+        )
 
     codex = resolve_executable(args.codex, "Codex")
     retrieval_preflight = None
@@ -1272,7 +1524,10 @@ def main() -> int:
             python,
             project_root,
             user_input,
+            stop_file=stop_file,
         )
+        if stop_requested(stop_file):
+            return 130
         if not retrieval_preflight.get("lexical_seeds"):
             print(
                 "No reliable lexical seed; requesting query keyword expansion.",
@@ -1284,13 +1539,17 @@ def main() -> int:
                 args.model,
                 args.service_tier,
                 user_input,
+                stop_file,
             )
+            if stop_requested(stop_file):
+                return 130
             if expanded_terms:
                 retrieval_preflight = run_retrieval_preflight(
                     python,
                     project_root,
                     user_input,
                     expanded_terms,
+                    stop_file,
                 )
                 retrieval_preflight["keyword_expansion"] = {
                     **retrieval_preflight.get("keyword_expansion", {}),
@@ -1374,6 +1633,7 @@ def main() -> int:
             args.timeout_seconds,
             prompt,
             retrieval_mode,
+            stop_file,
         )
     else:
         result = run_process(
@@ -1381,6 +1641,7 @@ def main() -> int:
             project_root,
             args.timeout_seconds,
             prompt,
+            stop_file,
         )
     if result != 0 or not spec.get("post_validate"):
         return result
@@ -1399,6 +1660,7 @@ def main() -> int:
         ],
         project_root,
         args.timeout_seconds,
+        stop_file=stop_file,
     )
 
 

@@ -33,9 +33,14 @@ BLOCKED_PATTERNS = (
     (re.compile(r"\b(?:os\.(?:remove|unlink|rmdir)|shutil\.rmtree)\s*\("), "destructive Python file operation"),
     (re.compile(r"\.(?:unlink|rmdir)\s*\("), "destructive path operation"),
     (re.compile(r"\b(?:file\.remove|unlink)\s*\("), "destructive R file operation"),
-    (re.compile(r"\b(?:subprocess\.|os\.system\s*\(|system2?\s*\(|shell\s*\()"), "external command execution"),
+    (re.compile(r"\b(?:subprocess\.|os\.(?:system|popen|spawn\w*)\s*\(|system2?\s*\(|shell\s*\()"), "external command execution"),
     (re.compile(r"\b(?:pip\s+install|install\.packages\s*\(|BiocManager::install\s*\(|remotes::install_)"), "package installation"),
-    (re.compile(r"\b(?:(?:import|from)\s+(?:requests|urllib|http|socket)\b|requests\.|urllib\.|http\.client|socket\.|download\.file\s*\(|httr::|curl::|library\s*\(\s*[\"']?(?:httr|curl))"), "network access"),
+    (re.compile(r"\b(?:__import__|importlib\.(?:import_module|reload))\s*\("), "dynamic Python import"),
+    (re.compile(r"\bopen\s*\([^,\n]+,\s*[\"'][^\"']*[wax+][^\"']*[\"']"), "Python file write"),
+    (re.compile(r"\bPath\s*\([^)]*\)\s*\.(?:write_text|write_bytes|touch|mkdir)\s*\("), "Python path write"),
+    (re.compile(r"\.(?:write_text|write_bytes|touch|mkdir)\s*\("), "Python path write"),
+    (re.compile(r"\b(?:writeLines|write\.table|write\.csv|saveRDS|save|file\.create|dir\.create)\s*\("), "R file write"),
+    (re.compile(r"\b(?:(?:import|from)\s+(?:requests|urllib|http|socket|aiohttp|httpx|ftplib)\b|requests\.|urllib\.|http\.client|socket\.|aiohttp\.|httpx\.|ftplib\.|download\.file\s*\(|url\s*\(|httr2?::|curl::|library\s*\(\s*[\"']?(?:httr2?|curl))"), "network access"),
 )
 
 
@@ -283,6 +288,11 @@ def execute_request(
         "stderr": "",
         "figures": [],
         "execution_mode": "stateless-replay" if validated["context_code"].strip() else "stateless",
+        "security_boundary": "trusted-local-execution",
+        "security_notice": (
+            "Code runs with the current user's permissions. Pattern checks are "
+            "mistake prevention, not a security sandbox."
+        ),
         "started_at": started_at,
         "finished_at": "",
     }

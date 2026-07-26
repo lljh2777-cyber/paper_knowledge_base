@@ -188,15 +188,35 @@ async function testDirectApiQuery() {
 		(error) => /超出当前 Vault/.test(error.message),
 	);
 
-	await assert.rejects(
-		() => plugin.runDirectVaultQuery(
-			"run-web",
-			profile.id,
-			"联网搜索",
-			[],
-			"web",
-		),
-		(error) => /仅支持知识库证据/.test(error.message),
+	profile.webSearch = {
+		enabled: true,
+		configured: true,
+		protocol: "qwen-chat-completions",
+		forcedSearch: true,
+		searchStrategy: "turbo",
+		assignedSites: [],
+		timeoutSeconds: 60,
+	};
+	profile.lastTest.webSearchVerified = true;
+	let webRequest = null;
+	plugin.createLLMProvider = () => ({
+		complete: async (request) => {
+			webRequest = request;
+			return { text: "联网补充回答：https://example.test/source" };
+		},
+	});
+	const webResult = await plugin.runDirectVaultQuery(
+		"run-web",
+		profile.id,
+		"联网搜索",
+		[],
+		"web",
+	);
+	assert.strictEqual(webResult.exitCode, 0);
+	assert.strictEqual(webRequest.webSearch, true);
+	assert.strictEqual(
+		webResult.events.at(-1).payload.provider_search.protocol,
+		"qwen-chat-completions",
 	);
 
 	const expansionCalls = [];
@@ -372,7 +392,50 @@ async function testDirectApiQuery() {
 	));
 }
 
-testDirectApiQuery()
+async function testSerializedSettingsSnapshots() {
+	const persistencePlugin = Object.create(AgentDashboardPlugin.prototype);
+	persistencePlugin.settings = {
+		projectRoot: "first-root",
+		providerProfiles: [],
+		activeProviderId: "",
+	};
+	persistencePlugin.taskRuns = [{
+		id: "run-1",
+		output: "x".repeat(50000),
+		error: "",
+	}];
+	persistencePlugin.querySessions = [{
+		id: "session-1",
+		messages: Array.from({ length: 40 }, (_, index) => ({
+			id: `message-${index}`,
+			content: "y".repeat(10000),
+			error: "",
+		})),
+	}];
+	persistencePlugin.activeQuerySessionId = "session-1";
+	persistencePlugin.settingsSaveQueue = Promise.resolve();
+	const snapshots = [];
+	persistencePlugin.saveData = async (snapshot) => {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		snapshots.push(snapshot);
+	};
+	const first = persistencePlugin.saveSettings();
+	persistencePlugin.settings.projectRoot = "second-root";
+	const second = persistencePlugin.saveSettings();
+	await Promise.all([first, second]);
+	assert.deepStrictEqual(
+		snapshots.map((snapshot) => snapshot.settings.projectRoot),
+		["first-root", "second-root"],
+	);
+	assert.strictEqual(snapshots[0].taskRuns[0].output.length, 12000);
+	assert.strictEqual(snapshots[0].querySessions[0].messages.length, 30);
+	assert.strictEqual(
+		snapshots[0].querySessions[0].messages[0].content.length,
+		8000,
+	);
+}
+
+Promise.all([testDirectApiQuery(), testSerializedSettingsSnapshots()])
 	.then(() => console.log("DASHBOARD_QUERY_VIEW_TEST_OK"))
 	.catch((error) => {
 		console.error(error);

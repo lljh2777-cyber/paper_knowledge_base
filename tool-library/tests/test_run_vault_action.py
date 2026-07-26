@@ -4,8 +4,12 @@ import importlib.util
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+import threading
+import time
 import unittest
 
 
@@ -17,6 +21,36 @@ assert SPEC and SPEC.loader
 run_vault_action = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = run_vault_action
 SPEC.loader.exec_module(run_vault_action)
+
+
+def process_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(
+                handle,
+                ctypes.byref(exit_code),
+            ):
+                return False
+            return exit_code.value == still_active
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 class RunVaultActionQuerySessionTests(unittest.TestCase):
@@ -352,6 +386,62 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
             result_event["payload"]["citation_validation"]["status"],
             "verified",
         )
+
+
+class ProcessTreeStopTests(unittest.TestCase):
+    def test_stop_file_terminates_spawned_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stop_file = root / "stop.signal"
+            pid_file = root / "pids.json"
+            heartbeat = root / "heartbeat.txt"
+            child_code = (
+                "import pathlib,sys,time\n"
+                "target=pathlib.Path(sys.argv[1])\n"
+                "while True:\n"
+                " target.write_text(str(time.time()), encoding='utf-8')\n"
+                " time.sleep(0.05)\n"
+            )
+            parent_code = (
+                "import json,os,pathlib,subprocess,sys,time\n"
+                "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[3]])\n"
+                "pathlib.Path(sys.argv[2]).write_text("
+                "json.dumps({'parent':os.getpid(),'child':child.pid}),encoding='utf-8')\n"
+                "while True: time.sleep(1)\n"
+            )
+            result: list[int] = []
+
+            def run() -> None:
+                result.append(
+                    run_vault_action.run_process(
+                        [
+                            sys.executable,
+                            "-c",
+                            parent_code,
+                            child_code,
+                            str(pid_file),
+                            str(heartbeat),
+                        ],
+                        root,
+                        30,
+                        stop_file=stop_file,
+                    )
+                )
+
+            runner = threading.Thread(target=run)
+            runner.start()
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(pid_file.exists(), "test process tree did not start")
+            pids = json.loads(pid_file.read_text(encoding="utf-8"))
+            stop_file.write_text("stop\n", encoding="utf-8")
+            runner.join(timeout=10)
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(result, [130])
+            time.sleep(0.2)
+            self.assertFalse(process_is_alive(int(pids["parent"])))
+            self.assertFalse(process_is_alive(int(pids["child"])))
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 {
 	"id": "agent-dashboard",
 	"name": "Agent Dashboard",
-	"version": "0.17.2",
+	"version": "0.17.3",
 	"minAppVersion": "1.8.0",
-	"description": "A local research-vault dashboard with agent workflows and stateless replayable Python/R code cells.",
+	"description": "A local research-vault dashboard with agent workflows and trusted local Python/R practice cells.",
 	"author": "Jason",
 	"isDesktopOnly": true
 }

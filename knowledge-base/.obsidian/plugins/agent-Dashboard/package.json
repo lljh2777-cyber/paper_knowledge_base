@@ -1,0 +1,11 @@
+{
+  "name": "agent-dashboard",
+  "version": "0.17.3",
+  "private": true,
+  "description": "Obsidian Research Vault dashboard plugin",
+  "scripts": {
+    "build": "node --check main.js",
+    "test": "node ../../../../tool-library/tests/run_dashboard_tests.js",
+    "verify": "node --check main.js && node ../../../../tool-library/tests/run_dashboard_tests.js"
+  }
+}

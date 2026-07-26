@@ -67,6 +67,34 @@ function makePlugin(profile) {
 		githubToken: "must-not-persist",
 	};
 	plugin.providerRuntimeState = new Map();
+	plugin.providerHttpRequest = async (options) => {
+		let result;
+		try {
+			result = await requestHandler({
+				...options,
+				body: options.body === undefined ? undefined : JSON.stringify(options.body),
+			});
+		} catch (error) {
+			if (/ECONNREFUSED|connection refused/i.test(error.message)) {
+				error.type = "local-service-offline";
+			}
+			throw error;
+		}
+		let json = null;
+		try {
+			json = result.text ? JSON.parse(result.text) : null;
+		} catch {
+			json = null;
+		}
+		if (result.status < 200 || result.status >= 300) {
+			const detail = json?.error?.message || result.text || `HTTP ${result.status}`;
+			const error = new Error(detail);
+			error.type = result.status === 401 || result.status === 403 ? "authentication" : "http";
+			error.status = result.status;
+			throw error;
+		}
+		return { ...result, json };
+	};
 	plugin.saveSettings = async () => {};
 	return plugin;
 }
@@ -93,6 +121,10 @@ async function main() {
 	);
 	assert.ok(pluginSource.includes('.setName("视觉输入")'));
 	assert.ok(pluginSource.includes("visionConfigured"));
+	assert.ok(pluginSource.includes("this.app.metadataCache?.getFileCache?.(file)?.frontmatter"));
+	assert.ok(!pluginSource.includes('wiki/methods/single-cell-rna-seq'));
+	assert.ok(pluginSource.includes("this.recordByPath = new Map()"));
+	assert.ok(pluginSource.includes("version !== this.loadVersion"));
 	const migrationPlugin = Object.create(AgentDashboardPlugin.prototype);
 	migrationPlugin.loadData = async () => ({
 		settings: {
@@ -273,6 +305,33 @@ async function main() {
 		'{"delta":"B"}',
 		"[DONE]",
 	]);
+
+	const transportPlugin = Object.create(AgentDashboardPlugin.prototype);
+	let delayedSocketClosed = false;
+	const delayedServer = http.createServer((_request, response) => {
+		const delayedResponse = setTimeout(() => {
+			if (!response.destroyed) response.end('{"late":true}');
+		}, 5000);
+		response.on("close", () => {
+			delayedSocketClosed = true;
+			clearTimeout(delayedResponse);
+		});
+	});
+	await new Promise((resolve) => delayedServer.listen(0, "127.0.0.1", resolve));
+	try {
+		const address = delayedServer.address();
+		await assert.rejects(
+			() => transportPlugin.providerHttpRequest({
+				url: `http://127.0.0.1:${address.port}/slow`,
+				timeoutMs: 3000,
+			}),
+			(error) => ["connect-timeout", "read-timeout"].includes(error.type),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.strictEqual(delayedSocketClosed, true);
+	} finally {
+		await new Promise((resolve) => delayedServer.close(resolve));
+	}
 
 	console.log("DASHBOARD_PROVIDER_TEST_OK");
 }
