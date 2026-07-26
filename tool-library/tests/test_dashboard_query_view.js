@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
 const Module = require("module");
 const path = require("path");
 
@@ -29,8 +30,44 @@ const pluginPath = path.resolve(
 );
 const AgentDashboardPlugin = require(pluginPath);
 Module._load = originalLoad;
+const pluginSource = fs.readFileSync(pluginPath, "utf8");
 
 const plugin = Object.create(AgentDashboardPlugin.prototype);
+plugin.taskRuns = [
+	{
+		id: "run-complete",
+		actionId: "synthesis",
+		status: "done",
+		startedAt: "2026-07-26T00:00:00Z",
+	},
+	{
+		id: "run-active",
+		actionId: "synthesis",
+		status: "running",
+		startedAt: "2026-07-26T01:00:00Z",
+	},
+];
+assert.strictEqual(plugin.getRunningTaskRun("synthesis").id, "run-active");
+assert.strictEqual(plugin.getRunningTaskRun("vault-lint"), null);
+plugin.taskRuns = [];
+
+assert.ok(
+	pluginSource.includes('value: healthScore === null ? "—" : String(healthScore)'),
+	"health metric should use the latest lint report or show no result",
+);
+assert.ok(
+	!pluginSource.includes("100 - linkReport.broken.length * 2 - missingFrontmatter"),
+	"health metric must not fall back to an estimated default score",
+);
+assert.ok(
+	pluginSource.includes("const scrollTop = this.contentEl.scrollTop;"),
+	"code-practice rendering should preserve the current scroll position",
+);
+assert.ok(
+	pluginSource.includes('isRunning ? "点击停止" : "空闲"'),
+	"running Dashboard actions should expose a manual stop control",
+);
+
 const priorMessages = Array.from({ length: 12 }, (_, index) => ({
 	role: index % 2 === 0 ? "user" : "assistant",
 	status: "done",

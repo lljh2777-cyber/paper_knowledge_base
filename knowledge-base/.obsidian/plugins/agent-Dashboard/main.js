@@ -1270,11 +1270,16 @@ class DashboardDataService {
 			.filter((record) => record.path.startsWith("wiki/"))
 			.reduce((latest, record) => Math.max(latest, record.mtime || 0), 0);
 		const lintGeneratedAt = lintStatus.latest ? new Date(lintStatus.latest.generated_at).getTime() : 0;
-		const lintFresh = Boolean(lintStatus.latest && Number.isFinite(lintGeneratedAt) && lintGeneratedAt >= latestWikiMtime);
-		const lintSummary = lintFresh ? lintStatus.latest.summary : null;
-		const healthScore = lintSummary
-			? Number(lintSummary.score)
-			: Math.max(0, Math.min(100, 100 - linkReport.broken.length * 2 - missingFrontmatter));
+		const lintSummary = lintStatus.latest?.summary || null;
+		const reportedHealthScore = Number(lintSummary?.score);
+		const healthScore = lintSummary && Number.isFinite(reportedHealthScore)
+			? reportedHealthScore
+			: null;
+		const lintStale = Boolean(
+			lintSummary
+			&& Number.isFinite(lintGeneratedAt)
+			&& lintGeneratedAt < latestWikiMtime,
+		);
 		const now = new Date();
 
 		const result = {
@@ -1289,12 +1294,14 @@ class DashboardDataService {
 			metrics: [
 				{
 					label: "知识库健康",
-					value: String(healthScore),
+					value: healthScore === null ? "—" : String(healthScore),
 					unit: "",
-					tone: healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
+					tone: healthScore === null ? "neutral" : healthScore >= 90 ? "good" : healthScore >= 75 ? "warn" : "danger",
 					detail: lintSummary
-						? `${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告，${Number(lintSummary.errors || 0) + Number(lintSummary.warnings || 0)} 个待处理项`
-						: `${linkReport.broken.length} 个断链，${missingFrontmatter} 个缺失属性区；体检报告待更新`,
+						? `上次体检 ${this.formatExportTime(lintStatus.latest.generated_at)}：${lintSummary.errors} 个错误，${lintSummary.warnings} 个警告${lintStale ? "；此后知识库有更新" : ""}`
+						: lintStatus.error
+							? "上次体检报告无法读取"
+							: "尚无体检结果，请运行知识库体检",
 				},
 				{
 					label: "文献流程",
@@ -2302,12 +2309,21 @@ class CodePracticeView extends ItemView {
 	}
 
 	render() {
+		const scrollTop = this.contentEl.scrollTop;
+		const scrollLeft = this.contentEl.scrollLeft;
 		this.contentEl.empty();
 		this.contentEl.addClass("code-practice-view");
 		const shell = this.contentEl.createDiv({ cls: "code-practice-shell" });
 		this.renderHeader(shell);
 		this.renderRuntime(shell);
 		this.renderNotebook(shell);
+		this.contentEl.scrollTop = scrollTop;
+		this.contentEl.scrollLeft = scrollLeft;
+		window.requestAnimationFrame(() => {
+			if (!this.contentEl?.isConnected) return;
+			this.contentEl.scrollTop = scrollTop;
+			this.contentEl.scrollLeft = scrollLeft;
+		});
 	}
 
 	renderHeader(parent) {
@@ -4013,7 +4029,9 @@ class QueryWikiView extends ItemView {
 					executionConfig,
 					hooks,
 				);
-			const stopped = this.stopRequested;
+			const stopped = this.stopRequested
+				|| result.exitCode === 130
+				|| (result.events || []).some((event) => event.type === "status" && event.stage === "stopped");
 			const status = result.exitCode === 0 ? "done" : stopped ? "interrupted" : "failed";
 			const resultEvent = [...(result.events || [])]
 				.reverse()
@@ -4056,20 +4074,21 @@ class QueryWikiView extends ItemView {
 			new Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			const interrupted = this.stopRequested || /cancelled|canceled|已停止|正在停止/i.test(message);
 			await this.plugin.updateQueryMessage(session.id, assistantMessage.id, {
-				status: this.stopRequested ? "interrupted" : "failed",
-				error: this.stopRequested ? "已停止本轮查询。" : message,
+				status: interrupted ? "interrupted" : "failed",
+				error: interrupted ? "已停止本轮查询。" : message,
 				progress: "",
 			});
 			if (run) {
 				completedRun = await this.plugin.finishTaskRun(run.id, {
-					status: this.stopRequested ? "interrupted" : "failed",
+					status: interrupted ? "interrupted" : "failed",
 					exitCode: null,
 					output: "",
 					error: message,
 				});
 			}
-			new Notice(this.stopRequested ? "知识库查询已停止" : `知识库查询失败：${message}`);
+			new Notice(interrupted ? "知识库查询已停止" : `知识库查询失败：${message}`);
 		} finally {
 			this.activeRunId = "";
 			this.activeMessageId = "";
@@ -4268,6 +4287,7 @@ class DashboardView extends ItemView {
 		this.pendingVaultChanges = new Map();
 		this.loadSequence = 0;
 		this.closed = false;
+		this.stoppingRunIds = new Set();
 	}
 
 	getViewType() {
@@ -4381,6 +4401,12 @@ class DashboardView extends ItemView {
 			this.renderLoading();
 			return;
 		}
+		for (const runId of this.stoppingRunIds) {
+			const run = this.plugin.getTaskRun(runId);
+			if (!run || !["running", "queued"].includes(run.status)) {
+				this.stoppingRunIds.delete(runId);
+			}
+		}
 		this.contentEl.empty();
 		this.contentEl.addClass("agent-dashboard-view");
 		const shell = this.contentEl.createDiv({ cls: "agent-dashboard-shell" });
@@ -4428,26 +4454,52 @@ class DashboardView extends ItemView {
 		const rail = parent.createEl("nav", { cls: "agent-dashboard-action-rail", attr: { "aria-label": "研究知识库操作" } });
 		this.data.actions.filter((action) => action.showInRail !== false).forEach((action) => {
 			const isRunning = this.plugin.isActionRunning(action.id);
+			const runningTask = isRunning ? this.plugin.getRunningTaskRun(action.id) : null;
+			const isStopping = Boolean(runningTask && this.stoppingRunIds.has(runningTask.id));
 			const button = rail.createEl("button", {
 				cls: "agent-dashboard-action-button",
 				attr: {
-					"aria-label": action.enabled ? action.label : `${action.label}，待接入`,
-					title: action.description,
+					"aria-label": !action.enabled
+						? `${action.label}，待接入`
+						: isRunning
+							? `${isStopping ? "正在停止" : "停止"}${action.label}`
+							: action.label,
+					title: isRunning ? `${isStopping ? "正在停止" : "点击停止"}：${action.label}` : action.description,
 				},
 			});
 			button.type = "button";
-			button.disabled = !action.enabled || isRunning;
+			button.disabled = !action.enabled || isStopping || (isRunning && !runningTask);
 			if (!action.enabled) button.addClass("is-unavailable");
 			if (isRunning) button.addClass("is-running");
 			button.createSpan({ cls: "agent-dashboard-action-label", text: action.label });
 			button.createSpan({
 				cls: "agent-dashboard-action-state",
-				text: !action.enabled ? "待接入" : isRunning ? "运行中" : "空闲",
+				text: !action.enabled ? "待接入" : isStopping ? "停止中" : isRunning ? "点击停止" : "空闲",
 			});
 			this.registerDomEvent(button, "click", () => {
+				if (runningTask) {
+					this.requestStopRun(runningTask);
+					return;
+				}
 				this.openAction(action);
 			});
 		});
+	}
+
+	requestStopRun(run) {
+		if (!run || this.stoppingRunIds.has(run.id)) return;
+		const backend = String(run.executionConfig?.backend || "codex-cli");
+		const requested = backend !== "codex-cli"
+			? this.plugin.stopDirectVaultQuery(run.id)
+			: this.plugin.stopVaultAction(run.id);
+		if (!requested) {
+			new Notice("任务进程已经结束，正在刷新运行状态");
+			void this.loadAndRender();
+			return;
+		}
+		this.stoppingRunIds.add(run.id);
+		new Notice(`正在停止：${run.label}`);
+		this.renderDashboard();
 	}
 
 	renderStats(parent) {
@@ -4722,21 +4774,25 @@ class DashboardView extends ItemView {
 			const repairCompletedWithFindings = action.id === "vault-lint-fix"
 				&& result.exitCode === 1
 				&& result.stdout.includes("Post-repair vault lint:");
-			const status = result.exitCode === 0 || lintCompletedWithFindings || repairCompletedWithFindings
-				? "done"
-				: "failed";
+			const interrupted = result.exitCode === 130
+				|| (result.events || []).some((event) => event.type === "status" && event.stage === "stopped");
+			const status = interrupted
+				? "interrupted"
+				: result.exitCode === 0 || lintCompletedWithFindings || repairCompletedWithFindings
+					? "done"
+					: "failed";
 			completedRun = await this.plugin.finishTaskRun(run.id, {
 				status,
 				exitCode: result.exitCode,
 				output,
-				error: status === "failed" ? `进程退出码：${result.exitCode}` : "",
+				error: status === "failed" ? `进程退出码：${result.exitCode}` : status === "interrupted" ? "任务已手动停止" : "",
 			});
 			const completionMessage = lintCompletedWithFindings
 				? "知识库体检已完成，发现待处理项"
 				: repairCompletedWithFindings
 					? "体检修复已完成，仍有待处理项"
 					: `${action.label}已完成`;
-			new Notice(status === "done" ? completionMessage : `${action.label}执行失败`);
+			new Notice(status === "done" ? completionMessage : status === "interrupted" ? `${action.label}已停止` : `${action.label}执行失败`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			completedRun = await this.plugin.finishTaskRun(run.id, {
@@ -6755,6 +6811,16 @@ module.exports = class AgentDashboardPlugin extends Plugin {
 
 	getTaskRun(runId) {
 		return this.taskRuns.find((run) => run.id === runId) || null;
+	}
+
+	getRunningTaskRun(actionId) {
+		const actionIds = ["vault-lint", "vault-lint-fix"].includes(actionId)
+			? new Set(["vault-lint", "vault-lint-fix"])
+			: new Set([actionId]);
+		return this.getTaskRuns().find((run) => (
+			actionIds.has(run.actionId)
+			&& (run.status === "running" || run.status === "queued")
+		)) || null;
 	}
 
 	getTaskRunOutput(run) {

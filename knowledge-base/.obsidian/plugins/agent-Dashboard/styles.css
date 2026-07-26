@@ -234,8 +234,24 @@
 
 .agent-dashboard-action-button.is-running .agent-dashboard-action-state,
 .agent-dashboard-action-button.is-running::before {
-	color: var(--agent-dashboard-cyan);
-	border-color: color-mix(in srgb, var(--agent-dashboard-cyan), transparent 40%);
+	color: var(--agent-dashboard-danger);
+	border-color: color-mix(in srgb, var(--agent-dashboard-danger), transparent 40%);
+}
+
+.agent-dashboard-action-button.is-running {
+	border-color: color-mix(in srgb, var(--agent-dashboard-danger), transparent 62%);
+}
+
+.agent-dashboard-action-button.is-running::before {
+	border-radius: 2px;
+	background: color-mix(in srgb, var(--agent-dashboard-danger), transparent 22%);
+}
+
+.agent-dashboard-action-button.is-running:hover:not(:disabled),
+.agent-dashboard-action-button.is-running:focus-visible:not(:disabled) {
+	border-color: var(--agent-dashboard-danger);
+	background: color-mix(in srgb, var(--agent-dashboard-danger), transparent 90%);
+	outline-color: var(--agent-dashboard-danger);
 }
 
 .agent-dashboard-action-button.is-done .agent-dashboard-action-state,
