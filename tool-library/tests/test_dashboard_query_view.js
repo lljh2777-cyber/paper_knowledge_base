@@ -28,20 +28,35 @@ const pluginPath = path.resolve(
 	__dirname,
 	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/main.js",
 );
-const pluginSourcePath = path.resolve(
+const pluginSourceRoot = path.resolve(
 	__dirname,
-	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/main.ts",
-);
-const dashboardDataSourcePath = path.resolve(
-	__dirname,
-	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/services/dashboard-data.ts",
+	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src",
 );
 const AgentDashboardPlugin = require(pluginPath);
 Module._load = originalLoad;
-const pluginSource = [
-	fs.readFileSync(pluginSourcePath, "utf8"),
-	fs.readFileSync(dashboardDataSourcePath, "utf8"),
-].join("\n");
+const pluginSource = fs.readdirSync(pluginSourceRoot, { recursive: true })
+	.filter((file) => String(file).endsWith(".ts"))
+	.sort()
+	.map((file) => fs.readFileSync(path.join(pluginSourceRoot, file), "utf8"))
+	.join("\n");
+const entrySource = fs.readFileSync(path.join(pluginSourceRoot, "main.ts"), "utf8").trim();
+assert.strictEqual(
+	entrySource,
+	'export { default } from "./plugin";',
+	"TypeScript entry point should remain a minimal strict re-export",
+);
+for (const modalSource of [
+	"modals/action-input.ts",
+	"modals/practice-note.ts",
+	"modals/task-result.ts",
+	"modals/vault-image-picker.ts",
+]) {
+	assert.ok(fs.existsSync(path.join(pluginSourceRoot, modalSource)));
+	assert.ok(
+		!fs.readFileSync(path.join(pluginSourceRoot, modalSource), "utf8").includes("@ts-nocheck"),
+		`${modalSource} should remain under strict TypeScript checking`,
+	);
+}
 
 const plugin = Object.create(AgentDashboardPlugin.prototype);
 plugin.taskRuns = [

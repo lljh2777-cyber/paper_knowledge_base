@@ -35,20 +35,17 @@ const pluginPath = path.resolve(
 	__dirname,
 	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/main.js",
 );
-const pluginSourcePath = path.resolve(
+const pluginSourceRoot = path.resolve(
 	__dirname,
-	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/main.ts",
-);
-const dashboardDataSourcePath = path.resolve(
-	__dirname,
-	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src/services/dashboard-data.ts",
+	"../../knowledge-base/.obsidian/plugins/agent-Dashboard/src",
 );
 const AgentDashboardPlugin = require(pluginPath);
 Module._load = originalLoad;
-const pluginSource = [
-	fs.readFileSync(pluginSourcePath, "utf8"),
-	fs.readFileSync(dashboardDataSourcePath, "utf8"),
-].join("\n");
+const pluginSource = fs.readdirSync(pluginSourceRoot, { recursive: true })
+	.filter((file) => String(file).endsWith(".ts"))
+	.sort()
+	.map((file) => fs.readFileSync(path.join(pluginSourceRoot, file), "utf8"))
+	.join("\n");
 
 global.window = {
 	setTimeout,
