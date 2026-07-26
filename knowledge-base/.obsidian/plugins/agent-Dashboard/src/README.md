@@ -7,13 +7,17 @@ Current module ownership:
 
 ```text
 src/main.ts                  Strict, minimal plugin entry point
-src/plugin.ts                Strict composition root and vault/query orchestration
+src/plugin.ts                Strict composition root and Obsidian lifecycle shell
 src/actions.ts               Dashboard action registry and action-level model defaults
 src/config.ts                Stable view IDs, limits, model options, provider definitions
 src/modals/                  Action input, task result, practice-note, and image-picker dialogs
 src/providers/adapters.ts    Direct API and Codex CLI provider implementations
+src/providers/http-transport.ts
+                             Bounded HTTP/SSE/NDJSON transport and error mapping
 src/providers/profile.ts     Direct API profile defaults, normalization, capability checks
 src/providers/shared.ts      Provider URL, payload, model-list, and error helpers
+src/query/direct-query-service.ts
+                             Direct API retrieval cascade, prompt, streaming, and result orchestration
 src/query/normalization.ts   Persisted query attachment, source, path, and citation contracts
 src/runtime/settings.ts      Executable discovery and persisted setting defaults
 src/runtime/lifecycle-state.ts
@@ -29,8 +33,9 @@ src/views/                   Code practice, conversational query, and Dashboard 
 ```
 
 All source modules, including `src/plugin.ts`, use strict TypeScript. The plugin
-class is the Obsidian composition root; runtime process handles and save queues
-are owned by focused services.
+class is the Obsidian composition root; provider transport, Direct API query
+orchestration, runtime process handles, and save queues are owned by focused
+services.
 
 Build constraints:
 

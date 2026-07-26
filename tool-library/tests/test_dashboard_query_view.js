@@ -71,6 +71,8 @@ for (const modalSource of [
 for (const strictSource of [
 	"plugin.ts",
 	"providers/adapters.ts",
+	"providers/http-transport.ts",
+	"query/direct-query-service.ts",
 	"runtime/lifecycle-state.ts",
 	"runtime/persistence.ts",
 	"runtime/process-execution.ts",
