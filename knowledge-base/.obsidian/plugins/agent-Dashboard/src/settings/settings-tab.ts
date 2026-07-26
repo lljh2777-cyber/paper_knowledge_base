@@ -27,13 +27,8 @@ import type { ProviderModel } from "../providers/shared";
 import type {
 	PluginHost,
 	ProviderConnectionTestResult,
+	ProviderRuntimeEntry,
 } from "../types/contracts";
-
-interface ProviderRuntimeEntry {
-	status?: "idle" | "models" | "testing" | "done";
-	models?: ProviderModel[];
-	result?: ProviderConnectionTestResult;
-}
 
 interface SettingsPluginHost extends PluginHost {
 	providerRuntimeState: Map<string, ProviderRuntimeEntry>;

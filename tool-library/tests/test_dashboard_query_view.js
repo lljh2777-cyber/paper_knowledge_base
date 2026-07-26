@@ -6,10 +6,20 @@ const Module = require("module");
 const path = require("path");
 
 const originalLoad = Module._load;
+let TFileStub;
 Module._load = function loadWithObsidianStub(request, parent, isMain) {
 	if (request === "obsidian") {
 		class Base {}
+		class TFile extends Base {
+			constructor(values = {}) {
+				super();
+				Object.assign(this, values);
+			}
+		}
+		TFileStub = TFile;
+		class FileSystemAdapter extends Base {}
 		return {
+			FileSystemAdapter,
 			ItemView: Base,
 			MarkdownRenderer: { render: async () => {} },
 			Modal: Base,
@@ -17,6 +27,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
 			Plugin: Base,
 			PluginSettingTab: Base,
 			Setting: class {},
+			TFile,
 			normalizePath: (value) => value,
 			setIcon: () => {},
 		};
@@ -58,7 +69,11 @@ for (const modalSource of [
 	);
 }
 for (const strictSource of [
+	"plugin.ts",
 	"providers/adapters.ts",
+	"runtime/lifecycle-state.ts",
+	"runtime/persistence.ts",
+	"runtime/process-execution.ts",
 	"services/dashboard-data.ts",
 	"settings/settings-tab.ts",
 	"views/code-practice.ts",
@@ -78,7 +93,7 @@ assert.ok(
 	"shared runtime contracts should expose the PluginHost boundary",
 );
 
-const plugin = Object.create(AgentDashboardPlugin.prototype);
+const plugin = new AgentDashboardPlugin();
 plugin.taskRuns = [
 	{
 		id: "run-complete",
@@ -161,7 +176,6 @@ async function testDirectApiQuery() {
 		projectRoot: path.resolve(__dirname, "../.."),
 		providerProfiles: [profile],
 	};
-	plugin.directQueryRuns = new Map();
 	assert.deepStrictEqual(plugin.getVerifiedProviderProfiles().map((item) => item.id), [profile.id]);
 	assert.strictEqual(plugin.resolveQueryBackendId(profile.id), profile.id);
 	assert.strictEqual(plugin.resolveQueryBackendId("missing-provider"), "codex-cli");
@@ -208,7 +222,7 @@ async function testDirectApiQuery() {
 	assert.strictEqual(directRequest.model, "deepseek-v4-pro");
 	assert.ok(directRequest.messages[0].content.includes("只能依据本次提供的 Vault 证据"));
 	assert.ok(directRequest.messages.at(-1).content.includes("wiki/methods/example.md"));
-	assert.strictEqual(plugin.directQueryRuns.size, 0);
+	assert.strictEqual(plugin.isQueryExecutionActive("run-direct", profile.id), false);
 
 	profile.name = "Qwen3.7-Plus";
 	profile.model = "qwen3.7-plus";
@@ -398,24 +412,24 @@ async function testDirectApiQuery() {
 	const figurePath = "wiki/assets/figures/example/figure-1.png";
 	const unreferencedPath = "wiki/assets/figures/example/figure-2.png";
 	const autoFigurePath = "wiki/assets/figures/example/figure-3.png";
-	const sourceNote = {
+	const sourceNote = new TFileStub({
 		path: "wiki/sources/example.md",
 		basename: "example",
-	};
-	const methodNote = {
+	});
+	const methodNote = new TFileStub({
 		path: "wiki/methods/example-method.md",
 		basename: "example-method",
-	};
-	const figureFile = {
+	});
+	const figureFile = new TFileStub({
 		path: figurePath,
 		name: "figure-1.png",
 		stat: { size: 1024 },
-	};
-	const autoFigureFile = {
+	});
+	const autoFigureFile = new TFileStub({
 		path: autoFigurePath,
 		name: "figure-3.png",
 		stat: { size: 2048 },
-	};
+	});
 	const filesByPath = new Map([
 		[sourceNote.path, sourceNote],
 		[methodNote.path, methodNote],
@@ -481,7 +495,7 @@ async function testDirectApiQuery() {
 }
 
 async function testSerializedSettingsSnapshots() {
-	const persistencePlugin = Object.create(AgentDashboardPlugin.prototype);
+	const persistencePlugin = new AgentDashboardPlugin();
 	persistencePlugin.settings = {
 		projectRoot: "first-root",
 		providerProfiles: [],
@@ -501,7 +515,6 @@ async function testSerializedSettingsSnapshots() {
 		})),
 	}];
 	persistencePlugin.activeQuerySessionId = "session-1";
-	persistencePlugin.settingsSaveQueue = Promise.resolve();
 	const snapshots = [];
 	persistencePlugin.saveData = async (snapshot) => {
 		await new Promise((resolve) => setTimeout(resolve, 5));

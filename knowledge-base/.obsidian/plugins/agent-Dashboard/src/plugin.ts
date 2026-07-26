@@ -1,7 +1,7 @@
-// @ts-nocheck
-
 import {
+	FileSystemAdapter,
 	Plugin,
+	TFile,
 	normalizePath,
 } from "obsidian";
 
@@ -9,14 +9,22 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
 
-import { ACTION_BY_ID } from "./actions";
+import { ACTION_BY_ID, type DashboardAction } from "./actions";
 import {
 	DEFAULT_SETTINGS,
 	findPreferredCodexExecutable,
 	isManagedCodexExecutable,
 } from "./runtime/settings";
+import type { DashboardSettings } from "./runtime/settings";
+import { DashboardLifecycleState } from "./runtime/lifecycle-state";
+import {
+	DashboardPersistence,
+	hasPlaintextCredentialFields,
+	normalizeStoredTaskRuns,
+	sanitizeSettingsForStorage,
+} from "./runtime/persistence";
+import { ProcessExecutionService } from "./runtime/process-execution";
 import { AgentDashboardSettingTab } from "./settings/settings-tab";
 import { CodePracticeView } from "./views/code-practice";
 import { DashboardView } from "./views/dashboard";
@@ -31,6 +39,7 @@ import {
 	REASONING_OPTIONS,
 	VAULT_IMAGE_MIME_TYPES,
 	VIEW_TYPE,
+	type ChatMessage,
 } from "./config";
 import {
 	extractModelProvidedWebSources,
@@ -40,6 +49,7 @@ import {
 	normalizeQueryWebSources,
 	normalizeVaultImageAttachment,
 	normalizeVaultImageAttachments,
+	type VaultImageAttachment,
 } from "./query/normalization";
 import {
 	AnthropicProvider,
@@ -48,6 +58,7 @@ import {
 	OllamaProvider,
 	OpenAICompatibleProvider,
 	OpenAIProvider,
+	type LLMProvider,
 } from "./providers/adapters";
 import {
 	normalizeAssignedSites,
@@ -60,6 +71,34 @@ import {
 	parseProviderJson,
 	providerErrorMessage,
 } from "./providers/shared";
+import type { ProviderModel } from "./providers/shared";
+import type { ProviderProfile } from "./providers/profile";
+import type {
+	CodePracticeRequest,
+	CodePracticeResult,
+	CodexExecutionConfig,
+	DashboardProcessHooks,
+	DashboardProcessResult,
+	DirectQueryRunToken,
+	ExecutionConfig,
+	ExecutionOverrides,
+	LintStatus,
+	NormalizedProviderError,
+	OkfExportStatus,
+	ProviderConnectionTestResult,
+	ProviderHttpRequestOptions,
+	ProviderHttpResponse,
+	ProviderHttpStreamOptions,
+	ProviderHttpStreamResponse,
+	ProviderRuntimeEntry,
+	PracticeNotePayload,
+	QueryMessage,
+	QueryMessageStatus,
+	QueryRetrievalMode,
+	QuerySession,
+	TaskRun,
+	TaskRunUpdate,
+} from "./types/contracts";
 
 
 
@@ -70,18 +109,92 @@ import {
 
 
 
+
+type UnknownRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): UnknownRecord {
+	return value !== null && typeof value === "object" ? value as UnknownRecord : {};
+}
+
+function normalizeQueryMessageStatus(value: unknown): QueryMessageStatus {
+	const status = String(value || "");
+	return status === "pending"
+		|| status === "stopping"
+		|| status === "done"
+		|| status === "failed"
+		|| status === "interrupted"
+		? status
+		: "done";
+}
+
+interface RetrievalTrace extends UnknownRecord {
+	lexical_seeds?: unknown[];
+	candidate_paths?: unknown[];
+	context_pages?: string[];
+	linked_note_paths?: string[];
+	keyword_expansion?: UnknownRecord;
+	fallback?: UnknownRecord;
+}
+
+interface VaultEvidencePacket {
+	path: string;
+	wikilink: string;
+	content: string;
+}
+
+interface QuestionImageResolution {
+	attachments: VaultImageAttachment[];
+	notePaths: string[];
+	discoveredCount: number;
+	totalBytes: number;
+}
+
+interface VaultImageReference {
+	title: string;
+	path: string;
+	count: number;
+}
 
 export default class AgentDashboardPlugin extends Plugin {
-	async onload() {
-		this.activeProcesses = new Map();
-		this.activeProcessStops = new Map();
-		this.activePracticeRuns = new Map();
-		this.providerRuntimeState = new Map();
-		this.directQueryRuns = new Map();
-		this.settingsSaveQueue = Promise.resolve();
-		this.settingsSaveTimer = null;
-		this.settingsSaveWaiters = [];
-		this.providerEditorProfileId = "";
+	settings: DashboardSettings = { ...DEFAULT_SETTINGS };
+	taskRuns: TaskRun[] = [];
+	querySessions: QuerySession[] = [];
+	activeQuerySessionId = "";
+	lastContextFile: TFile | null = null;
+
+	private readonly lifecycleState = new DashboardLifecycleState();
+	private readonly processExecution = new ProcessExecutionService(this.lifecycleState);
+	private persistence?: DashboardPersistence;
+
+	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
+		return this.lifecycleState.providerRuntimeState;
+	}
+
+	get providerEditorProfileId(): string {
+		return this.lifecycleState.providerEditorProfileId;
+	}
+
+	set providerEditorProfileId(value: string) {
+		this.lifecycleState.providerEditorProfileId = value;
+	}
+
+	private getPersistence(): DashboardPersistence {
+		if (this.persistence) return this.persistence;
+		this.persistence = new DashboardPersistence({
+			load: () => this.loadData(),
+			save: (data) => this.saveData(data),
+			getState: () => ({
+				settings: this.settings,
+				taskRuns: this.taskRuns,
+				querySessions: this.querySessions,
+				activeQuerySessionId: this.activeQuerySessionId,
+			}),
+		});
+		return this.persistence;
+	}
+
+	async onload(): Promise<void> {
+		this.getPersistence();
 		this.lastContextFile = this.app.workspace.getActiveFile();
 		await this.loadSettings();
 		this.recoverInterruptedPracticeRuns();
@@ -119,124 +232,31 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.addSettingTab(new AgentDashboardSettingTab(this.app, this));
 	}
 
-	onunload() {
+	onunload(): void {
 		void this.flushScheduledSettingsSave();
-		for (const runId of this.activePracticeRuns.keys()) {
-			this.stopCodePractice(runId);
-		}
-		for (const runId of this.activeProcesses.keys()) {
-			this.requestVaultActionStop(runId);
-		}
-		for (const token of this.directQueryRuns.values()) {
-			token.cancelled = true;
-			if (typeof token.abort === "function") token.abort();
-		}
-		this.activeProcesses.clear();
-		this.activeProcessStops.clear();
-		this.directQueryRuns.clear();
+		this.processExecution.shutdown();
 	}
 
-	createPracticeRunId() {
+	createPracticeRunId(): string {
 		const now = new Date();
-		const pad = (value) => String(value).padStart(2, "0");
+		const pad = (value: number) => String(value).padStart(2, "0");
 		const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 		return `${stamp}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
 	}
 
-	recoverInterruptedPracticeRuns() {
-		const runsDirectory = path.join(this.settings.projectRoot, "tool-library", "output", "code-practice", "runs");
-		if (!fs.existsSync(runsDirectory)) return;
-		for (const name of fs.readdirSync(runsDirectory)) {
-			if (!name.endsWith(".json")) continue;
-			const recordPath = path.join(runsDirectory, name);
-			try {
-				const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-				if (!["queued", "running"].includes(record.status)) continue;
-				record.status = "stopped";
-				record.finished_at = new Date().toISOString();
-				record.stderr = `${record.stderr || ""}\nExecution interrupted before the plugin restarted.`.trim();
-				fs.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
-			} catch (error) {
-				console.warn(`Could not recover code-practice record: ${recordPath}`, error);
-			}
-		}
+	recoverInterruptedPracticeRuns(): void {
+		this.processExecution.recoverInterruptedPracticeRuns(this.settings);
 	}
 
-	runCodePractice(request) {
-		const projectRoot = this.settings.projectRoot;
-		const runner = path.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-		if (!fs.existsSync(runner)) return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
-		const interpreter = request.language === "python" ? this.settings.pythonExecutable : this.settings.rscriptExecutable;
-		if (!interpreter || !fs.existsSync(interpreter)) return Promise.reject(new Error(`${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`));
-		const stopPath = path.join(projectRoot, "tool-library", "output", "code-practice", "stop", `${request.run_id}.stop`);
-		const args = [
-			runner,
-			"--project-root",
-			projectRoot,
-			"--python",
-			this.settings.pythonExecutable,
-			"--rscript",
-			this.settings.rscriptExecutable,
-		];
-
-		return new Promise((resolve, reject) => {
-			let stdout = "";
-			let stderr = "";
-			let settled = false;
-			const child = spawn(this.settings.pythonExecutable, args, {
-				cwd: projectRoot,
-				shell: false,
-				windowsHide: true,
-				env: {
-					...process.env,
-					PYTHONUTF8: "1",
-					PYTHONIOENCODING: "utf-8",
-				},
-			});
-			this.activePracticeRuns.set(request.run_id, { child, stopPath });
-			const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-400000);
-			child.stdout.on("data", (chunk) => {
-				stdout = append(stdout, chunk);
-			});
-			child.stderr.on("data", (chunk) => {
-				stderr = append(stderr, chunk);
-			});
-			child.once("error", (error) => {
-				if (settled) return;
-				settled = true;
-				this.activePracticeRuns.delete(request.run_id);
-				reject(error);
-			});
-			child.once("close", () => {
-				if (settled) return;
-				settled = true;
-				this.activePracticeRuns.delete(request.run_id);
-				try {
-					const result = JSON.parse(stdout.trim());
-					if (stderr.trim()) result.runner_stderr = stderr.trim();
-					resolve(result);
-				} catch (error) {
-					reject(new Error(`无法读取代码练习结果：${stderr.trim() || stdout.trim() || error.message}`));
-				}
-			});
-			child.stdin.end(JSON.stringify(request), "utf8");
-		});
+	runCodePractice(request: CodePracticeRequest): Promise<CodePracticeResult> {
+		return this.processExecution.runCodePractice(this.settings, request);
 	}
 
-	stopCodePractice(runId) {
-		const active = this.activePracticeRuns.get(runId);
-		if (!active) return false;
-		try {
-			fs.mkdirSync(path.dirname(active.stopPath), { recursive: true });
-			fs.writeFileSync(active.stopPath, "stop\n", "utf8");
-			return true;
-		} catch (error) {
-			console.error("Could not request code-practice stop", error);
-			return false;
-		}
+	stopCodePractice(runId: string): boolean {
+		return this.processExecution.stopCodePractice(runId);
 	}
 
-	readPracticeFigure(relativePath) {
+	readPracticeFigure(relativePath: string): string {
 		const root = path.resolve(this.settings.projectRoot);
 		const outputRoot = path.join(root, "tool-library", "output", "code-practice", "figures");
 		const candidate = path.resolve(root, relativePath);
@@ -249,26 +269,26 @@ export default class AgentDashboardPlugin extends Plugin {
 		return `data:${mime};base64,${fs.readFileSync(candidate).toString("base64")}`;
 	}
 
-	async savePracticeNote(payload) {
+	async savePracticeNote(payload: PracticeNotePayload): Promise<TFile> {
 		const folder = normalizePath("wiki/code/practice");
 		await this.ensureVaultFolder(folder);
 		const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
 		if (!cells.length) throw new Error("没有可保存的练习单元格");
-		const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || {};
+		const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || null;
 		const now = new Date();
 		const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 		const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
-		const fallback = `practice-${date.replaceAll("-", "")}-${lastResult.run_id?.slice(-6) || Date.now()}`;
+		const fallback = `practice-${date.split("-").join("")}-${lastResult?.run_id.slice(-6) || Date.now()}`;
 		let notePath = normalizePath(`${folder}/${slugBase || fallback}.md`);
 		if (this.app.vault.getAbstractFileByPath(notePath)) {
-			notePath = normalizePath(`${folder}/${slugBase || "practice"}-${lastResult.run_id?.slice(-6) || Date.now()}.md`);
+			notePath = normalizePath(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
 		}
 		if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
 
 		const languageLabel = payload.language === "r" ? "R" : "Python";
 		const relatedTarget = payload.relatedNotePath ? payload.relatedNotePath.replace(/\.md$/i, "") : "";
 		const relatedLink = relatedTarget ? `[[${relatedTarget}]]` : "";
-		const fence = (value) => String(value || "").includes("```") ? "````" : "```";
+		const fence = (value: unknown) => String(value || "").includes("```") ? "````" : "```";
 		const cellSections = cells.flatMap((cell, index) => {
 			const result = cell.result;
 			const codeFence = fence(cell.code);
@@ -318,8 +338,8 @@ export default class AgentDashboardPlugin extends Plugin {
 			`related_note: ${JSON.stringify(relatedLink)}`,
 			"execution_mode: stateless-replay",
 			`cell_count: ${cells.length}`,
-			`last_run_id: ${lastResult.run_id || ""}`,
-			`status: ${lastResult.status || "not-run"}`,
+			`last_run_id: ${lastResult?.run_id || ""}`,
+			`status: ${lastResult?.status || "not-run"}`,
 			`created: ${date}`,
 			`updated: ${date}`,
 			"tags:",
@@ -346,7 +366,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		return this.app.vault.create(notePath, body);
 	}
 
-	async ensureVaultFolder(folderPath) {
+	async ensureVaultFolder(folderPath: string): Promise<void> {
 		let current = "";
 		for (const segment of normalizePath(folderPath).split("/")) {
 			current = current ? `${current}/${segment}` : segment;
@@ -354,20 +374,20 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 	}
 
-	async loadSettings() {
-		const stored = (await this.loadData()) || {};
+	async loadSettings(): Promise<void> {
+		const stored = await this.getPersistence().load();
 		const storedSettings = stored.settings && typeof stored.settings === "object" ? stored.settings : stored;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings) as DashboardSettings;
 		const normalizedProfiles = Array.isArray(storedSettings.providerProfiles)
 			? storedSettings.providerProfiles.slice(0, 20).map((profile) => normalizeProviderProfile(profile))
 			: [];
 		this.settings.providerProfiles = normalizedProfiles;
 		this.settings.activeProviderId = String(storedSettings.activeProviderId || "");
-		const providerTimeout = Number.parseInt(storedSettings.providerTimeoutSeconds, 10);
+		const providerTimeout = Number.parseInt(String(storedSettings.providerTimeoutSeconds || ""), 10);
 		this.settings.providerTimeoutSeconds = Number.isFinite(providerTimeout)
 			? Math.max(3, Math.min(120, providerTimeout))
 			: DEFAULT_SETTINGS.providerTimeoutSeconds;
-		this.taskRuns = Array.isArray(stored.taskRuns) ? stored.taskRuns.slice(0, 30) : [];
+		this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns);
 		this.querySessions = Array.isArray(stored.querySessions)
 			? stored.querySessions.slice(0, 8).map((session) => this.normalizeQuerySession(session))
 			: [];
@@ -427,12 +447,12 @@ export default class AgentDashboardPlugin extends Plugin {
 			if (queryBackendId !== session.queryBackendId || retrievalMode !== session.retrievalMode) {
 				changed = true;
 			}
-			const messages = session.messages.map((message) => {
+			const messages: QueryMessage[] = session.messages.map((message) => {
 				if (!["pending", "stopping"].includes(message.status)) return message;
 				changed = true;
 				return {
 					...message,
-					status: "interrupted",
+					status: "interrupted" as const,
 					progress: "",
 					error: "Obsidian 或插件在回答完成前关闭，本轮查询已标记为中断。",
 				};
@@ -483,100 +503,31 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 	}
 
-	async saveSettings() {
-		const snapshot = JSON.parse(JSON.stringify({
-			settings: this.sanitizeSettingsForStorage(),
-			taskRuns: this.taskRuns.map((run) => ({
-				...run,
-				output: String(run.output || "").slice(0, 12000),
-				error: String(run.error || "").slice(0, 4000),
-			})),
-			querySessions: this.querySessions.map((session) => ({
-				...session,
-				messages: session.messages.slice(-30).map((message) => ({
-					...message,
-					content: String(message.content || "").slice(0, 8000),
-					error: String(message.error || "").slice(0, 4000),
-				})),
-			})),
-			activeQuerySessionId: this.activeQuerySessionId,
-		}));
-		this.settingsSaveQueue = (this.settingsSaveQueue || Promise.resolve())
-			.catch((error) => {
-				console.error("Previous Dashboard settings save failed", error);
-			})
-			.then(() => this.saveData(snapshot));
-		await this.settingsSaveQueue;
+	async saveSettings(): Promise<void> {
+		await this.getPersistence().save();
 	}
 
-	scheduleSettingsSave(delayMs = 400) {
-		if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
-		if (this.settingsSaveTimer === undefined) this.settingsSaveTimer = null;
-		if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
-		return new Promise((resolve, reject) => {
-			this.settingsSaveWaiters.push({ resolve, reject });
-			this.settingsSaveTimer = window.setTimeout(() => {
-				void this.flushScheduledSettingsSave();
-			}, delayMs);
-		});
+	scheduleSettingsSave(delayMs = 400): Promise<void> {
+		return this.getPersistence().schedule(delayMs);
 	}
 
-	async flushScheduledSettingsSave() {
-		if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
-		if (this.settingsSaveTimer === undefined) this.settingsSaveTimer = null;
-		if (this.settingsSaveTimer !== null) {
-			window.clearTimeout(this.settingsSaveTimer);
-			this.settingsSaveTimer = null;
-		}
-		const waiters = this.settingsSaveWaiters.splice(0);
-		if (!waiters.length) return;
-		try {
-			await this.saveSettings();
-			waiters.forEach(({ resolve }) => resolve());
-		} catch (error) {
-			waiters.forEach(({ reject }) => reject(error));
-		}
+	async flushScheduledSettingsSave(): Promise<void> {
+		await this.getPersistence().flush();
 	}
 
-	hasPlaintextCredentialFields(value) {
-		if (!value || typeof value !== "object") return false;
-		return Object.entries(value).some(([key, child]) => {
-			if (
-				/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key)
-				&& key !== "secretId"
-			) {
-				return Boolean(child);
-			}
-			return child && typeof child === "object" && this.hasPlaintextCredentialFields(child);
-		});
+	hasPlaintextCredentialFields(value: unknown): boolean {
+		return hasPlaintextCredentialFields(value);
 	}
 
-	sanitizeSettingsForStorage() {
-		const settings = { ...this.settings };
-		Object.keys(settings).forEach((key) => {
-			if (
-				/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key)
-				&& key !== "secretId"
-			) {
-				delete settings[key];
-			}
-		});
-		settings.providerProfiles = Array.isArray(this.settings.providerProfiles)
-			? this.settings.providerProfiles.slice(0, 20).map((profile) => normalizeProviderProfile(profile))
-			: [];
-		settings.activeProviderId = settings.providerProfiles.some(
-			(profile) => profile.id === this.settings.activeProviderId && profile.lastTest?.ok,
-		)
-			? this.settings.activeProviderId
-			: "";
-		return settings;
+	sanitizeSettingsForStorage(): DashboardSettings {
+		return sanitizeSettingsForStorage(this.settings);
 	}
 
-	getProviderProfile(profileId) {
+	getProviderProfile(profileId: string): ProviderProfile | null {
 		return this.settings.providerProfiles.find((profile) => profile.id === profileId) || null;
 	}
 
-	getVerifiedProviderProfiles() {
+	getVerifiedProviderProfiles(): ProviderProfile[] {
 		return this.settings.providerProfiles.filter((profile) => {
 			return profile.lastTest?.ok === true
 				&& Boolean(profile.model)
@@ -584,7 +535,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		});
 	}
 
-	resolveQueryBackendId(backendId) {
+	resolveQueryBackendId(backendId?: string): string {
 		const normalized = String(backendId || "codex-cli");
 		if (normalized === "codex-cli") return "codex-cli";
 		return this.getVerifiedProviderProfiles().some((profile) => profile.id === normalized)
@@ -592,7 +543,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			: "codex-cli";
 	}
 
-	resolveDirectQueryExecutionConfig(profile) {
+	resolveDirectQueryExecutionConfig(profile: ProviderProfile): ExecutionConfig {
 		return {
 			backend: "direct-api",
 			providerId: profile.id,
@@ -604,12 +555,11 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	createLLMProvider(profileOrId) {
+	createLLMProvider(profileOrId: ProviderProfile | string): LLMProvider {
 		if (profileOrId === "codex-cli") {
 			return new CodexCliProvider(this, {
 				id: "codex-cli",
 				name: "Codex CLI",
-				type: "codex-cli",
 				model: this.settings.codexModel,
 				timeoutSeconds: Math.min(30, this.settings.providerTimeoutSeconds || 20),
 			});
@@ -634,12 +584,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 	}
 
-	async listProviderModels(profileId) {
+	async listProviderModels(profileId: string): Promise<ProviderModel[]> {
 		const provider = this.createLLMProvider(profileId);
 		return provider.listModels();
 	}
 
-	async testProviderConnection(profileId) {
+	async testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult> {
 		const provider = this.createLLMProvider(profileId);
 		const result = await provider.testConnection();
 		if (profileId !== "codex-cli") {
@@ -676,14 +626,16 @@ export default class AgentDashboardPlugin extends Plugin {
 		return result;
 	}
 
-	async providerHttpRequest(options) {
+	async providerHttpRequest(
+		options: ProviderHttpRequestOptions,
+	): Promise<ProviderHttpResponse> {
 		const timeoutMs = Math.max(3000, Math.min(120000, Number(options.timeoutMs || 20000)));
 		const maxResponseBytes = Math.max(
 			65536,
 			Math.min(20 * 1024 * 1024, Number(options.maxResponseBytes || 5 * 1024 * 1024)),
 		);
-		return new Promise((resolve, reject) => {
-			let endpoint;
+		return new Promise<ProviderHttpResponse>((resolve, reject) => {
+			let endpoint: URL;
 			try {
 				endpoint = new URL(options.url);
 			} catch {
@@ -699,8 +651,8 @@ export default class AgentDashboardPlugin extends Plugin {
 			let settled = false;
 			let phase = "connect";
 			let responseBytes = 0;
-			const chunks = [];
-			const finish = (callback) => {
+			const chunks: string[] = [];
+			const finish = (callback: () => void): void => {
 				if (settled) return;
 				settled = true;
 				window.clearTimeout(totalTimer);
@@ -712,7 +664,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			}, (response) => {
 				phase = "read";
 				response.setEncoding("utf8");
-				response.on("data", (chunk) => {
+				response.on("data", (chunk: string) => {
 					responseBytes += Buffer.byteLength(chunk);
 					if (responseBytes > maxResponseBytes) {
 						request.destroy(new ProviderConnectionError(
@@ -797,14 +749,16 @@ export default class AgentDashboardPlugin extends Plugin {
 		});
 	}
 
-	providerHttpStream(options) {
+	providerHttpStream(
+		options: ProviderHttpStreamOptions,
+	): Promise<ProviderHttpStreamResponse> {
 		const timeoutMs = Math.max(3000, Math.min(120000, Number(options.timeoutMs || 20000)));
 		const maxResponseBytes = Math.max(
 			65536,
 			Math.min(20 * 1024 * 1024, Number(options.maxResponseBytes || 5 * 1024 * 1024)),
 		);
-		return new Promise((resolve, reject) => {
-			let endpoint;
+		return new Promise<ProviderHttpStreamResponse>((resolve, reject) => {
+			let endpoint: URL;
 			try {
 				endpoint = new URL(options.url);
 			} catch {
@@ -821,8 +775,8 @@ export default class AgentDashboardPlugin extends Plugin {
 			let responseText = "";
 			let buffer = "";
 			let responseBytes = 0;
-			let totalTimer = null;
-			const finish = (callback) => {
+			let totalTimer: number | null = null;
+			const finish = (callback: () => void): void => {
 				if (settled) return;
 				settled = true;
 				if (totalTimer !== null) window.clearTimeout(totalTimer);
@@ -834,7 +788,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			}, (response) => {
 				const status = Number(response.statusCode || 0);
 				response.setEncoding("utf8");
-				response.on("data", (chunk) => {
+				response.on("data", (chunk: string) => {
 					responseBytes += Buffer.byteLength(chunk);
 					if (responseBytes > maxResponseBytes) {
 						request.destroy(new ProviderConnectionError(
@@ -950,7 +904,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		});
 	}
 
-	normalizeProviderError(error) {
+	normalizeProviderError(error: unknown): NormalizedProviderError {
 		if (error instanceof ProviderConnectionError) {
 			return {
 				type: error.type,
@@ -959,12 +913,25 @@ export default class AgentDashboardPlugin extends Plugin {
 				message: error.message,
 			};
 		}
-		if (error && typeof error === "object" && typeof error.type === "string") {
+		if (
+			error
+			&& typeof error === "object"
+			&& "type" in error
+			&& typeof error.type === "string"
+		) {
+			const candidate = error as {
+				type: string;
+				status?: unknown;
+				endpoint?: unknown;
+				message?: unknown;
+			};
 			return {
-				type: error.type,
-				status: Number(error.status || 0),
-				endpoint: String(error.endpoint || ""),
-				message: error instanceof Error ? error.message : String(error.message || error.type),
+				type: candidate.type,
+				status: Number(candidate.status || 0),
+				endpoint: String(candidate.endpoint || ""),
+				message: error instanceof Error
+					? error.message
+					: String(candidate.message || candidate.type),
 			};
 		}
 		const message = error instanceof Error ? error.message : String(error);
@@ -976,8 +943,8 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	getProviderErrorLabel(type) {
-		return {
+	getProviderErrorLabel(type: string): string {
+		const labels: Record<string, string> = {
 			configuration: "配置不完整",
 			"missing-secret": "缺少凭据",
 			"secret-storage-unavailable": "SecretStorage 不可用",
@@ -999,87 +966,15 @@ export default class AgentDashboardPlugin extends Plugin {
 			unsupported: "尚未支持",
 			"http-unavailable": "HTTP API 不可用",
 			unknown: "未知错误",
-		}[type] || type || "未知错误";
+		};
+		return labels[type] || type || "未知错误";
 	}
 
-	probeCodexCliConnection() {
-		const startedAt = Date.now();
-		const executable = String(this.settings.codexExecutable || "");
-		if (!executable || !fs.existsSync(executable)) {
-			return Promise.resolve({
-				ok: false,
-				type: "configuration",
-				model: this.settings.codexModel,
-				message: `Codex 可执行文件不存在：${executable || "未配置"}`,
-				responseTimeMs: Date.now() - startedAt,
-				testedAt: new Date().toISOString(),
-			});
-		}
-		return new Promise((resolve) => {
-			let stdout = "";
-			let stderr = "";
-			let settled = false;
-			const child = spawn(executable, ["--version"], {
-				cwd: this.settings.projectRoot,
-				shell: false,
-				windowsHide: true,
-			});
-			const finish = (result) => {
-				if (settled) return;
-				settled = true;
-				window.clearTimeout(timer);
-				resolve({
-					model: this.settings.codexModel,
-					responseTimeMs: Date.now() - startedAt,
-					testedAt: new Date().toISOString(),
-					...result,
-				});
-			};
-			child.stdout.on("data", (chunk) => {
-				stdout = `${stdout}${chunk.toString("utf8")}`.slice(-4000);
-			});
-			child.stderr.on("data", (chunk) => {
-				stderr = `${stderr}${chunk.toString("utf8")}`.slice(-4000);
-			});
-			child.once("error", (error) => {
-				finish({
-					ok: false,
-					type: "local-service-offline",
-					message: error.message,
-				});
-			});
-			child.once("close", (code) => {
-				if (code === 0) {
-					finish({
-						ok: true,
-						type: "success",
-						modelExists: null,
-						modelCount: MODEL_OPTIONS.length,
-						streaming: { supported: false, verified: false },
-						pdf: { supported: true, verified: false },
-						vision: { supported: true, verified: false },
-						responsePreview: stdout.trim() || "Codex CLI 可用",
-					});
-					return;
-				}
-				finish({
-					ok: false,
-					type: "local-service-offline",
-					message: stderr.trim() || stdout.trim() || `Codex CLI 退出码 ${code}`,
-				});
-			});
-			const timer = window.setTimeout(() => {
-				if (!child.killed) child.kill();
-				finish({
-					ok: false,
-					type: "timeout",
-					message: "Codex CLI 版本检查超过 10 秒",
-				});
-			}, 10000);
-		});
+	probeCodexCliConnection(): Promise<ProviderConnectionTestResult> {
+		return this.processExecution.probeCodexCli(this.settings);
 	}
 
-	makeQuerySession(title = "新对话") {
+	makeQuerySession(title = "新对话"): QuerySession {
 		const now = new Date().toISOString();
 		return {
 			id: `query-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1092,59 +987,69 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	normalizeQuerySession(session) {
+	normalizeQuerySession(session: unknown): QuerySession {
+		const source = asRecord(session);
 		const fallback = this.makeQuerySession();
-		const messages = Array.isArray(session?.messages)
-			? session.messages.slice(-60).map((message) => ({
-				id: String(message?.id || this.createQueryMessageId()),
-				role: message?.role === "user" ? "user" : "assistant",
-				content: String(message?.content || "").slice(0, 20000),
-				attachments: normalizeVaultImageAttachments(message?.attachments),
-				status: String(message?.status || "done"),
-				progress: String(message?.progress || ""),
-				createdAt: String(message?.createdAt || new Date().toISOString()),
-				runId: String(message?.runId || ""),
-				retrievalTrace: message?.retrievalTrace && typeof message.retrievalTrace === "object"
-					? message.retrievalTrace
+		const messages: QueryMessage[] = Array.isArray(source.messages)
+			? source.messages.slice(-60).map((value) => {
+				const message = asRecord(value);
+				return {
+				id: String(message.id || this.createQueryMessageId()),
+				role: message.role === "user" ? "user" : "assistant",
+				content: String(message.content || "").slice(0, 20000),
+				attachments: normalizeVaultImageAttachments(message.attachments),
+				status: normalizeQueryMessageStatus(message.status),
+				progress: String(message.progress || ""),
+				createdAt: String(message.createdAt || new Date().toISOString()),
+				runId: String(message.runId || ""),
+				retrievalTrace: message.retrievalTrace && typeof message.retrievalTrace === "object"
+					? message.retrievalTrace as Record<string, unknown>
 					: null,
-				vaultSources: normalizeQueryVaultSources(message?.vaultSources),
-				webSources: normalizeQueryWebSources(message?.webSources),
-				citationValidation: normalizeQueryCitationValidation(message?.citationValidation),
-				retrievalPath: normalizeQueryRetrievalPath(message?.retrievalPath),
-				retrievalMode: message?.retrievalMode === "vault" ? "vault" : "web",
-				queryBackendId: String(message?.queryBackendId || "codex-cli").slice(0, 100),
-				providerName: String(message?.providerName || "").slice(0, 80),
-				model: String(message?.model || "").slice(0, 160),
-				error: String(message?.error || "").slice(0, 12000),
-			}))
+				vaultSources: normalizeQueryVaultSources(message.vaultSources),
+				webSources: normalizeQueryWebSources(message.webSources),
+				citationValidation: normalizeQueryCitationValidation(message.citationValidation),
+				retrievalPath: normalizeQueryRetrievalPath(message.retrievalPath),
+				retrievalMode: message.retrievalMode === "vault" ? "vault" : "web",
+				queryBackendId: String(message.queryBackendId || "codex-cli").slice(0, 100),
+				providerName: String(message.providerName || "").slice(0, 80),
+				model: String(message.model || "").slice(0, 160),
+				error: String(message.error || "").slice(0, 12000),
+			};
+			})
 			: [];
 		return {
-			id: String(session?.id || fallback.id),
-			title: String(session?.title || "新对话").slice(0, 80),
-			retrievalMode: session?.retrievalMode === "vault" ? "vault" : "web",
-			queryBackendId: String(session?.queryBackendId || "codex-cli").slice(0, 100),
-			createdAt: String(session?.createdAt || fallback.createdAt),
-			updatedAt: String(session?.updatedAt || fallback.updatedAt),
+			id: String(source.id || fallback.id),
+			title: String(source.title || "新对话").slice(0, 80),
+			retrievalMode: source.retrievalMode === "vault" ? "vault" : "web",
+			queryBackendId: String(source.queryBackendId || "codex-cli").slice(0, 100),
+			createdAt: String(source.createdAt || fallback.createdAt),
+			updatedAt: String(source.updatedAt || fallback.updatedAt),
 			messages,
 		};
 	}
 
-	createQueryMessageId() {
+	createQueryMessageId(): string {
 		return `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	}
 
-	getQuerySessions() {
+	getQuerySessions(): QuerySession[] {
 		return [...this.querySessions].sort((a, b) => {
 			return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
 		});
 	}
 
-	getActiveQuerySession() {
-		return this.querySessions.find((session) => session.id === this.activeQuerySessionId)
-			|| this.querySessions[0];
+	getActiveQuerySession(): QuerySession {
+		const active = this.querySessions.find(
+			(session) => session.id === this.activeQuerySessionId,
+		) || this.querySessions[0];
+		if (active) return active;
+		const fallback = this.makeQuerySession();
+		this.querySessions = [fallback];
+		this.activeQuerySessionId = fallback.id;
+		return fallback;
 	}
 
-	async createQuerySession() {
+	async createQuerySession(): Promise<QuerySession> {
 		const activeSession = this.getActiveQuerySession();
 		if (activeSession && activeSession.messages.length === 0) {
 			return activeSession;
@@ -1156,13 +1061,13 @@ export default class AgentDashboardPlugin extends Plugin {
 		return session;
 	}
 
-	async setActiveQuerySession(sessionId) {
+	async setActiveQuerySession(sessionId: string): Promise<void> {
 		if (!this.querySessions.some((session) => session.id === sessionId)) return;
 		this.activeQuerySessionId = sessionId;
 		await this.saveSettings();
 	}
 
-	async clearActiveQuerySession() {
+	async clearActiveQuerySession(): Promise<void> {
 		const session = this.getActiveQuerySession();
 		session.messages = [];
 		session.title = "新对话";
@@ -1170,7 +1075,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		await this.saveSettings();
 	}
 
-	async deleteActiveQuerySession() {
+	async deleteActiveQuerySession(): Promise<QuerySession | null> {
 		const session = this.getActiveQuerySession();
 		if (!session) return null;
 		if (this.querySessions.length <= 1) {
@@ -1184,21 +1089,25 @@ export default class AgentDashboardPlugin extends Plugin {
 		return nextSession;
 	}
 
-	async setActiveQueryMode(mode) {
+	async setActiveQueryMode(mode: QueryRetrievalMode | string): Promise<void> {
 		const session = this.getActiveQuerySession();
 		session.retrievalMode = mode === "vault" ? "vault" : "web";
 		session.updatedAt = new Date().toISOString();
 		await this.saveSettings();
 	}
 
-	async setActiveQueryBackend(backendId) {
+	async setActiveQueryBackend(backendId: string): Promise<void> {
 		const session = this.getActiveQuerySession();
 		session.queryBackendId = this.resolveQueryBackendId(backendId);
 		session.updatedAt = new Date().toISOString();
 		await this.saveSettings();
 	}
 
-	async appendQueryMessages(sessionId, messages, firstQuestion = "") {
+	async appendQueryMessages(
+		sessionId: string,
+		messages: QueryMessage[],
+		firstQuestion = "",
+	): Promise<void> {
 		const session = this.querySessions.find((item) => item.id === sessionId);
 		if (!session) throw new Error("查询会话不存在");
 		session.messages = [...session.messages, ...messages].slice(-60);
@@ -1209,7 +1118,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		await this.saveSettings();
 	}
 
-	async updateQueryMessage(sessionId, messageId, updates, saveMode = "immediate") {
+	async updateQueryMessage(
+		sessionId: string,
+		messageId: string,
+		updates: Partial<QueryMessage>,
+		saveMode: "immediate" | "debounced" = "immediate",
+	): Promise<QueryMessage | null> {
 		const session = this.querySessions.find((item) => item.id === sessionId);
 		if (!session) return null;
 		const index = session.messages.findIndex((message) => message.id === messageId);
@@ -1234,7 +1148,11 @@ export default class AgentDashboardPlugin extends Plugin {
 		return session.messages[index];
 	}
 
-	buildQueryActionInput(question, priorMessages, mode = "web") {
+	buildQueryActionInput(
+		question: string,
+		priorMessages: QueryMessage[],
+		mode: QueryRetrievalMode = "web",
+	): string {
 		const completed = Array.isArray(priorMessages)
 			? priorMessages.filter((message) => message.status === "done" && message.content)
 			: [];
@@ -1261,26 +1179,26 @@ export default class AgentDashboardPlugin extends Plugin {
 		});
 	}
 
-	inferProjectRoot() {
+	inferProjectRoot(): string {
 		const adapter = this.app.vault.adapter;
-		if (typeof adapter.getBasePath !== "function") return "";
+		if (!(adapter instanceof FileSystemAdapter)) return "";
 		const vaultRoot = adapter.getBasePath();
 		const parent = path.dirname(vaultRoot);
 		if (fs.existsSync(path.join(parent, "AGENTS.md"))) return parent;
 		return vaultRoot;
 	}
 
-	getTaskRuns() {
+	getTaskRuns(): TaskRun[] {
 		return [...this.taskRuns].sort((a, b) => {
 			return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
 		});
 	}
 
-	getTaskRun(runId) {
+	getTaskRun(runId: string): TaskRun | null {
 		return this.taskRuns.find((run) => run.id === runId) || null;
 	}
 
-	getRunningTaskRun(actionId) {
+	getRunningTaskRun(actionId: string): TaskRun | null {
 		const actionIds = ["vault-lint", "vault-lint-fix"].includes(actionId)
 			? new Set(["vault-lint", "vault-lint-fix"])
 			: new Set([actionId]);
@@ -1290,7 +1208,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		)) || null;
 	}
 
-	getTaskRunOutput(run) {
+	getTaskRunOutput(run: TaskRun): string {
 		if (run?.outputPath) {
 			const absolutePath = path.join(
 				this.settings.projectRoot,
@@ -1306,7 +1224,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		return String(run?.output || "");
 	}
 
-	async persistTaskRunOutput(run) {
+	async persistTaskRunOutput(run: TaskRun): Promise<string> {
 		const output = String(run?.output || "");
 		if (!output) return "";
 		const relativePath = `tool-library/output/dashboard-runs/${run.id}.json`;
@@ -1334,26 +1252,29 @@ export default class AgentDashboardPlugin extends Plugin {
 		return relativePath;
 	}
 
-	isActionRunning(actionId) {
+	isActionRunning(actionId: string): boolean {
 		const actionIds = ["vault-lint", "vault-lint-fix"].includes(actionId)
 			? new Set(["vault-lint", "vault-lint-fix"])
 			: new Set([actionId]);
 		return this.taskRuns.some((run) => actionIds.has(run.actionId) && (run.status === "running" || run.status === "queued"));
 	}
 
-	getModelLabel(model) {
+	getModelLabel(model: string): string {
 		return MODEL_OPTIONS.find((option) => option.id === model)?.label || model;
 	}
 
-	getReasoningLabel(reasoningEffort) {
+	getReasoningLabel(reasoningEffort: string): string {
 		return REASONING_OPTIONS.find((option) => option.id === reasoningEffort)?.label || reasoningEffort;
 	}
 
-	supportsFast(model) {
+	supportsFast(model: string): boolean {
 		return MODEL_OPTIONS.find((option) => option.id === model)?.supportsFast === true;
 	}
 
-	resolveActionExecutionConfig(action, overrides = {}) {
+	resolveActionExecutionConfig(
+		action: DashboardAction,
+		overrides: ExecutionOverrides = {},
+	): CodexExecutionConfig {
 		const buttonModel = action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel;
 		const buttonReasoning = action.reasoningEffort
 			|| this.settings.codexReasoningEffort
@@ -1372,9 +1293,13 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	async startTaskRun(action, summary, executionConfig = null) {
+	async startTaskRun(
+		action: DashboardAction,
+		summary: string,
+		executionConfig: ExecutionConfig | null = null,
+	): Promise<TaskRun> {
 		const now = new Date().toISOString();
-		const run = {
+		const run: TaskRun = {
 			id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
 			actionId: action.id,
 			label: action.label,
@@ -1393,7 +1318,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		return run;
 	}
 
-	async finishTaskRun(runId, updates) {
+	async finishTaskRun(
+		runId: string,
+		updates: TaskRunUpdate,
+	): Promise<TaskRun | null> {
 		const index = this.taskRuns.findIndex((run) => run.id === runId);
 		if (index === -1) return null;
 		this.taskRuns[index] = {
@@ -1408,7 +1336,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		return this.taskRuns[index];
 	}
 
-	getOkfExportStatus() {
+	getOkfExportStatus(): OkfExportStatus {
 		const projectRoot = this.settings.projectRoot;
 		const exporter = path.join(projectRoot, "tool-library", "scripts", "export_okf.py");
 		const latestPath = path.join(projectRoot, "tool-library", "output", "okf", "latest.json");
@@ -1428,7 +1356,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	getLintStatus() {
+	getLintStatus(): LintStatus {
 		const projectRoot = this.settings.projectRoot;
 		const latestPath = path.join(projectRoot, "tool-library", "output", "lint", "latest.json");
 		let latest = null;
@@ -1443,13 +1371,13 @@ export default class AgentDashboardPlugin extends Plugin {
 		return { latest, error };
 	}
 
-	checkRuntime(action = null) {
+	checkRuntime(action: DashboardAction | null = null): { ready: boolean; message: string } {
 		const projectRoot = this.settings.projectRoot;
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
 		const practiceRunner = path.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
 		const exporter = path.join(projectRoot, "tool-library", "scripts", "export_okf.py");
 		const lintScript = path.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
-		const checks = [
+		const checks: Array<[string, boolean]> = [
 			["项目根目录", fs.existsSync(projectRoot)],
 			["AGENTS.md", fs.existsSync(path.join(projectRoot, "AGENTS.md"))],
 			["Dashboard runner", fs.existsSync(runner)],
@@ -1476,14 +1404,14 @@ export default class AgentDashboardPlugin extends Plugin {
 	}
 
 	async runDirectVaultQuery(
-		runId,
-		providerId,
-		question,
-		priorMessages,
-		mode = "vault",
-		hooks = {},
-		attachments = [],
-	) {
+		runId: string,
+		providerId: string,
+		question: string,
+		priorMessages: QueryMessage[],
+		mode: QueryRetrievalMode = "vault",
+		hooks: DashboardProcessHooks = {},
+		attachments: VaultImageAttachment[] = [],
+	): Promise<DashboardProcessResult> {
 		const storedProfile = this.getProviderProfile(providerId);
 		if (!storedProfile || storedProfile.lastTest?.ok !== true) {
 			throw new ProviderConnectionError("configuration", "Direct API 配置不存在或尚未通过连接测试");
@@ -1502,14 +1430,17 @@ export default class AgentDashboardPlugin extends Plugin {
 				"当前 Direct API 配置未启用视觉输入",
 			);
 		}
-		const token = { cancelled: false };
-		this.directQueryRuns.set(runId, token);
+		const token: DirectQueryRunToken = { cancelled: false };
+		this.lifecycleState.directQueryRuns.set(runId, token);
 		try {
 			const provider = this.createLLMProvider(profile);
 			if (typeof hooks.onEvent === "function") {
 				hooks.onEvent({ type: "status", stage: "retrieval-preflight", label: "正在检索知识库候选页面" });
 			}
-			let trace = await this.runVaultRetrievalPreflight(runId, question);
+			let trace = await this.runVaultRetrievalPreflight(
+				runId,
+				question,
+			) as RetrievalTrace;
 			if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
 			if (!Array.isArray(trace.lexical_seeds) || trace.lexical_seeds.length === 0) {
 				try {
@@ -1522,7 +1453,11 @@ export default class AgentDashboardPlugin extends Plugin {
 					}
 					const expandedTerms = await this.generateDirectQueryKeywords(provider, profile, question);
 					if (expandedTerms.length) {
-						trace = await this.runVaultRetrievalPreflight(runId, question, expandedTerms);
+						trace = await this.runVaultRetrievalPreflight(
+							runId,
+							question,
+							expandedTerms,
+						) as RetrievalTrace;
 						trace.keyword_expansion = {
 							...(trace.keyword_expansion || {}),
 							attempted: true,
@@ -1591,7 +1526,7 @@ export default class AgentDashboardPlugin extends Plugin {
 				maxTokens: 4096,
 				webSearch: mode === "web",
 			};
-			let response = null;
+			let response: Awaited<ReturnType<LLMProvider["complete"]>> | null = null;
 			let streamedText = "";
 			const shouldStream = profile.capabilities?.streaming === true
 				&& profile.lastTest?.streamingVerified === true;
@@ -1624,7 +1559,7 @@ export default class AgentDashboardPlugin extends Plugin {
 					streamedText = "";
 					response = null;
 				} finally {
-					token.abort = null;
+					token.abort = undefined;
 				}
 			}
 			if (!response || !String(response.text || streamedText).trim()) {
@@ -1633,7 +1568,7 @@ export default class AgentDashboardPlugin extends Plugin {
 						token.abort = cancel;
 					},
 				});
-				token.abort = null;
+				token.abort = undefined;
 			}
 			if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
 			const text = String(response?.text || streamedText || "").trim();
@@ -1660,11 +1595,19 @@ export default class AgentDashboardPlugin extends Plugin {
 				events: [retrievalEvent, resultEvent],
 			};
 		} finally {
-			if (this.directQueryRuns.get(runId) === token) this.directQueryRuns.delete(runId);
+			if (this.lifecycleState.directQueryRuns.get(runId) === token) {
+				this.lifecycleState.directQueryRuns.delete(runId);
+			}
 		}
 	}
 
-	buildDirectRetrievalResult(text, evidence, trace, mode, profile) {
+	buildDirectRetrievalResult(
+		text: string,
+		evidence: VaultEvidencePacket[],
+		trace: RetrievalTrace,
+		mode: QueryRetrievalMode,
+		profile: ProviderProfile,
+	): UnknownRecord {
 		const normalizedProfile = normalizeProviderProfile(profile || {});
 		const webSearch = normalizedProfile.webSearch;
 		const answer = String(text || "").trim();
@@ -1686,7 +1629,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		const webSources = mode === "web"
 			? extractModelProvidedWebSources(answer)
 			: [];
-		const warnings = [];
+		const warnings: string[] = [];
 		if (mode === "web") {
 			warnings.push(
 				webSources.length
@@ -1742,7 +1685,11 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	async generateDirectQueryKeywords(provider, profile, question) {
+	async generateDirectQueryKeywords(
+		provider: LLMProvider,
+		profile: ProviderProfile,
+		question: string,
+	): Promise<string[]> {
 		const response = await provider.complete({
 			model: profile.model,
 			messages: [
@@ -1776,81 +1723,45 @@ export default class AgentDashboardPlugin extends Plugin {
 			.slice(0, 10);
 	}
 
-	runVaultRetrievalPreflight(runId, question, expandedTerms = []) {
+	async runVaultRetrievalPreflight(
+		runId: string,
+		question: string,
+		expandedTerms: string[] = [],
+	): Promise<Record<string, unknown>> {
 		const projectRoot = path.resolve(this.settings.projectRoot);
 		const script = path.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
 		if (!fs.existsSync(script)) {
-			return Promise.reject(new Error(`知识库检索脚本不存在：${script}`));
+			throw new Error(`知识库检索脚本不存在：${script}`);
 		}
 		if (!this.settings.pythonExecutable || !fs.existsSync(this.settings.pythonExecutable)) {
-			return Promise.reject(new Error(`Python 不可用：${this.settings.pythonExecutable}`));
+			throw new Error(`Python 不可用：${this.settings.pythonExecutable}`);
 		}
-		return new Promise((resolve, reject) => {
-			let stdout = "";
-			let stderr = "";
-			let settled = false;
-			let timer = null;
-			const args = [script, "--project-root", projectRoot, "--query", String(question).slice(0, 4000)];
-			for (const term of expandedTerms.slice(0, 10)) {
-				args.push("--expanded-term", String(term).slice(0, 80));
-			}
-			const child = spawn(
-				this.settings.pythonExecutable,
-				args,
-				{
-					cwd: projectRoot,
-					shell: false,
-					windowsHide: true,
-					env: {
-						...process.env,
-						PYTHONUTF8: "1",
-						PYTHONIOENCODING: "utf-8",
-					},
-				},
-			);
-			this.activeProcesses.set(runId, child);
-			const finish = (callback) => {
-				if (settled) return;
-				settled = true;
-				if (timer !== null) window.clearTimeout(timer);
-				if (this.activeProcesses.get(runId) === child) this.activeProcesses.delete(runId);
-				callback();
-			};
-			child.stdout.on("data", (chunk) => {
-				stdout = `${stdout}${chunk.toString("utf8")}`.slice(-1000000);
-			});
-			child.stderr.on("data", (chunk) => {
-				stderr = `${stderr}${chunk.toString("utf8")}`.slice(-20000);
-			});
-			child.once("error", (error) => finish(() => reject(error)));
-			child.once("close", (code) => {
-				finish(() => {
-					if (code !== 0) {
-						reject(new Error(stderr.trim() || `知识库检索进程退出码：${code}`));
-						return;
-					}
-					try {
-						resolve(JSON.parse(stdout));
-					} catch {
-						reject(new Error("知识库检索结果不是有效 JSON"));
-					}
-				});
-			});
-			timer = window.setTimeout(() => {
-				if (!child.killed) child.kill();
-				finish(() => reject(new ProviderConnectionError("timeout", "知识库检索超过 45 秒")));
-			}, 45000);
-			child.stdin.end();
+		const args = [script, "--project-root", projectRoot, "--query", question.slice(0, 4000)];
+		for (const term of expandedTerms.slice(0, 10)) {
+			args.push("--expanded-term", term.slice(0, 80));
+		}
+		const result = await this.processExecution.runJsonProcess({
+			runId,
+			executable: this.settings.pythonExecutable,
+			args,
+			cwd: projectRoot,
+			timeoutMs: 45000,
+			timeoutMessage: "知识库检索超过 45 秒",
 		});
+		try {
+			return JSON.parse(result.stdout) as Record<string, unknown>;
+		} catch {
+			throw new Error("知识库检索结果不是有效 JSON");
+		}
 	}
 
-	readVaultEvidencePacket(trace) {
+	readVaultEvidencePacket(trace: RetrievalTrace): VaultEvidencePacket[] {
 		const projectRoot = path.resolve(this.settings.projectRoot);
 		const vaultRoot = path.resolve(projectRoot, "knowledge-base");
 		const vaultPrefix = `${vaultRoot}${path.sep}`;
 		const candidates = Array.isArray(trace?.candidate_paths) ? trace.candidate_paths : [];
-		const evidence = [];
-		const seen = new Set();
+		const evidence: VaultEvidencePacket[] = [];
+		const seen = new Set<string>();
 		let remaining = 48000;
 		for (const candidate of candidates) {
 			if (evidence.length >= 8 || remaining <= 0) break;
@@ -1876,7 +1787,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		return evidence;
 	}
 
-	resolveVaultLinkedFile(rawLink, sourcePath = "") {
+	resolveVaultLinkedFile(rawLink: unknown, sourcePath = ""): TFile | null {
 		let link = String(rawLink || "").trim();
 		if (!link) return null;
 		link = link.split("|", 1)[0].split("#", 1)[0].trim();
@@ -1891,21 +1802,21 @@ export default class AgentDashboardPlugin extends Plugin {
 		const metadataCache = this.app?.metadataCache;
 		if (typeof metadataCache?.getFirstLinkpathDest === "function") {
 			const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
-			if (resolved) return resolved;
+			if (resolved instanceof TFile) return resolved;
 		}
 		const direct = this.app.vault.getAbstractFileByPath(link);
-		if (direct) return direct;
+		if (direct instanceof TFile) return direct;
 		if (sourcePath) {
 			const relative = normalizePath(
 				path.posix.normalize(path.posix.join(path.posix.dirname(sourcePath), link)),
 			);
 			const relativeFile = this.app.vault.getAbstractFileByPath(relative);
-			if (relativeFile) return relativeFile;
+			if (relativeFile instanceof TFile) return relativeFile;
 		}
 		return null;
 	}
 
-	resolveVaultMarkdownFile(rawLink) {
+	resolveVaultMarkdownFile(rawLink: unknown): TFile | null {
 		let candidate = String(rawLink || "").trim();
 		if (!candidate) return null;
 		candidate = candidate.split("|", 1)[0].split("#", 1)[0].trim();
@@ -1941,9 +1852,9 @@ export default class AgentDashboardPlugin extends Plugin {
 			.sort((a, b) => b.path.length - a.path.length)[0] || null;
 	}
 
-	extractQuestionNoteFiles(question) {
+	extractQuestionNoteFiles(question: string): TFile[] {
 		const text = String(question || "");
-		const candidates = [];
+		const candidates: string[] = [];
 		for (const match of text.matchAll(/obsidian:\/\/open\?[^\s<>"']+/gi)) {
 			const rawUrl = match[0].replace(/[)\]}>，。；;!?]+$/u, "");
 			try {
@@ -1960,8 +1871,8 @@ export default class AgentDashboardPlugin extends Plugin {
 				candidates.push(value);
 			}
 		}
-		const seen = new Set();
-		const files = [];
+		const seen = new Set<string>();
+		const files: TFile[] = [];
 		for (const candidate of candidates) {
 			const file = this.resolveVaultMarkdownFile(candidate);
 			if (!file || seen.has(file.path.toLocaleLowerCase())) continue;
@@ -1971,7 +1882,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		return files;
 	}
 
-	async getEmbeddedImageFiles(noteFile) {
+	async getEmbeddedImageFiles(noteFile: TFile): Promise<TFile[]> {
 		const metadataCache = this.app?.metadataCache;
 		const cache = typeof metadataCache?.getFileCache === "function"
 			? metadataCache.getFileCache(noteFile)
@@ -1994,8 +1905,8 @@ export default class AgentDashboardPlugin extends Plugin {
 					}),
 			];
 		}
-		const seen = new Set();
-		const images = [];
+		const seen = new Set<string>();
+		const images: TFile[] = [];
 		for (const link of links) {
 			const file = this.resolveVaultLinkedFile(link, noteFile.path);
 			if (!file || !VAULT_IMAGE_MIME_TYPES[path.posix.extname(file.path).toLowerCase()]) continue;
@@ -2007,15 +1918,18 @@ export default class AgentDashboardPlugin extends Plugin {
 		return images;
 	}
 
-	async resolveQuestionImageAttachments(question, existingAttachments = []) {
+	async resolveQuestionImageAttachments(
+		question: string,
+		existingAttachments: VaultImageAttachment[] = [],
+	): Promise<QuestionImageResolution> {
 		const noteFiles = this.extractQuestionNoteFiles(question);
 		const existing = normalizeVaultImageAttachments(existingAttachments);
 		const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
 		let totalBytes = existing.reduce((sum, attachment) => {
 			const file = this.app.vault.getAbstractFileByPath(attachment.path);
-			return sum + Number(file?.stat?.size || attachment.size || 0);
+			return sum + Number(file instanceof TFile ? file.stat.size : attachment.size || 0);
 		}, 0);
-		const attachments = [];
+		const attachments: VaultImageAttachment[] = [];
 		let discoveredCount = 0;
 		for (const noteFile of noteFiles) {
 			const images = await this.getEmbeddedImageFiles(noteFile);
@@ -2047,8 +1961,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	buildVaultImageReferenceIndex(imageFiles = []) {
-		const normalizeVaultPath = (value) => normalizePath(
+	buildVaultImageReferenceIndex(
+		imageFiles: TFile[] = [],
+	): Map<string, VaultImageReference[]> {
+		const normalizeVaultPath = (value: unknown): string => normalizePath(
 			String(value || "").trim().replace(/\\/g, "/").replace(/^\/+/, ""),
 		);
 		const imagePaths = new Set(
@@ -2056,27 +1972,36 @@ export default class AgentDashboardPlugin extends Plugin {
 				.map((file) => normalizeVaultPath(file?.path))
 				.filter(Boolean),
 		);
-		const referenceMaps = new Map(
-			[...imagePaths].map((imagePath) => [imagePath, new Map()]),
+		const referenceMaps = new Map<string, Map<string, VaultImageReference>>(
+			[...imagePaths].map((imagePath) => [
+				imagePath,
+				new Map<string, VaultImageReference>(),
+			]),
 		);
 		const metadataCache = this.app?.metadataCache;
-		const addReference = (imagePathValue, notePathValue, countValue = 1) => {
+		const addReference = (
+			imagePathValue: unknown,
+			notePathValue: unknown,
+			countValue: unknown = 1,
+		): void => {
 			const imagePath = normalizeVaultPath(imagePathValue);
 			const notePath = normalizeVaultPath(notePathValue);
 			if (!imagePaths.has(imagePath) || !notePath.toLowerCase().endsWith(".md")) return;
 			const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-			const frontmatter = noteFile && typeof metadataCache?.getFileCache === "function"
+			const frontmatter = noteFile instanceof TFile
 				? metadataCache.getFileCache(noteFile)?.frontmatter
 				: null;
 			const title = String(
 				frontmatter?.title_zh
 				|| frontmatter?.title
-				|| noteFile?.basename
+				|| (noteFile instanceof TFile ? noteFile.basename : "")
 				|| path.posix.basename(notePath, ".md"),
 			).trim();
 			const count = Math.max(1, Number(countValue) || 1);
-			const current = referenceMaps.get(imagePath).get(notePath);
-			referenceMaps.get(imagePath).set(notePath, {
+			const references = referenceMaps.get(imagePath);
+			if (!references) return;
+			const current = references.get(notePath);
+			references.set(notePath, {
 				path: notePath,
 				title: title || path.posix.basename(notePath, ".md"),
 				count: Math.max(current?.count || 0, count),
@@ -2094,7 +2019,7 @@ export default class AgentDashboardPlugin extends Plugin {
 				const embeds = typeof metadataCache?.getFileCache === "function"
 					? metadataCache.getFileCache(noteFile)?.embeds || []
 					: [];
-				const embedCounts = new Map();
+				const embedCounts = new Map<string, number>();
 				for (const embed of embeds) {
 					const targetFile = typeof metadataCache?.getFirstLinkpathDest === "function"
 						? metadataCache.getFirstLinkpathDest(embed?.link || "", noteFile.path)
@@ -2119,7 +2044,13 @@ export default class AgentDashboardPlugin extends Plugin {
 		);
 	}
 
-	readVaultImageData(attachment) {
+	readVaultImageData(attachment: VaultImageAttachment): {
+		attachment: VaultImageAttachment;
+		content: {
+			type: "image_url";
+			image_url: { url: string };
+		};
+	} {
 		const normalized = normalizeVaultImageAttachment(attachment);
 		if (!normalized) {
 			throw new ProviderConnectionError(
@@ -2179,17 +2110,21 @@ export default class AgentDashboardPlugin extends Plugin {
 		};
 	}
 
-	buildDirectQueryMessages(question, priorMessages, evidence, attachments = [], mode = "vault") {
+	buildDirectQueryMessages(
+		question: string,
+		priorMessages: QueryMessage[],
+		evidence: VaultEvidencePacket[],
+		attachments: VaultImageAttachment[] = [],
+		mode: QueryRetrievalMode = "vault",
+	): ChatMessage[] {
 		const webMode = mode === "web";
-		const recentTurns = Array.isArray(priorMessages)
-			? priorMessages
-				.filter((message) => message.status === "done" && message.content)
-				.slice(-6)
-				.map((message) => ({
-					role: message.role === "assistant" ? "assistant" : "user",
-					content: String(message.content).slice(0, 1800),
-				}))
-			: [];
+		const recentTurns: ChatMessage[] = priorMessages
+			.filter((message) => message.status === "done" && message.content)
+			.slice(-6)
+			.map((message) => ({
+				role: message.role === "assistant" ? "assistant" : "user",
+				content: String(message.content).slice(0, 1800),
+			}));
 		const evidenceJson = JSON.stringify(evidence, null, 2);
 		const imagePayloads = normalizeVaultImageAttachments(attachments)
 			.map((attachment) => this.readVaultImageData(attachment));
@@ -2227,7 +2162,7 @@ export default class AgentDashboardPlugin extends Plugin {
 				? "本轮已启用 Qwen 原生联网搜索。请先使用 Vault 证据，再补充实时外部信息；分别使用“知识库证据”和“联网补充”小节，不得把两者混为同一来源。若搜索结果提供了可靠 URL，请使用 Markdown 链接；无法确认 URL 时不要编造链接。在“检索路径”中列出实际采用的 Vault 页面，并说明使用了 Qwen 联网搜索。"
 				: "请仅根据这些证据回答，并在“检索路径”中列出实际采用的页面。",
 		].filter(Boolean).join("\n");
-		return [
+		const messages: ChatMessage[] = [
 			{
 				role: "system",
 				content: [
@@ -2256,9 +2191,16 @@ export default class AgentDashboardPlugin extends Plugin {
 					: currentPrompt,
 			},
 		];
+		return messages;
 	}
 
-	runVaultAction(runId, action, input, executionConfig = null, hooks = {}) {
+	runVaultAction(
+		runId: string,
+		action: DashboardAction,
+		input: string,
+		executionConfig: ExecutionConfig | null = null,
+		hooks: DashboardProcessHooks = {},
+	): Promise<DashboardProcessResult> {
 		const registered = ACTION_BY_ID.get(action.id);
 		if (!registered || !registered.enabled) {
 			return Promise.reject(new Error(`操作尚未启用：${action.label}`));
@@ -2267,171 +2209,54 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!runtime.ready) {
 			return Promise.reject(new Error(runtime.message));
 		}
-		const projectRoot = this.settings.projectRoot;
-		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
-		const timeoutSeconds = Math.max(60, Math.min(14400, Number(this.settings.taskTimeoutMinutes) * 60 || 3600));
-		const effectiveConfig = executionConfig || this.resolveActionExecutionConfig(action);
-		const stopPath = path.join(
-			projectRoot,
-			"tool-library",
-			"output",
-			"dashboard-runs",
-			"stop",
-			`${runId}.stop`,
-		);
-		fs.mkdirSync(path.dirname(stopPath), { recursive: true });
-		if (fs.existsSync(stopPath)) fs.unlinkSync(stopPath);
-		const args = [
-			runner,
-			"--action",
-			action.id,
-			"--project-root",
-			projectRoot,
-			"--codex",
-			this.settings.codexExecutable,
-			"--model",
-			effectiveConfig.model,
-			"--reasoning-effort",
-			effectiveConfig.reasoningEffort,
-			"--service-tier",
-			effectiveConfig.serviceTier,
-			"--python",
-			this.settings.pythonExecutable,
-			"--timeout-seconds",
-			String(timeoutSeconds),
-			"--stop-file",
-			stopPath,
-		];
-
-		return new Promise((resolve, reject) => {
-			let stdout = "";
-			let stderr = "";
-			let stderrBuffer = "";
-			const events = [];
-			let settled = false;
-			let timedOut = false;
-			const child = spawn(this.settings.pythonExecutable, args, {
-				cwd: projectRoot,
-				shell: false,
-				windowsHide: true,
-				env: {
-					...process.env,
-					PYTHONUTF8: "1",
-					PYTHONIOENCODING: "utf-8",
-				},
-			});
-			this.activeProcesses.set(runId, child);
-			this.activeProcessStops.set(runId, stopPath);
-			const clearRunState = () => {
-				this.activeProcesses.delete(runId);
-				this.activeProcessStops.delete(runId);
-				try {
-					if (fs.existsSync(stopPath)) fs.unlinkSync(stopPath);
-				} catch (error) {
-					console.warn("Could not remove Dashboard stop signal", error);
-				}
-			};
-			const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-160000);
-			const consumeStderrLine = (line, keepNewline = true) => {
-				const normalized = line.replace(/\r$/, "");
-				if (normalized.startsWith("DASHBOARD_EVENT ")) {
-					try {
-						const event = JSON.parse(normalized.slice("DASHBOARD_EVENT ".length));
-						events.push(event);
-						if (typeof hooks.onEvent === "function") hooks.onEvent(event);
-					} catch (error) {
-						console.warn("Could not parse Dashboard runner event", error);
-					}
-					return;
-				}
-				stderr = append(stderr, `${line}${keepNewline ? "\n" : ""}`);
-				if (typeof hooks.onStderr === "function") hooks.onStderr(line);
-			};
-			child.stdout.on("data", (chunk) => {
-				stdout = append(stdout, chunk);
-				if (typeof hooks.onStdout === "function") hooks.onStdout(chunk.toString("utf8"));
-			});
-			child.stderr.on("data", (chunk) => {
-				stderrBuffer += chunk.toString("utf8");
-				const lines = stderrBuffer.split("\n");
-				stderrBuffer = lines.pop() || "";
-				lines.forEach((line) => consumeStderrLine(line));
-			});
-			child.once("error", (error) => {
-				if (settled) return;
-				settled = true;
-				window.clearTimeout(timer);
-				clearRunState();
-				reject(error);
-			});
-			child.once("close", (code, signal) => {
-				if (settled) return;
-				settled = true;
-				window.clearTimeout(timer);
-				clearRunState();
-				if (stderrBuffer) consumeStderrLine(stderrBuffer, false);
-				resolve({
-					exitCode: timedOut ? 124 : typeof code === "number" ? code : 1,
-					signal: signal || "",
-					stdout,
-					stderr: timedOut ? `${stderr}\n任务超过 ${timeoutSeconds} 秒，已请求终止。` : stderr,
-					events,
-				});
-			});
-			const timer = window.setTimeout(() => {
-				timedOut = true;
-				this.requestVaultActionStop(runId);
-				window.setTimeout(() => {
-					if (this.activeProcesses.get(runId) === child && !child.killed) child.kill();
-				}, 10000);
-			}, (timeoutSeconds + 15) * 1000);
-			child.stdin.end(input, "utf8");
+		const effectiveConfig = executionConfig
+			? {
+				...executionConfig,
+				reasoningEffort: executionConfig.reasoningEffort
+					|| this.settings.codexReasoningEffort,
+				serviceTier: executionConfig.serviceTier || "default",
+			} as CodexExecutionConfig
+			: this.resolveActionExecutionConfig(action);
+		return this.processExecution.runVaultAction({
+			runId,
+			action,
+			input,
+			executionConfig: effectiveConfig,
+			settings: this.settings,
+			hooks,
 		});
 	}
 
-	stopVaultAction(runId) {
-		const child = this.activeProcesses.get(runId);
-		if (!child || child.killed) return false;
-		return this.requestVaultActionStop(runId);
+	stopVaultAction(runId: string): boolean {
+		return this.processExecution.stopVaultAction(runId);
 	}
 
-	requestVaultActionStop(runId) {
-		const child = this.activeProcesses.get(runId);
-		const stopPath = this.activeProcessStops.get(runId);
-		if (!child || child.killed || !stopPath) return false;
-		try {
-			fs.mkdirSync(path.dirname(stopPath), { recursive: true });
-			fs.writeFileSync(stopPath, "stop\n", "utf8");
-			return true;
-		} catch (error) {
-			console.error("Could not request Dashboard action stop", error);
-			return false;
-		}
+	requestVaultActionStop(runId: string): boolean {
+		return this.processExecution.requestVaultActionStop(runId);
 	}
 
-	stopDirectVaultQuery(runId) {
-		const token = this.directQueryRuns.get(runId);
+	stopDirectVaultQuery(runId: string): boolean {
+		const token = this.lifecycleState.directQueryRuns.get(runId);
 		if (!token || token.cancelled) return false;
 		token.cancelled = true;
-		if (typeof token.abort === "function") token.abort();
-		const child = this.activeProcesses.get(runId);
+		token.abort?.();
+		const child = this.lifecycleState.activeProcesses.get(runId);
 		if (child && !child.killed) child.kill();
 		return true;
 	}
 
-	isVaultActionProcessActive(runId) {
-		const child = this.activeProcesses.get(runId);
-		return Boolean(child && !child.killed);
+	isVaultActionProcessActive(runId: string): boolean {
+		return this.processExecution.isVaultActionProcessActive(runId);
 	}
 
-	isQueryExecutionActive(runId, backendId = "codex-cli") {
+	isQueryExecutionActive(runId: string, backendId = "codex-cli"): boolean {
 		if (backendId && backendId !== "codex-cli") {
-			return this.directQueryRuns.has(runId);
+			return this.lifecycleState.directQueryRuns.has(runId);
 		}
 		return this.isVaultActionProcessActive(runId);
 	}
 
-	async activateDashboardView() {
+	async activateDashboardView(): Promise<void> {
 		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
 		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
 		if (!existing) {
@@ -2440,24 +2265,24 @@ export default class AgentDashboardPlugin extends Plugin {
 		await this.app.workspace.revealLeaf(leaf);
 	}
 
-	async activateCodePracticeView() {
+	async activateCodePracticeView(): Promise<void> {
 		const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
 		const existing = this.app.workspace.getLeavesOfType(CODE_PRACTICE_VIEW_TYPE)[0];
 		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
 		if (!existing) {
 			await leaf.setViewState({ type: CODE_PRACTICE_VIEW_TYPE, active: true });
 		}
-		if (typeof leaf.view?.setRelatedNote === "function") leaf.view.setRelatedNote(contextFile);
+		if (leaf.view instanceof CodePracticeView) leaf.view.setRelatedNote(contextFile);
 		await this.app.workspace.revealLeaf(leaf);
 	}
 
-	async activateQueryWikiView(initialQuestion = "") {
+	async activateQueryWikiView(initialQuestion = ""): Promise<void> {
 		const existing = this.app.workspace.getLeavesOfType(QUERY_WIKI_VIEW_TYPE)[0];
 		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
 		if (!existing) {
 			await leaf.setViewState({ type: QUERY_WIKI_VIEW_TYPE, active: true });
 		}
-		if (typeof leaf.view?.setInitialQuestion === "function") {
+		if (leaf.view instanceof QueryWikiView) {
 			leaf.view.setInitialQuestion(initialQuestion);
 		}
 		await this.app.workspace.revealLeaf(leaf);

@@ -13,8 +13,11 @@ const originalLoad = Module._load;
 Module._load = function loadWithObsidianStub(request, parent, isMain) {
 	if (request === "obsidian") {
 		class Base {}
+		class TFile extends Base {}
+		class FileSystemAdapter extends Base {}
 		class SecretComponentStub {}
 		return {
+			FileSystemAdapter,
 			ItemView: Base,
 			MarkdownRenderer: { render: async () => {} },
 			Modal: Base,
@@ -23,6 +26,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
 			PluginSettingTab: Base,
 			SecretComponent: SecretComponentStub,
 			Setting: class {},
+			TFile,
 			normalizePath: (value) => value,
 			requestUrl: (options) => requestHandler(options),
 			setIcon: () => {},
@@ -53,7 +57,7 @@ global.window = {
 };
 
 function makePlugin(profile) {
-	const plugin = Object.create(AgentDashboardPlugin.prototype);
+	const plugin = new AgentDashboardPlugin();
 	plugin.app = {
 		secretStorage: {
 			getSecret: (secretId) => secretId === "openai-main" ? "sk-test-secret" : null,
@@ -74,7 +78,6 @@ function makePlugin(profile) {
 		openaiApiKey: "must-not-persist",
 		githubToken: "must-not-persist",
 	};
-	plugin.providerRuntimeState = new Map();
 	plugin.providerHttpRequest = async (options) => {
 		let result;
 		try {
@@ -133,7 +136,7 @@ async function main() {
 	assert.ok(!pluginSource.includes('wiki/methods/single-cell-rna-seq'));
 	assert.ok(pluginSource.includes("this.recordByPath = new Map()"));
 	assert.ok(pluginSource.includes("version !== this.loadVersion"));
-	const migrationPlugin = Object.create(AgentDashboardPlugin.prototype);
+	const migrationPlugin = new AgentDashboardPlugin();
 	migrationPlugin.loadData = async () => ({
 		settings: {
 			projectRoot: path.resolve(__dirname, "../.."),
@@ -314,7 +317,7 @@ async function main() {
 		"[DONE]",
 	]);
 
-	const transportPlugin = Object.create(AgentDashboardPlugin.prototype);
+	const transportPlugin = new AgentDashboardPlugin();
 	let delayedSocketClosed = false;
 	const delayedServer = http.createServer((_request, response) => {
 		const delayedResponse = setTimeout(() => {

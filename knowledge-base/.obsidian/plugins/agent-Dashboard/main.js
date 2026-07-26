@@ -203,6 +203,24 @@ var DEFAULT_SETTINGS = {
   providerTimeoutSeconds: 20
 };
 
+// src/runtime/lifecycle-state.ts
+var DashboardLifecycleState = class {
+  constructor() {
+    this.activeProcesses = /* @__PURE__ */ new Map();
+    this.activeProcessStops = /* @__PURE__ */ new Map();
+    this.activePracticeRuns = /* @__PURE__ */ new Map();
+    this.directQueryRuns = /* @__PURE__ */ new Map();
+    this.providerRuntimeState = /* @__PURE__ */ new Map();
+    this.providerEditorProfileId = "";
+  }
+  clearTransientState() {
+    this.activeProcesses.clear();
+    this.activeProcessStops.clear();
+    this.activePracticeRuns.clear();
+    this.directQueryRuns.clear();
+  }
+};
+
 // src/config.ts
 var VIEW_TYPE = "agent-dashboard-research-vault";
 var CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
@@ -420,6 +438,620 @@ function normalizeProviderProfile(profile) {
     updatedAt: String(source.updatedAt || fallback.updatedAt)
   };
 }
+
+// src/runtime/persistence.ts
+function asRecord2(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+function normalizeTaskStatus(value) {
+  const status = String(value || "");
+  return status === "queued" || status === "running" || status === "done" || status === "failed" || status === "interrupted" ? status : "interrupted";
+}
+function normalizeExecutionConfig(value) {
+  const source = asRecord2(value);
+  const model = String(source.model || "").trim();
+  if (!model) return null;
+  const serviceTier = source.serviceTier === "fast" ? "fast" : source.serviceTier === "default" ? "default" : null;
+  return {
+    backend: source.backend === "direct-api" ? "direct-api" : "codex-cli",
+    providerId: String(source.providerId || ""),
+    providerName: String(source.providerName || ""),
+    model,
+    reasoningEffort: source.reasoningEffort === null ? null : String(source.reasoningEffort || ""),
+    serviceTier,
+    modelSource: String(source.modelSource || ""),
+    reasoningSource: String(source.reasoningSource || "")
+  };
+}
+function normalizeStoredTaskRuns(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 30).map((item) => {
+    const source = asRecord2(item);
+    return {
+      id: String(source.id || ""),
+      actionId: String(source.actionId || ""),
+      label: String(source.label || ""),
+      agent: String(source.agent || ""),
+      summary: String(source.summary || "").slice(0, 4e3),
+      executionConfig: normalizeExecutionConfig(source.executionConfig),
+      status: normalizeTaskStatus(source.status),
+      startedAt: String(source.startedAt || ""),
+      finishedAt: String(source.finishedAt || ""),
+      exitCode: typeof source.exitCode === "number" ? source.exitCode : null,
+      output: String(source.output || "").slice(0, 12e3),
+      outputPath: String(source.outputPath || "") || void 0,
+      error: String(source.error || "").slice(0, 4e3)
+    };
+  });
+}
+function hasPlaintextCredentialFields(value) {
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, child]) => {
+    if (/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key) && key !== "secretId") {
+      return Boolean(child);
+    }
+    return child && typeof child === "object" && hasPlaintextCredentialFields(child);
+  });
+}
+function sanitizeSettingsForStorage(settings) {
+  const sanitized = { ...settings };
+  Object.keys(sanitized).forEach((key) => {
+    if (/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key) && key !== "secretId") {
+      delete sanitized[key];
+    }
+  });
+  sanitized.providerProfiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles.slice(0, 20).map((profile) => normalizeProviderProfile(profile)) : [];
+  sanitized.activeProviderId = sanitized.providerProfiles.some(
+    (profile) => profile.id === settings.activeProviderId && profile.lastTest?.ok
+  ) ? settings.activeProviderId : "";
+  return sanitized;
+}
+function createPersistenceSnapshot(state) {
+  return JSON.parse(JSON.stringify({
+    settings: sanitizeSettingsForStorage(state.settings),
+    taskRuns: state.taskRuns.map((run) => ({
+      ...run,
+      output: String(run.output || "").slice(0, 12e3),
+      error: String(run.error || "").slice(0, 4e3)
+    })),
+    querySessions: state.querySessions.map((session) => ({
+      ...session,
+      messages: session.messages.slice(-30).map((message) => ({
+        ...message,
+        content: String(message.content || "").slice(0, 8e3),
+        error: String(message.error || "").slice(0, 4e3)
+      }))
+    })),
+    activeQuerySessionId: state.activeQuerySessionId
+  }));
+}
+var DashboardPersistence = class {
+  constructor(options) {
+    this.options = options;
+    this.saveQueue = Promise.resolve();
+    this.saveTimer = null;
+    this.saveWaiters = [];
+  }
+  async load() {
+    const loaded = await this.options.load();
+    return loaded && typeof loaded === "object" ? loaded : {};
+  }
+  async save() {
+    const snapshot = createPersistenceSnapshot(this.options.getState());
+    this.saveQueue = this.saveQueue.catch((error) => {
+      console.error("Previous Dashboard settings save failed", error);
+    }).then(() => this.options.save(snapshot));
+    await this.saveQueue;
+  }
+  schedule(delayMs = 400) {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    return new Promise((resolve3, reject) => {
+      this.saveWaiters.push({ resolve: resolve3, reject });
+      this.saveTimer = window.setTimeout(() => {
+        void this.flush();
+      }, delayMs);
+    });
+  }
+  async flush() {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    const waiters = this.saveWaiters.splice(0);
+    if (!waiters.length) return;
+    try {
+      await this.save();
+      waiters.forEach(({ resolve: resolve3 }) => resolve3());
+    } catch (error) {
+      waiters.forEach(({ reject }) => reject(error));
+    }
+  }
+};
+
+// src/providers/shared.ts
+function asRecord3(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+var ProviderConnectionError = class extends Error {
+  constructor(type, message, details = {}) {
+    super(message);
+    this.name = "ProviderConnectionError";
+    this.type = type;
+    this.status = Number(details.status || 0);
+    this.endpoint = String(details.endpoint || "");
+  }
+};
+function buildProviderUrl(baseUrl, route) {
+  const base = String(baseUrl || "").trim().replace(/\/+$/g, "");
+  const pathValue = String(route || "").trim().replace(/^\/+/g, "");
+  if (!base) throw new ProviderConnectionError("configuration", "未配置 endpoint");
+  if (base.toLowerCase().endsWith("/v1") && pathValue.toLowerCase().startsWith("v1/")) {
+    return `${base}/${pathValue.slice(3)}`;
+  }
+  return `${base}/${pathValue}`;
+}
+function providerErrorMessage(payload, fallback = "") {
+  const source = asRecord3(payload);
+  const error = asRecord3(source.error);
+  const candidates = [
+    error.message,
+    error.detail,
+    source.message,
+    source.detail
+  ];
+  return String(candidates.find((value) => typeof value === "string" && value.trim()) || fallback);
+}
+function extractOpenAIText(payload) {
+  const source = asRecord3(payload);
+  if (typeof source.output_text === "string") return source.output_text;
+  const output = Array.isArray(source.output) ? source.output : [];
+  const responseText = output.flatMap((item) => {
+    const content = asRecord3(item).content;
+    return Array.isArray(content) ? content : [];
+  }).map((item) => {
+    const content = asRecord3(item);
+    return content.text || content.content || "";
+  }).filter(Boolean).join("\n");
+  if (responseText) return responseText;
+  const choices = Array.isArray(source.choices) ? source.choices : [];
+  const firstChoice = asRecord3(choices[0]);
+  const message = asRecord3(firstChoice.message);
+  return String(message.content || firstChoice.text || "");
+}
+function parseProviderJson(value) {
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    return parsed !== null && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function emitProviderDelta(onDelta, value) {
+  const delta = String(value || "");
+  if (delta && typeof onDelta === "function") onDelta(delta);
+  return delta;
+}
+function normalizeProviderModelList(payload) {
+  const source = asRecord3(payload);
+  const values = Array.isArray(source.data) ? source.data : Array.isArray(source.models) ? source.models : [];
+  return values.map((model) => {
+    const record = asRecord3(model);
+    const id = String(record.id || record.name || record.model || "").trim();
+    if (!id) return null;
+    return {
+      id,
+      name: String(record.name || record.id || id),
+      ownedBy: String(record.owned_by || record.provider || "")
+    };
+  }).filter((model) => model !== null).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// src/runtime/process-execution.ts
+var fs2 = __toESM(require("node:fs"));
+var path2 = __toESM(require("node:path"));
+var import_node_child_process = require("node:child_process");
+function appendOutput(current, chunk, limit) {
+  return `${current}${chunk.toString()}`.slice(-limit);
+}
+var ProcessExecutionService = class {
+  constructor(state) {
+    this.state = state;
+  }
+  recoverInterruptedPracticeRuns(settings) {
+    const runsDirectory = path2.join(
+      settings.projectRoot,
+      "tool-library",
+      "output",
+      "code-practice",
+      "runs"
+    );
+    if (!fs2.existsSync(runsDirectory)) return;
+    for (const name of fs2.readdirSync(runsDirectory)) {
+      if (!name.endsWith(".json")) continue;
+      const recordPath = path2.join(runsDirectory, name);
+      try {
+        const record = JSON.parse(
+          fs2.readFileSync(recordPath, "utf8")
+        );
+        if (record.status !== "queued" && record.status !== "running") continue;
+        record.status = "stopped";
+        record.finished_at = (/* @__PURE__ */ new Date()).toISOString();
+        record.stderr = `${String(record.stderr || "")}
+Execution interrupted before the plugin restarted.`.trim();
+        fs2.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
+      } catch (error) {
+        console.warn(`Could not recover code-practice record: ${recordPath}`, error);
+      }
+    }
+  }
+  runCodePractice(settings, request) {
+    const projectRoot = settings.projectRoot;
+    const runner = path2.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
+    if (!fs2.existsSync(runner)) {
+      return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
+    }
+    const interpreter = request.language === "python" ? settings.pythonExecutable : settings.rscriptExecutable;
+    if (!interpreter || !fs2.existsSync(interpreter)) {
+      return Promise.reject(new Error(
+        `${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`
+      ));
+    }
+    const stopPath = path2.join(
+      projectRoot,
+      "tool-library",
+      "output",
+      "code-practice",
+      "stop",
+      `${request.run_id}.stop`
+    );
+    const args = [
+      runner,
+      "--project-root",
+      projectRoot,
+      "--python",
+      settings.pythonExecutable,
+      "--rscript",
+      settings.rscriptExecutable
+    ];
+    return new Promise((resolve3, reject) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const child = (0, import_node_child_process.spawn)(settings.pythonExecutable, args, {
+        cwd: projectRoot,
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        }
+      });
+      this.state.activePracticeRuns.set(request.run_id, { child, stopPath });
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 4e5);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 4e5);
+      });
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        this.state.activePracticeRuns.delete(request.run_id);
+        reject(error);
+      });
+      child.once("close", () => {
+        if (settled) return;
+        settled = true;
+        this.state.activePracticeRuns.delete(request.run_id);
+        try {
+          const result = JSON.parse(stdout.trim());
+          if (stderr.trim()) result.runner_stderr = stderr.trim();
+          resolve3(result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          reject(new Error(
+            `无法读取代码练习结果：${stderr.trim() || stdout.trim() || message}`
+          ));
+        }
+      });
+      child.stdin.end(JSON.stringify(request), "utf8");
+    });
+  }
+  stopCodePractice(runId) {
+    const active = this.state.activePracticeRuns.get(runId);
+    if (!active) return false;
+    try {
+      fs2.mkdirSync(path2.dirname(active.stopPath), { recursive: true });
+      fs2.writeFileSync(active.stopPath, "stop\n", "utf8");
+      return true;
+    } catch (error) {
+      console.error("Could not request code-practice stop", error);
+      return false;
+    }
+  }
+  runVaultAction(options) {
+    const { runId, action, input, executionConfig, settings, hooks = {} } = options;
+    const projectRoot = settings.projectRoot;
+    const runner = path2.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
+    const timeoutSeconds = Math.max(
+      60,
+      Math.min(14400, Number(settings.taskTimeoutMinutes) * 60 || 3600)
+    );
+    const stopPath = path2.join(
+      projectRoot,
+      "tool-library",
+      "output",
+      "dashboard-runs",
+      "stop",
+      `${runId}.stop`
+    );
+    fs2.mkdirSync(path2.dirname(stopPath), { recursive: true });
+    if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
+    const args = [
+      runner,
+      "--action",
+      action.id,
+      "--project-root",
+      projectRoot,
+      "--codex",
+      settings.codexExecutable,
+      "--model",
+      executionConfig.model,
+      "--reasoning-effort",
+      executionConfig.reasoningEffort,
+      "--service-tier",
+      executionConfig.serviceTier,
+      "--python",
+      settings.pythonExecutable,
+      "--timeout-seconds",
+      String(timeoutSeconds),
+      "--stop-file",
+      stopPath
+    ];
+    return new Promise((resolve3, reject) => {
+      let stdout = "";
+      let stderr = "";
+      let stderrBuffer = "";
+      const events = [];
+      let settled = false;
+      let timedOut = false;
+      let timer = 0;
+      const child = (0, import_node_child_process.spawn)(settings.pythonExecutable, args, {
+        cwd: projectRoot,
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        }
+      });
+      this.state.activeProcesses.set(runId, child);
+      this.state.activeProcessStops.set(runId, stopPath);
+      const clearRunState = () => {
+        this.state.activeProcesses.delete(runId);
+        this.state.activeProcessStops.delete(runId);
+        try {
+          if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
+        } catch (error) {
+          console.warn("Could not remove Dashboard stop signal", error);
+        }
+      };
+      const consumeStderrLine = (line, keepNewline = true) => {
+        const normalized = line.replace(/\r$/, "");
+        if (normalized.startsWith("DASHBOARD_EVENT ")) {
+          try {
+            const event = JSON.parse(
+              normalized.slice("DASHBOARD_EVENT ".length)
+            );
+            events.push(event);
+            hooks.onEvent?.(event);
+          } catch (error) {
+            console.warn("Could not parse Dashboard runner event", error);
+          }
+          return;
+        }
+        stderr = appendOutput(stderr, `${line}${keepNewline ? "\n" : ""}`, 16e4);
+        hooks.onStderr?.(line);
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 16e4);
+        hooks.onStdout?.(chunk.toString("utf8"));
+      });
+      child.stderr.on("data", (chunk) => {
+        stderrBuffer += chunk.toString("utf8");
+        const lines = stderrBuffer.split("\n");
+        stderrBuffer = lines.pop() || "";
+        lines.forEach((line) => consumeStderrLine(line));
+      });
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        clearRunState();
+        reject(error);
+      });
+      child.once("close", (code, signal) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        clearRunState();
+        if (stderrBuffer) consumeStderrLine(stderrBuffer, false);
+        resolve3({
+          exitCode: timedOut ? 124 : typeof code === "number" ? code : 1,
+          signal: signal || "",
+          stdout,
+          stderr: timedOut ? `${stderr}
+任务超过 ${timeoutSeconds} 秒，已请求终止。` : stderr,
+          events
+        });
+      });
+      timer = window.setTimeout(() => {
+        timedOut = true;
+        this.requestVaultActionStop(runId);
+        window.setTimeout(() => {
+          if (this.state.activeProcesses.get(runId) === child && !child.killed) child.kill();
+        }, 1e4);
+      }, (timeoutSeconds + 15) * 1e3);
+      child.stdin.end(input, "utf8");
+    });
+  }
+  runJsonProcess(options) {
+    return new Promise((resolve3, reject) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      const child = (0, import_node_child_process.spawn)(options.executable, options.args, {
+        cwd: options.cwd,
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        }
+      });
+      this.state.activeProcesses.set(options.runId, child);
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (this.state.activeProcesses.get(options.runId) === child) {
+          this.state.activeProcesses.delete(options.runId);
+        }
+        callback();
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 2e5);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 4e4);
+      });
+      child.once("error", (error) => finish(() => reject(error)));
+      child.once("close", (code) => {
+        finish(() => {
+          if (code !== 0) {
+            reject(new Error(stderr.trim() || `进程退出码：${code}`));
+            return;
+          }
+          resolve3({ stdout, stderr });
+        });
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish(() => reject(new ProviderConnectionError("timeout", options.timeoutMessage)));
+      }, options.timeoutMs);
+      child.stdin.end();
+    });
+  }
+  probeCodexCli(settings) {
+    const startedAt = Date.now();
+    const executable = String(settings.codexExecutable || "");
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        model: settings.codexModel,
+        message: `Codex 可执行文件不存在：${executable || "未配置"}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    return new Promise((resolve3) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      const child = (0, import_node_child_process.spawn)(executable, ["--version"], {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true
+      });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve3({
+          model: settings.codexModel,
+          responseTimeMs: Date.now() - startedAt,
+          testedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          ...result
+        });
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 4e3);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 4e3);
+      });
+      child.once("error", (error) => {
+        finish({ ok: false, type: "local-service-offline", message: error.message });
+      });
+      child.once("close", (code) => {
+        if (code === 0) {
+          finish({
+            ok: true,
+            type: "success",
+            modelExists: null,
+            modelCount: MODEL_OPTIONS.length,
+            streaming: { supported: false, verified: false },
+            pdf: { supported: true, verified: false },
+            vision: { supported: true, verified: false },
+            responsePreview: stdout.trim() || "Codex CLI 可用"
+          });
+          return;
+        }
+        finish({
+          ok: false,
+          type: "local-service-offline",
+          message: stderr.trim() || stdout.trim() || `Codex CLI 退出码 ${code}`
+        });
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish({ ok: false, type: "timeout", message: "Codex CLI 版本检查超过 10 秒" });
+      }, 1e4);
+    });
+  }
+  stopVaultAction(runId) {
+    const child = this.state.activeProcesses.get(runId);
+    if (!child || child.killed) return false;
+    return this.requestVaultActionStop(runId);
+  }
+  requestVaultActionStop(runId) {
+    const child = this.state.activeProcesses.get(runId);
+    const stopPath = this.state.activeProcessStops.get(runId);
+    if (!child || child.killed || !stopPath) return false;
+    try {
+      fs2.mkdirSync(path2.dirname(stopPath), { recursive: true });
+      fs2.writeFileSync(stopPath, "stop\n", "utf8");
+      return true;
+    } catch (error) {
+      console.error("Could not request Dashboard action stop", error);
+      return false;
+    }
+  }
+  isVaultActionProcessActive(runId) {
+    const child = this.state.activeProcesses.get(runId);
+    return Boolean(child && !child.killed);
+  }
+  shutdown() {
+    for (const runId of this.state.activePracticeRuns.keys()) {
+      this.stopCodePractice(runId);
+    }
+    for (const [runId, child] of this.state.activeProcesses) {
+      const stopRequested = this.requestVaultActionStop(runId);
+      if (!stopRequested && !child.killed) child.kill();
+    }
+    for (const token of this.state.directQueryRuns.values()) {
+      token.cancelled = true;
+      token.abort?.();
+    }
+    this.state.clearTransientState();
+  }
+};
 
 // src/settings/settings-tab.ts
 var import_obsidian = require("obsidian");
@@ -1916,8 +2548,8 @@ var DashboardDataService = class {
     }
     return [];
   }
-  inferType(path6) {
-    const normalized = (0, import_obsidian6.normalizePath)(path6);
+  inferType(path7) {
+    const normalized = (0, import_obsidian6.normalizePath)(path7);
     if (normalized.startsWith("wiki/sources/")) return "source";
     if (normalized.startsWith("wiki/methods/")) return "method";
     if (normalized.startsWith("wiki/synthesis/")) return "synthesis";
@@ -2942,11 +3574,11 @@ ${result.stderr.trim()}`);
 
 // src/query/normalization.ts
 var import_node_path2 = __toESM(require("node:path"));
-function asRecord2(value) {
+function asRecord4(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeVaultImageAttachment(value) {
-  const source = asRecord2(value);
+  const source = asRecord4(value);
   const attachmentPath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   const extension = import_node_path2.default.posix.extname(attachmentPath).toLowerCase();
   const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
@@ -2979,7 +3611,7 @@ function normalizeQueryVaultSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord2(value);
+    const source = asRecord4(value);
     let sourcePath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^knowledge-base\//i, "").replace(/^\/+/, "");
     if (!sourcePath || seen.has(sourcePath.toLowerCase())) continue;
     seen.add(sourcePath.toLowerCase());
@@ -2996,7 +3628,7 @@ function normalizeQueryWebSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord2(value);
+    const source = asRecord4(value);
     let parsed;
     try {
       parsed = new URL(String(source.url || "").trim());
@@ -3041,7 +3673,7 @@ function extractModelProvidedWebSources(text) {
   return normalizeQueryWebSources(matches);
 }
 function normalizeQueryRetrievalPath(value) {
-  const source = asRecord2(value);
+  const source = asRecord4(value);
   return {
     stage: String(source.stage || "").slice(0, 200),
     inspectedVaultPaths: (Array.isArray(source.inspected_vault_paths) ? source.inspected_vault_paths : Array.isArray(source.inspectedVaultPaths) ? source.inspectedVaultPaths : []).map((item) => String(item || "").trim().replace(/\\/g, "/").slice(0, 1e3)).filter(Boolean).slice(0, 30),
@@ -3050,7 +3682,7 @@ function normalizeQueryRetrievalPath(value) {
   };
 }
 function normalizeQueryCitationValidation(value) {
-  const source = asRecord2(value);
+  const source = asRecord4(value);
   const allowedStatuses = /* @__PURE__ */ new Set([
     "verified",
     "structured",
@@ -3101,7 +3733,7 @@ function normalizeQueryCitationValidation(value) {
 
 // src/modals/vault-image-picker.ts
 var import_obsidian8 = require("obsidian");
-var path4 = __toESM(require("node:path"));
+var path5 = __toESM(require("node:path"));
 var VaultImagePickerModal = class extends import_obsidian8.Modal {
   constructor(app, plugin, onChoose, selectedImages = []) {
     super(app);
@@ -3149,7 +3781,7 @@ var VaultImagePickerModal = class extends import_obsidian8.Modal {
       cls: "query-wiki-image-picker-preview",
       attr: { "aria-label": "图片预览与引用信息" }
     });
-    const files = this.app.vault.getFiles().filter((file) => Boolean(VAULT_IMAGE_MIME_TYPES[path4.extname(file.path).toLowerCase()])).filter((file) => Number(file.stat?.size || 0) <= MAX_VAULT_IMAGE_BYTES).filter((file) => !this.selectedPaths.has(file.path.toLocaleLowerCase())).sort((a, b) => Number(b.stat?.mtime || 0) - Number(a.stat?.mtime || 0));
+    const files = this.app.vault.getFiles().filter((file) => Boolean(VAULT_IMAGE_MIME_TYPES[path5.extname(file.path).toLowerCase()])).filter((file) => Number(file.stat?.size || 0) <= MAX_VAULT_IMAGE_BYTES).filter((file) => !this.selectedPaths.has(file.path.toLocaleLowerCase())).sort((a, b) => Number(b.stat?.mtime || 0) - Number(a.stat?.mtime || 0));
     const referenceIndex = this.plugin.buildVaultImageReferenceIndex(files);
     const items = files.map((file) => ({
       file,
@@ -4476,84 +5108,6 @@ ${result.stderr.trim()}` : ""
   }
 };
 
-// src/providers/shared.ts
-function asRecord3(value) {
-  return value !== null && typeof value === "object" ? value : {};
-}
-var ProviderConnectionError = class extends Error {
-  constructor(type, message, details = {}) {
-    super(message);
-    this.name = "ProviderConnectionError";
-    this.type = type;
-    this.status = Number(details.status || 0);
-    this.endpoint = String(details.endpoint || "");
-  }
-};
-function buildProviderUrl(baseUrl, route) {
-  const base = String(baseUrl || "").trim().replace(/\/+$/g, "");
-  const pathValue = String(route || "").trim().replace(/^\/+/g, "");
-  if (!base) throw new ProviderConnectionError("configuration", "未配置 endpoint");
-  if (base.toLowerCase().endsWith("/v1") && pathValue.toLowerCase().startsWith("v1/")) {
-    return `${base}/${pathValue.slice(3)}`;
-  }
-  return `${base}/${pathValue}`;
-}
-function providerErrorMessage(payload, fallback = "") {
-  const source = asRecord3(payload);
-  const error = asRecord3(source.error);
-  const candidates = [
-    error.message,
-    error.detail,
-    source.message,
-    source.detail
-  ];
-  return String(candidates.find((value) => typeof value === "string" && value.trim()) || fallback);
-}
-function extractOpenAIText(payload) {
-  const source = asRecord3(payload);
-  if (typeof source.output_text === "string") return source.output_text;
-  const output = Array.isArray(source.output) ? source.output : [];
-  const responseText = output.flatMap((item) => {
-    const content = asRecord3(item).content;
-    return Array.isArray(content) ? content : [];
-  }).map((item) => {
-    const content = asRecord3(item);
-    return content.text || content.content || "";
-  }).filter(Boolean).join("\n");
-  if (responseText) return responseText;
-  const choices = Array.isArray(source.choices) ? source.choices : [];
-  const firstChoice = asRecord3(choices[0]);
-  const message = asRecord3(firstChoice.message);
-  return String(message.content || firstChoice.text || "");
-}
-function parseProviderJson(value) {
-  try {
-    const parsed = JSON.parse(String(value || ""));
-    return parsed !== null && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-function emitProviderDelta(onDelta, value) {
-  const delta = String(value || "");
-  if (delta && typeof onDelta === "function") onDelta(delta);
-  return delta;
-}
-function normalizeProviderModelList(payload) {
-  const source = asRecord3(payload);
-  const values = Array.isArray(source.data) ? source.data : Array.isArray(source.models) ? source.models : [];
-  return values.map((model) => {
-    const record = asRecord3(model);
-    const id = String(record.id || record.name || record.model || "").trim();
-    if (!id) return null;
-    return {
-      id,
-      name: String(record.name || record.id || id),
-      ownedBy: String(record.owned_by || record.provider || "")
-    };
-  }).filter((model) => model !== null).sort((a, b) => a.id.localeCompare(b.id));
-}
-
 // src/providers/adapters.ts
 function contentAsText(content) {
   if (typeof content === "string") return content;
@@ -5028,22 +5582,53 @@ var CodexCliProvider = class extends LLMProvider {
 
 // src/plugin.ts
 var import_obsidian10 = require("obsidian");
-var fs2 = __toESM(require("node:fs"));
+var fs3 = __toESM(require("node:fs"));
 var http = __toESM(require("node:http"));
 var https = __toESM(require("node:https"));
-var path5 = __toESM(require("node:path"));
-var import_node_child_process = require("node:child_process");
+var path6 = __toESM(require("node:path"));
+function asRecord5(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+function normalizeQueryMessageStatus(value) {
+  const status = String(value || "");
+  return status === "pending" || status === "stopping" || status === "done" || status === "failed" || status === "interrupted" ? status : "done";
+}
 var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.taskRuns = [];
+    this.querySessions = [];
+    this.activeQuerySessionId = "";
+    this.lastContextFile = null;
+    this.lifecycleState = new DashboardLifecycleState();
+    this.processExecution = new ProcessExecutionService(this.lifecycleState);
+  }
+  get providerRuntimeState() {
+    return this.lifecycleState.providerRuntimeState;
+  }
+  get providerEditorProfileId() {
+    return this.lifecycleState.providerEditorProfileId;
+  }
+  set providerEditorProfileId(value) {
+    this.lifecycleState.providerEditorProfileId = value;
+  }
+  getPersistence() {
+    if (this.persistence) return this.persistence;
+    this.persistence = new DashboardPersistence({
+      load: () => this.loadData(),
+      save: (data) => this.saveData(data),
+      getState: () => ({
+        settings: this.settings,
+        taskRuns: this.taskRuns,
+        querySessions: this.querySessions,
+        activeQuerySessionId: this.activeQuerySessionId
+      })
+    });
+    return this.persistence;
+  }
   async onload() {
-    this.activeProcesses = /* @__PURE__ */ new Map();
-    this.activeProcessStops = /* @__PURE__ */ new Map();
-    this.activePracticeRuns = /* @__PURE__ */ new Map();
-    this.providerRuntimeState = /* @__PURE__ */ new Map();
-    this.directQueryRuns = /* @__PURE__ */ new Map();
-    this.settingsSaveQueue = Promise.resolve();
-    this.settingsSaveTimer = null;
-    this.settingsSaveWaiters = [];
-    this.providerEditorProfileId = "";
+    this.getPersistence();
     this.lastContextFile = this.app.workspace.getActiveFile();
     await this.loadSettings();
     this.recoverInterruptedPracticeRuns();
@@ -5082,19 +5667,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
   }
   onunload() {
     void this.flushScheduledSettingsSave();
-    for (const runId of this.activePracticeRuns.keys()) {
-      this.stopCodePractice(runId);
-    }
-    for (const runId of this.activeProcesses.keys()) {
-      this.requestVaultActionStop(runId);
-    }
-    for (const token of this.directQueryRuns.values()) {
-      token.cancelled = true;
-      if (typeof token.abort === "function") token.abort();
-    }
-    this.activeProcesses.clear();
-    this.activeProcessStops.clear();
-    this.directQueryRuns.clear();
+    this.processExecution.shutdown();
   }
   createPracticeRunId() {
     const now = /* @__PURE__ */ new Date();
@@ -5103,120 +5676,39 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     return `${stamp}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
   }
   recoverInterruptedPracticeRuns() {
-    const runsDirectory = path5.join(this.settings.projectRoot, "tool-library", "output", "code-practice", "runs");
-    if (!fs2.existsSync(runsDirectory)) return;
-    for (const name of fs2.readdirSync(runsDirectory)) {
-      if (!name.endsWith(".json")) continue;
-      const recordPath = path5.join(runsDirectory, name);
-      try {
-        const record = JSON.parse(fs2.readFileSync(recordPath, "utf8"));
-        if (!["queued", "running"].includes(record.status)) continue;
-        record.status = "stopped";
-        record.finished_at = (/* @__PURE__ */ new Date()).toISOString();
-        record.stderr = `${record.stderr || ""}
-Execution interrupted before the plugin restarted.`.trim();
-        fs2.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
-      } catch (error) {
-        console.warn(`Could not recover code-practice record: ${recordPath}`, error);
-      }
-    }
+    this.processExecution.recoverInterruptedPracticeRuns(this.settings);
   }
   runCodePractice(request) {
-    const projectRoot = this.settings.projectRoot;
-    const runner = path5.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-    if (!fs2.existsSync(runner)) return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
-    const interpreter = request.language === "python" ? this.settings.pythonExecutable : this.settings.rscriptExecutable;
-    if (!interpreter || !fs2.existsSync(interpreter)) return Promise.reject(new Error(`${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`));
-    const stopPath = path5.join(projectRoot, "tool-library", "output", "code-practice", "stop", `${request.run_id}.stop`);
-    const args = [
-      runner,
-      "--project-root",
-      projectRoot,
-      "--python",
-      this.settings.pythonExecutable,
-      "--rscript",
-      this.settings.rscriptExecutable
-    ];
-    return new Promise((resolve3, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      const child = (0, import_node_child_process.spawn)(this.settings.pythonExecutable, args, {
-        cwd: projectRoot,
-        shell: false,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          PYTHONUTF8: "1",
-          PYTHONIOENCODING: "utf-8"
-        }
-      });
-      this.activePracticeRuns.set(request.run_id, { child, stopPath });
-      const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-4e5);
-      child.stdout.on("data", (chunk) => {
-        stdout = append(stdout, chunk);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr = append(stderr, chunk);
-      });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        this.activePracticeRuns.delete(request.run_id);
-        reject(error);
-      });
-      child.once("close", () => {
-        if (settled) return;
-        settled = true;
-        this.activePracticeRuns.delete(request.run_id);
-        try {
-          const result = JSON.parse(stdout.trim());
-          if (stderr.trim()) result.runner_stderr = stderr.trim();
-          resolve3(result);
-        } catch (error) {
-          reject(new Error(`无法读取代码练习结果：${stderr.trim() || stdout.trim() || error.message}`));
-        }
-      });
-      child.stdin.end(JSON.stringify(request), "utf8");
-    });
+    return this.processExecution.runCodePractice(this.settings, request);
   }
   stopCodePractice(runId) {
-    const active = this.activePracticeRuns.get(runId);
-    if (!active) return false;
-    try {
-      fs2.mkdirSync(path5.dirname(active.stopPath), { recursive: true });
-      fs2.writeFileSync(active.stopPath, "stop\n", "utf8");
-      return true;
-    } catch (error) {
-      console.error("Could not request code-practice stop", error);
-      return false;
-    }
+    return this.processExecution.stopCodePractice(runId);
   }
   readPracticeFigure(relativePath) {
-    const root = path5.resolve(this.settings.projectRoot);
-    const outputRoot = path5.join(root, "tool-library", "output", "code-practice", "figures");
-    const candidate = path5.resolve(root, relativePath);
-    const relative2 = path5.relative(outputRoot, candidate);
-    if (!relative2 || relative2.startsWith("..") || path5.isAbsolute(relative2) || !fs2.existsSync(candidate)) return "";
-    const stat = fs2.statSync(candidate);
+    const root = path6.resolve(this.settings.projectRoot);
+    const outputRoot = path6.join(root, "tool-library", "output", "code-practice", "figures");
+    const candidate = path6.resolve(root, relativePath);
+    const relative2 = path6.relative(outputRoot, candidate);
+    if (!relative2 || relative2.startsWith("..") || path6.isAbsolute(relative2) || !fs3.existsSync(candidate)) return "";
+    const stat = fs3.statSync(candidate);
     if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return "";
-    const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" }[path5.extname(candidate).toLowerCase()];
+    const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" }[path6.extname(candidate).toLowerCase()];
     if (!mime) return "";
-    return `data:${mime};base64,${fs2.readFileSync(candidate).toString("base64")}`;
+    return `data:${mime};base64,${fs3.readFileSync(candidate).toString("base64")}`;
   }
   async savePracticeNote(payload) {
     const folder = (0, import_obsidian10.normalizePath)("wiki/code/practice");
     await this.ensureVaultFolder(folder);
     const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
     if (!cells.length) throw new Error("没有可保存的练习单元格");
-    const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || {};
+    const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || null;
     const now = /* @__PURE__ */ new Date();
     const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
-    const fallback = `practice-${date.replaceAll("-", "")}-${lastResult.run_id?.slice(-6) || Date.now()}`;
+    const fallback = `practice-${date.split("-").join("")}-${lastResult?.run_id.slice(-6) || Date.now()}`;
     let notePath = (0, import_obsidian10.normalizePath)(`${folder}/${slugBase || fallback}.md`);
     if (this.app.vault.getAbstractFileByPath(notePath)) {
-      notePath = (0, import_obsidian10.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult.run_id?.slice(-6) || Date.now()}.md`);
+      notePath = (0, import_obsidian10.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
     }
     if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
     const languageLabel = payload.language === "r" ? "R" : "Python";
@@ -5268,8 +5760,8 @@ Execution interrupted before the plugin restarted.`.trim();
       `related_note: ${JSON.stringify(relatedLink)}`,
       "execution_mode: stateless-replay",
       `cell_count: ${cells.length}`,
-      `last_run_id: ${lastResult.run_id || ""}`,
-      `status: ${lastResult.status || "not-run"}`,
+      `last_run_id: ${lastResult?.run_id || ""}`,
+      `status: ${lastResult?.status || "not-run"}`,
       `created: ${date}`,
       `updated: ${date}`,
       "tags:",
@@ -5303,15 +5795,15 @@ Execution interrupted before the plugin restarted.`.trim();
     }
   }
   async loadSettings() {
-    const stored = await this.loadData() || {};
+    const stored = await this.getPersistence().load();
     const storedSettings = stored.settings && typeof stored.settings === "object" ? stored.settings : stored;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings);
     const normalizedProfiles = Array.isArray(storedSettings.providerProfiles) ? storedSettings.providerProfiles.slice(0, 20).map((profile) => normalizeProviderProfile(profile)) : [];
     this.settings.providerProfiles = normalizedProfiles;
     this.settings.activeProviderId = String(storedSettings.activeProviderId || "");
-    const providerTimeout = Number.parseInt(storedSettings.providerTimeoutSeconds, 10);
+    const providerTimeout = Number.parseInt(String(storedSettings.providerTimeoutSeconds || ""), 10);
     this.settings.providerTimeoutSeconds = Number.isFinite(providerTimeout) ? Math.max(3, Math.min(120, providerTimeout)) : DEFAULT_SETTINGS.providerTimeoutSeconds;
-    this.taskRuns = Array.isArray(stored.taskRuns) ? stored.taskRuns.slice(0, 30) : [];
+    this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns);
     this.querySessions = Array.isArray(stored.querySessions) ? stored.querySessions.slice(0, 8).map((session) => this.normalizeQuerySession(session)) : [];
     this.activeQuerySessionId = typeof stored.activeQuerySessionId === "string" ? stored.activeQuerySessionId : "";
     if (!this.settings.projectRoot) {
@@ -5368,7 +5860,7 @@ Execution interrupted before the plugin restarted.`.trim();
     });
     const preferredCodexExecutable = findPreferredCodexExecutable();
     const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
-    if (!configuredCodexExecutable || !fs2.existsSync(configuredCodexExecutable) || isManagedCodexExecutable(configuredCodexExecutable)) {
+    if (!configuredCodexExecutable || !fs3.existsSync(configuredCodexExecutable) || isManagedCodexExecutable(configuredCodexExecutable)) {
       if (configuredCodexExecutable !== preferredCodexExecutable) {
         this.settings.codexExecutable = preferredCodexExecutable;
         changed = true;
@@ -5401,76 +5893,19 @@ Execution interrupted before the plugin restarted.`.trim();
     }
   }
   async saveSettings() {
-    const snapshot = JSON.parse(JSON.stringify({
-      settings: this.sanitizeSettingsForStorage(),
-      taskRuns: this.taskRuns.map((run) => ({
-        ...run,
-        output: String(run.output || "").slice(0, 12e3),
-        error: String(run.error || "").slice(0, 4e3)
-      })),
-      querySessions: this.querySessions.map((session) => ({
-        ...session,
-        messages: session.messages.slice(-30).map((message) => ({
-          ...message,
-          content: String(message.content || "").slice(0, 8e3),
-          error: String(message.error || "").slice(0, 4e3)
-        }))
-      })),
-      activeQuerySessionId: this.activeQuerySessionId
-    }));
-    this.settingsSaveQueue = (this.settingsSaveQueue || Promise.resolve()).catch((error) => {
-      console.error("Previous Dashboard settings save failed", error);
-    }).then(() => this.saveData(snapshot));
-    await this.settingsSaveQueue;
+    await this.getPersistence().save();
   }
   scheduleSettingsSave(delayMs = 400) {
-    if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
-    if (this.settingsSaveTimer === void 0) this.settingsSaveTimer = null;
-    if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
-    return new Promise((resolve3, reject) => {
-      this.settingsSaveWaiters.push({ resolve: resolve3, reject });
-      this.settingsSaveTimer = window.setTimeout(() => {
-        void this.flushScheduledSettingsSave();
-      }, delayMs);
-    });
+    return this.getPersistence().schedule(delayMs);
   }
   async flushScheduledSettingsSave() {
-    if (!Array.isArray(this.settingsSaveWaiters)) this.settingsSaveWaiters = [];
-    if (this.settingsSaveTimer === void 0) this.settingsSaveTimer = null;
-    if (this.settingsSaveTimer !== null) {
-      window.clearTimeout(this.settingsSaveTimer);
-      this.settingsSaveTimer = null;
-    }
-    const waiters = this.settingsSaveWaiters.splice(0);
-    if (!waiters.length) return;
-    try {
-      await this.saveSettings();
-      waiters.forEach(({ resolve: resolve3 }) => resolve3());
-    } catch (error) {
-      waiters.forEach(({ reject }) => reject(error));
-    }
+    await this.getPersistence().flush();
   }
   hasPlaintextCredentialFields(value) {
-    if (!value || typeof value !== "object") return false;
-    return Object.entries(value).some(([key, child]) => {
-      if (/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key) && key !== "secretId") {
-        return Boolean(child);
-      }
-      return child && typeof child === "object" && this.hasPlaintextCredentialFields(child);
-    });
+    return hasPlaintextCredentialFields(value);
   }
   sanitizeSettingsForStorage() {
-    const settings = { ...this.settings };
-    Object.keys(settings).forEach((key) => {
-      if (/(api.?key|access.?token|oauth.?token|github.?token|secret.?value|password)/i.test(key) && key !== "secretId") {
-        delete settings[key];
-      }
-    });
-    settings.providerProfiles = Array.isArray(this.settings.providerProfiles) ? this.settings.providerProfiles.slice(0, 20).map((profile) => normalizeProviderProfile(profile)) : [];
-    settings.activeProviderId = settings.providerProfiles.some(
-      (profile) => profile.id === this.settings.activeProviderId && profile.lastTest?.ok
-    ) ? this.settings.activeProviderId : "";
-    return settings;
+    return sanitizeSettingsForStorage(this.settings);
   }
   getProviderProfile(profileId) {
     return this.settings.providerProfiles.find((profile) => profile.id === profileId) || null;
@@ -5501,7 +5936,6 @@ Execution interrupted before the plugin restarted.`.trim();
       return new CodexCliProvider(this, {
         id: "codex-cli",
         name: "Codex CLI",
-        type: "codex-cli",
         model: this.settings.codexModel,
         timeoutSeconds: Math.min(30, this.settings.providerTimeoutSeconds || 20)
       });
@@ -5820,12 +6254,13 @@ Execution interrupted before the plugin restarted.`.trim();
         message: error.message
       };
     }
-    if (error && typeof error === "object" && typeof error.type === "string") {
+    if (error && typeof error === "object" && "type" in error && typeof error.type === "string") {
+      const candidate = error;
       return {
-        type: error.type,
-        status: Number(error.status || 0),
-        endpoint: String(error.endpoint || ""),
-        message: error instanceof Error ? error.message : String(error.message || error.type)
+        type: candidate.type,
+        status: Number(candidate.status || 0),
+        endpoint: String(candidate.endpoint || ""),
+        message: error instanceof Error ? error.message : String(candidate.message || candidate.type)
       };
     }
     const message = error instanceof Error ? error.message : String(error);
@@ -5837,7 +6272,7 @@ Execution interrupted before the plugin restarted.`.trim();
     };
   }
   getProviderErrorLabel(type) {
-    return {
+    const labels = {
       configuration: "配置不完整",
       "missing-secret": "缺少凭据",
       "secret-storage-unavailable": "SecretStorage 不可用",
@@ -5859,83 +6294,11 @@ Execution interrupted before the plugin restarted.`.trim();
       unsupported: "尚未支持",
       "http-unavailable": "HTTP API 不可用",
       unknown: "未知错误"
-    }[type] || type || "未知错误";
+    };
+    return labels[type] || type || "未知错误";
   }
   probeCodexCliConnection() {
-    const startedAt = Date.now();
-    const executable = String(this.settings.codexExecutable || "");
-    if (!executable || !fs2.existsSync(executable)) {
-      return Promise.resolve({
-        ok: false,
-        type: "configuration",
-        model: this.settings.codexModel,
-        message: `Codex 可执行文件不存在：${executable || "未配置"}`,
-        responseTimeMs: Date.now() - startedAt,
-        testedAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    }
-    return new Promise((resolve3) => {
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      const child = (0, import_node_child_process.spawn)(executable, ["--version"], {
-        cwd: this.settings.projectRoot,
-        shell: false,
-        windowsHide: true
-      });
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        resolve3({
-          model: this.settings.codexModel,
-          responseTimeMs: Date.now() - startedAt,
-          testedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          ...result
-        });
-      };
-      child.stdout.on("data", (chunk) => {
-        stdout = `${stdout}${chunk.toString("utf8")}`.slice(-4e3);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr = `${stderr}${chunk.toString("utf8")}`.slice(-4e3);
-      });
-      child.once("error", (error) => {
-        finish({
-          ok: false,
-          type: "local-service-offline",
-          message: error.message
-        });
-      });
-      child.once("close", (code) => {
-        if (code === 0) {
-          finish({
-            ok: true,
-            type: "success",
-            modelExists: null,
-            modelCount: MODEL_OPTIONS.length,
-            streaming: { supported: false, verified: false },
-            pdf: { supported: true, verified: false },
-            vision: { supported: true, verified: false },
-            responsePreview: stdout.trim() || "Codex CLI 可用"
-          });
-          return;
-        }
-        finish({
-          ok: false,
-          type: "local-service-offline",
-          message: stderr.trim() || stdout.trim() || `Codex CLI 退出码 ${code}`
-        });
-      });
-      const timer = window.setTimeout(() => {
-        if (!child.killed) child.kill();
-        finish({
-          ok: false,
-          type: "timeout",
-          message: "Codex CLI 版本检查超过 10 秒"
-        });
-      }, 1e4);
-    });
+    return this.processExecution.probeCodexCli(this.settings);
   }
   makeQuerySession(title = "新对话") {
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -5950,34 +6313,38 @@ Execution interrupted before the plugin restarted.`.trim();
     };
   }
   normalizeQuerySession(session) {
+    const source = asRecord5(session);
     const fallback = this.makeQuerySession();
-    const messages = Array.isArray(session?.messages) ? session.messages.slice(-60).map((message) => ({
-      id: String(message?.id || this.createQueryMessageId()),
-      role: message?.role === "user" ? "user" : "assistant",
-      content: String(message?.content || "").slice(0, 2e4),
-      attachments: normalizeVaultImageAttachments(message?.attachments),
-      status: String(message?.status || "done"),
-      progress: String(message?.progress || ""),
-      createdAt: String(message?.createdAt || (/* @__PURE__ */ new Date()).toISOString()),
-      runId: String(message?.runId || ""),
-      retrievalTrace: message?.retrievalTrace && typeof message.retrievalTrace === "object" ? message.retrievalTrace : null,
-      vaultSources: normalizeQueryVaultSources(message?.vaultSources),
-      webSources: normalizeQueryWebSources(message?.webSources),
-      citationValidation: normalizeQueryCitationValidation(message?.citationValidation),
-      retrievalPath: normalizeQueryRetrievalPath(message?.retrievalPath),
-      retrievalMode: message?.retrievalMode === "vault" ? "vault" : "web",
-      queryBackendId: String(message?.queryBackendId || "codex-cli").slice(0, 100),
-      providerName: String(message?.providerName || "").slice(0, 80),
-      model: String(message?.model || "").slice(0, 160),
-      error: String(message?.error || "").slice(0, 12e3)
-    })) : [];
+    const messages = Array.isArray(source.messages) ? source.messages.slice(-60).map((value) => {
+      const message = asRecord5(value);
+      return {
+        id: String(message.id || this.createQueryMessageId()),
+        role: message.role === "user" ? "user" : "assistant",
+        content: String(message.content || "").slice(0, 2e4),
+        attachments: normalizeVaultImageAttachments(message.attachments),
+        status: normalizeQueryMessageStatus(message.status),
+        progress: String(message.progress || ""),
+        createdAt: String(message.createdAt || (/* @__PURE__ */ new Date()).toISOString()),
+        runId: String(message.runId || ""),
+        retrievalTrace: message.retrievalTrace && typeof message.retrievalTrace === "object" ? message.retrievalTrace : null,
+        vaultSources: normalizeQueryVaultSources(message.vaultSources),
+        webSources: normalizeQueryWebSources(message.webSources),
+        citationValidation: normalizeQueryCitationValidation(message.citationValidation),
+        retrievalPath: normalizeQueryRetrievalPath(message.retrievalPath),
+        retrievalMode: message.retrievalMode === "vault" ? "vault" : "web",
+        queryBackendId: String(message.queryBackendId || "codex-cli").slice(0, 100),
+        providerName: String(message.providerName || "").slice(0, 80),
+        model: String(message.model || "").slice(0, 160),
+        error: String(message.error || "").slice(0, 12e3)
+      };
+    }) : [];
     return {
-      id: String(session?.id || fallback.id),
-      title: String(session?.title || "新对话").slice(0, 80),
-      retrievalMode: session?.retrievalMode === "vault" ? "vault" : "web",
-      queryBackendId: String(session?.queryBackendId || "codex-cli").slice(0, 100),
-      createdAt: String(session?.createdAt || fallback.createdAt),
-      updatedAt: String(session?.updatedAt || fallback.updatedAt),
+      id: String(source.id || fallback.id),
+      title: String(source.title || "新对话").slice(0, 80),
+      retrievalMode: source.retrievalMode === "vault" ? "vault" : "web",
+      queryBackendId: String(source.queryBackendId || "codex-cli").slice(0, 100),
+      createdAt: String(source.createdAt || fallback.createdAt),
+      updatedAt: String(source.updatedAt || fallback.updatedAt),
       messages
     };
   }
@@ -5990,7 +6357,14 @@ Execution interrupted before the plugin restarted.`.trim();
     });
   }
   getActiveQuerySession() {
-    return this.querySessions.find((session) => session.id === this.activeQuerySessionId) || this.querySessions[0];
+    const active = this.querySessions.find(
+      (session) => session.id === this.activeQuerySessionId
+    ) || this.querySessions[0];
+    if (active) return active;
+    const fallback = this.makeQuerySession();
+    this.querySessions = [fallback];
+    this.activeQuerySessionId = fallback.id;
+    return fallback;
   }
   async createQuerySession() {
     const activeSession = this.getActiveQuerySession();
@@ -6096,10 +6470,10 @@ Execution interrupted before the plugin restarted.`.trim();
   }
   inferProjectRoot() {
     const adapter = this.app.vault.adapter;
-    if (typeof adapter.getBasePath !== "function") return "";
+    if (!(adapter instanceof import_obsidian10.FileSystemAdapter)) return "";
     const vaultRoot = adapter.getBasePath();
-    const parent = path5.dirname(vaultRoot);
-    if (fs2.existsSync(path5.join(parent, "AGENTS.md"))) return parent;
+    const parent = path6.dirname(vaultRoot);
+    if (fs3.existsSync(path6.join(parent, "AGENTS.md"))) return parent;
     return vaultRoot;
   }
   getTaskRuns() {
@@ -6116,12 +6490,12 @@ Execution interrupted before the plugin restarted.`.trim();
   }
   getTaskRunOutput(run) {
     if (run?.outputPath) {
-      const absolutePath = path5.join(
+      const absolutePath = path6.join(
         this.settings.projectRoot,
         ...String(run.outputPath).split("/")
       );
       try {
-        const payload = JSON.parse(fs2.readFileSync(absolutePath, "utf8"));
+        const payload = JSON.parse(fs3.readFileSync(absolutePath, "utf8"));
         if (typeof payload.output === "string") return payload.output;
       } catch (error) {
         console.warn("Could not read persisted Dashboard run output", error);
@@ -6133,13 +6507,13 @@ Execution interrupted before the plugin restarted.`.trim();
     const output = String(run?.output || "");
     if (!output) return "";
     const relativePath = `tool-library/output/dashboard-runs/${run.id}.json`;
-    const absolutePath = path5.join(
+    const absolutePath = path6.join(
       this.settings.projectRoot,
       ...relativePath.split("/")
     );
     const temporaryPath = `${absolutePath}.tmp`;
-    await fs2.promises.mkdir(path5.dirname(absolutePath), { recursive: true });
-    await fs2.promises.writeFile(
+    await fs3.promises.mkdir(path6.dirname(absolutePath), { recursive: true });
+    await fs3.promises.writeFile(
       temporaryPath,
       JSON.stringify({
         schema_version: 1,
@@ -6153,7 +6527,7 @@ Execution interrupted before the plugin restarted.`.trim();
       }, null, 2),
       "utf8"
     );
-    await fs2.promises.rename(temporaryPath, absolutePath);
+    await fs3.promises.rename(temporaryPath, absolutePath);
     return relativePath;
   }
   isActionRunning(actionId) {
@@ -6219,31 +6593,31 @@ Execution interrupted before the plugin restarted.`.trim();
   }
   getOkfExportStatus() {
     const projectRoot = this.settings.projectRoot;
-    const exporter = path5.join(projectRoot, "tool-library", "scripts", "export_okf.py");
-    const latestPath = path5.join(projectRoot, "tool-library", "output", "okf", "latest.json");
+    const exporter = path6.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+    const latestPath = path6.join(projectRoot, "tool-library", "output", "okf", "latest.json");
     let latest = null;
     let error = "";
-    if (fs2.existsSync(latestPath)) {
+    if (fs3.existsSync(latestPath)) {
       try {
-        latest = JSON.parse(fs2.readFileSync(latestPath, "utf8"));
+        latest = JSON.parse(fs3.readFileSync(latestPath, "utf8"));
       } catch (readError) {
         error = readError instanceof Error ? readError.message : String(readError);
       }
     }
     return {
-      exporterAvailable: fs2.existsSync(exporter),
+      exporterAvailable: fs3.existsSync(exporter),
       latest,
       error
     };
   }
   getLintStatus() {
     const projectRoot = this.settings.projectRoot;
-    const latestPath = path5.join(projectRoot, "tool-library", "output", "lint", "latest.json");
+    const latestPath = path6.join(projectRoot, "tool-library", "output", "lint", "latest.json");
     let latest = null;
     let error = "";
-    if (fs2.existsSync(latestPath)) {
+    if (fs3.existsSync(latestPath)) {
       try {
-        latest = JSON.parse(fs2.readFileSync(latestPath, "utf8"));
+        latest = JSON.parse(fs3.readFileSync(latestPath, "utf8"));
       } catch (readError) {
         error = readError instanceof Error ? readError.message : String(readError);
       }
@@ -6252,28 +6626,28 @@ Execution interrupted before the plugin restarted.`.trim();
   }
   checkRuntime(action = null) {
     const projectRoot = this.settings.projectRoot;
-    const runner = path5.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
-    const practiceRunner = path5.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-    const exporter = path5.join(projectRoot, "tool-library", "scripts", "export_okf.py");
-    const lintScript = path5.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
+    const runner = path6.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
+    const practiceRunner = path6.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
+    const exporter = path6.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+    const lintScript = path6.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
     const checks = [
-      ["项目根目录", fs2.existsSync(projectRoot)],
-      ["AGENTS.md", fs2.existsSync(path5.join(projectRoot, "AGENTS.md"))],
-      ["Dashboard runner", fs2.existsSync(runner)],
-      ["Python", fs2.existsSync(this.settings.pythonExecutable)]
+      ["项目根目录", fs3.existsSync(projectRoot)],
+      ["AGENTS.md", fs3.existsSync(path6.join(projectRoot, "AGENTS.md"))],
+      ["Dashboard runner", fs3.existsSync(runner)],
+      ["Python", fs3.existsSync(this.settings.pythonExecutable)]
     ];
     if (!action) {
-      checks.push(["Code practice runner", fs2.existsSync(practiceRunner)]);
-      checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs2.existsSync(this.settings.rscriptExecutable)]);
+      checks.push(["Code practice runner", fs3.existsSync(practiceRunner)]);
+      checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs3.existsSync(this.settings.rscriptExecutable)]);
     }
     if (!action || action.id === "okf-export") {
-      checks.push(["OKF exporter", fs2.existsSync(exporter)]);
+      checks.push(["OKF exporter", fs3.existsSync(exporter)]);
     }
     if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id)) {
-      checks.push(["Vault lint", fs2.existsSync(lintScript)]);
+      checks.push(["Vault lint", fs3.existsSync(lintScript)]);
     }
     if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
-      checks.push(["Codex", fs2.existsSync(this.settings.codexExecutable)]);
+      checks.push(["Codex", fs3.existsSync(this.settings.codexExecutable)]);
     }
     const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
     return {
@@ -6301,13 +6675,16 @@ Execution interrupted before the plugin restarted.`.trim();
       );
     }
     const token = { cancelled: false };
-    this.directQueryRuns.set(runId, token);
+    this.lifecycleState.directQueryRuns.set(runId, token);
     try {
       const provider = this.createLLMProvider(profile);
       if (typeof hooks.onEvent === "function") {
         hooks.onEvent({ type: "status", stage: "retrieval-preflight", label: "正在检索知识库候选页面" });
       }
-      let trace = await this.runVaultRetrievalPreflight(runId, question);
+      let trace = await this.runVaultRetrievalPreflight(
+        runId,
+        question
+      );
       if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
       if (!Array.isArray(trace.lexical_seeds) || trace.lexical_seeds.length === 0) {
         try {
@@ -6320,7 +6697,11 @@ Execution interrupted before the plugin restarted.`.trim();
           }
           const expandedTerms = await this.generateDirectQueryKeywords(provider, profile, question);
           if (expandedTerms.length) {
-            trace = await this.runVaultRetrievalPreflight(runId, question, expandedTerms);
+            trace = await this.runVaultRetrievalPreflight(
+              runId,
+              question,
+              expandedTerms
+            );
             trace.keyword_expansion = {
               ...trace.keyword_expansion || {},
               attempted: true,
@@ -6417,7 +6798,7 @@ Execution interrupted before the plugin restarted.`.trim();
           streamedText = "";
           response = null;
         } finally {
-          token.abort = null;
+          token.abort = void 0;
         }
       }
       if (!response || !String(response.text || streamedText).trim()) {
@@ -6426,7 +6807,7 @@ Execution interrupted before the plugin restarted.`.trim();
             token.abort = cancel;
           }
         });
-        token.abort = null;
+        token.abort = void 0;
       }
       if (token.cancelled) throw new ProviderConnectionError("cancelled", "已停止本轮查询");
       const text = String(response?.text || streamedText || "").trim();
@@ -6453,7 +6834,9 @@ Execution interrupted before the plugin restarted.`.trim();
         events: [retrievalEvent, resultEvent]
       };
     } finally {
-      if (this.directQueryRuns.get(runId) === token) this.directQueryRuns.delete(runId);
+      if (this.lifecycleState.directQueryRuns.get(runId) === token) {
+        this.lifecycleState.directQueryRuns.delete(runId);
+      }
     }
   }
   buildDirectRetrievalResult(text, evidence, trace, mode, profile) {
@@ -6465,7 +6848,7 @@ Execution interrupted before the plugin restarted.`.trim();
       return target && (answer.includes(`[[${target}]]`) || answer.includes(`[[${target}|`) || answer.includes(`[[${item.path}]]`) || answer.includes(`[[${item.path}|`));
     }).map((item) => ({
       path: item.path,
-      title: path5.posix.basename(item.path, ".md"),
+      title: path6.posix.basename(item.path, ".md"),
       cited: true
     }));
     const webSources = mode === "web" ? extractModelProvidedWebSources(answer) : [];
@@ -6546,77 +6929,37 @@ Execution interrupted before the plugin restarted.`.trim();
     const values = Array.isArray(payload) ? payload : Array.isArray(payload?.keywords) ? payload.keywords : [];
     return [...new Set(values.map((value) => String(value || "").trim()).filter((value) => value.length >= 2 && value.length <= 80))].slice(0, 10);
   }
-  runVaultRetrievalPreflight(runId, question, expandedTerms = []) {
-    const projectRoot = path5.resolve(this.settings.projectRoot);
-    const script = path5.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
-    if (!fs2.existsSync(script)) {
-      return Promise.reject(new Error(`知识库检索脚本不存在：${script}`));
+  async runVaultRetrievalPreflight(runId, question, expandedTerms = []) {
+    const projectRoot = path6.resolve(this.settings.projectRoot);
+    const script = path6.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
+    if (!fs3.existsSync(script)) {
+      throw new Error(`知识库检索脚本不存在：${script}`);
     }
-    if (!this.settings.pythonExecutable || !fs2.existsSync(this.settings.pythonExecutable)) {
-      return Promise.reject(new Error(`Python 不可用：${this.settings.pythonExecutable}`));
+    if (!this.settings.pythonExecutable || !fs3.existsSync(this.settings.pythonExecutable)) {
+      throw new Error(`Python 不可用：${this.settings.pythonExecutable}`);
     }
-    return new Promise((resolve3, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      let timer = null;
-      const args = [script, "--project-root", projectRoot, "--query", String(question).slice(0, 4e3)];
-      for (const term of expandedTerms.slice(0, 10)) {
-        args.push("--expanded-term", String(term).slice(0, 80));
-      }
-      const child = (0, import_node_child_process.spawn)(
-        this.settings.pythonExecutable,
-        args,
-        {
-          cwd: projectRoot,
-          shell: false,
-          windowsHide: true,
-          env: {
-            ...process.env,
-            PYTHONUTF8: "1",
-            PYTHONIOENCODING: "utf-8"
-          }
-        }
-      );
-      this.activeProcesses.set(runId, child);
-      const finish = (callback) => {
-        if (settled) return;
-        settled = true;
-        if (timer !== null) window.clearTimeout(timer);
-        if (this.activeProcesses.get(runId) === child) this.activeProcesses.delete(runId);
-        callback();
-      };
-      child.stdout.on("data", (chunk) => {
-        stdout = `${stdout}${chunk.toString("utf8")}`.slice(-1e6);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr = `${stderr}${chunk.toString("utf8")}`.slice(-2e4);
-      });
-      child.once("error", (error) => finish(() => reject(error)));
-      child.once("close", (code) => {
-        finish(() => {
-          if (code !== 0) {
-            reject(new Error(stderr.trim() || `知识库检索进程退出码：${code}`));
-            return;
-          }
-          try {
-            resolve3(JSON.parse(stdout));
-          } catch {
-            reject(new Error("知识库检索结果不是有效 JSON"));
-          }
-        });
-      });
-      timer = window.setTimeout(() => {
-        if (!child.killed) child.kill();
-        finish(() => reject(new ProviderConnectionError("timeout", "知识库检索超过 45 秒")));
-      }, 45e3);
-      child.stdin.end();
+    const args = [script, "--project-root", projectRoot, "--query", question.slice(0, 4e3)];
+    for (const term of expandedTerms.slice(0, 10)) {
+      args.push("--expanded-term", term.slice(0, 80));
+    }
+    const result = await this.processExecution.runJsonProcess({
+      runId,
+      executable: this.settings.pythonExecutable,
+      args,
+      cwd: projectRoot,
+      timeoutMs: 45e3,
+      timeoutMessage: "知识库检索超过 45 秒"
     });
+    try {
+      return JSON.parse(result.stdout);
+    } catch {
+      throw new Error("知识库检索结果不是有效 JSON");
+    }
   }
   readVaultEvidencePacket(trace) {
-    const projectRoot = path5.resolve(this.settings.projectRoot);
-    const vaultRoot = path5.resolve(projectRoot, "knowledge-base");
-    const vaultPrefix = `${vaultRoot}${path5.sep}`;
+    const projectRoot = path6.resolve(this.settings.projectRoot);
+    const vaultRoot = path6.resolve(projectRoot, "knowledge-base");
+    const vaultPrefix = `${vaultRoot}${path6.sep}`;
     const candidates = Array.isArray(trace?.candidate_paths) ? trace.candidate_paths : [];
     const evidence = [];
     const seen = /* @__PURE__ */ new Set();
@@ -6625,10 +6968,10 @@ Execution interrupted before the plugin restarted.`.trim();
       if (evidence.length >= 8 || remaining <= 0) break;
       const relativePath = String(candidate || "").replace(/\\/g, "/").replace(/^knowledge-base\//i, "").replace(/^\/+/, "");
       if (!relativePath || !/\.md$/i.test(relativePath) || seen.has(relativePath.toLowerCase())) continue;
-      const absolutePath = path5.resolve(vaultRoot, ...relativePath.split("/"));
+      const absolutePath = path6.resolve(vaultRoot, ...relativePath.split("/"));
       if (absolutePath !== vaultRoot && !absolutePath.startsWith(vaultPrefix)) continue;
-      if (!fs2.existsSync(absolutePath) || !fs2.statSync(absolutePath).isFile()) continue;
-      const raw = fs2.readFileSync(absolutePath, "utf8");
+      if (!fs3.existsSync(absolutePath) || !fs3.statSync(absolutePath).isFile()) continue;
+      const raw = fs3.readFileSync(absolutePath, "utf8");
       const content = raw.slice(0, Math.min(9e3, remaining));
       if (!content.trim()) continue;
       seen.add(relativePath.toLowerCase());
@@ -6655,16 +6998,16 @@ Execution interrupted before the plugin restarted.`.trim();
     const metadataCache = this.app?.metadataCache;
     if (typeof metadataCache?.getFirstLinkpathDest === "function") {
       const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
-      if (resolved) return resolved;
+      if (resolved instanceof import_obsidian10.TFile) return resolved;
     }
     const direct = this.app.vault.getAbstractFileByPath(link);
-    if (direct) return direct;
+    if (direct instanceof import_obsidian10.TFile) return direct;
     if (sourcePath) {
       const relative2 = (0, import_obsidian10.normalizePath)(
-        path5.posix.normalize(path5.posix.join(path5.posix.dirname(sourcePath), link))
+        path6.posix.normalize(path6.posix.join(path6.posix.dirname(sourcePath), link))
       );
       const relativeFile = this.app.vault.getAbstractFileByPath(relative2);
-      if (relativeFile) return relativeFile;
+      if (relativeFile instanceof import_obsidian10.TFile) return relativeFile;
     }
     return null;
   }
@@ -6707,7 +7050,7 @@ Execution interrupted before the plugin restarted.`.trim();
     }
     for (const match of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
       const value = String(match[1] || "").split("|", 1)[0].split("#", 1)[0].trim();
-      if (!VAULT_IMAGE_MIME_TYPES[path5.posix.extname(value).toLowerCase()]) {
+      if (!VAULT_IMAGE_MIME_TYPES[path6.posix.extname(value).toLowerCase()]) {
         candidates.push(value);
       }
     }
@@ -6742,7 +7085,7 @@ Execution interrupted before the plugin restarted.`.trim();
     const images = [];
     for (const link of links) {
       const file = this.resolveVaultLinkedFile(link, noteFile.path);
-      if (!file || !VAULT_IMAGE_MIME_TYPES[path5.posix.extname(file.path).toLowerCase()]) continue;
+      if (!file || !VAULT_IMAGE_MIME_TYPES[path6.posix.extname(file.path).toLowerCase()]) continue;
       const key = file.path.toLocaleLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -6756,7 +7099,7 @@ Execution interrupted before the plugin restarted.`.trim();
     const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
     let totalBytes = existing.reduce((sum, attachment) => {
       const file = this.app.vault.getAbstractFileByPath(attachment.path);
-      return sum + Number(file?.stat?.size || attachment.size || 0);
+      return sum + Number(file instanceof import_obsidian10.TFile ? file.stat.size : attachment.size || 0);
     }, 0);
     const attachments = [];
     let discoveredCount = 0;
@@ -6797,7 +7140,10 @@ Execution interrupted before the plugin restarted.`.trim();
       imageFiles.map((file) => normalizeVaultPath(file?.path)).filter(Boolean)
     );
     const referenceMaps = new Map(
-      [...imagePaths].map((imagePath) => [imagePath, /* @__PURE__ */ new Map()])
+      [...imagePaths].map((imagePath) => [
+        imagePath,
+        /* @__PURE__ */ new Map()
+      ])
     );
     const metadataCache = this.app?.metadataCache;
     const addReference = (imagePathValue, notePathValue, countValue = 1) => {
@@ -6805,15 +7151,17 @@ Execution interrupted before the plugin restarted.`.trim();
       const notePath = normalizeVaultPath(notePathValue);
       if (!imagePaths.has(imagePath) || !notePath.toLowerCase().endsWith(".md")) return;
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-      const frontmatter = noteFile && typeof metadataCache?.getFileCache === "function" ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
+      const frontmatter = noteFile instanceof import_obsidian10.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
       const title = String(
-        frontmatter?.title_zh || frontmatter?.title || noteFile?.basename || path5.posix.basename(notePath, ".md")
+        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian10.TFile ? noteFile.basename : "") || path6.posix.basename(notePath, ".md")
       ).trim();
       const count = Math.max(1, Number(countValue) || 1);
-      const current = referenceMaps.get(imagePath).get(notePath);
-      referenceMaps.get(imagePath).set(notePath, {
+      const references = referenceMaps.get(imagePath);
+      if (!references) return;
+      const current = references.get(notePath);
+      references.set(notePath, {
         path: notePath,
-        title: title || path5.posix.basename(notePath, ".md"),
+        title: title || path6.posix.basename(notePath, ".md"),
         count: Math.max(current?.count || 0, count)
       });
     };
@@ -6854,26 +7202,26 @@ Execution interrupted before the plugin restarted.`.trim();
         "仅支持 Vault 内的 PNG、JPEG 和 WebP 图片"
       );
     }
-    const projectRoot = path5.resolve(this.settings.projectRoot);
-    const vaultRoot = path5.resolve(projectRoot, "knowledge-base");
-    if (!fs2.existsSync(vaultRoot)) {
+    const projectRoot = path6.resolve(this.settings.projectRoot);
+    const vaultRoot = path6.resolve(projectRoot, "knowledge-base");
+    if (!fs3.existsSync(vaultRoot)) {
       throw new ProviderConnectionError("attachment", `Vault 根目录不存在：${vaultRoot}`);
     }
     if (normalized.path.split("/").includes("..")) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
-    const absolutePath = path5.resolve(vaultRoot, ...normalized.path.split("/"));
-    if (!fs2.existsSync(absolutePath)) {
+    const absolutePath = path6.resolve(vaultRoot, ...normalized.path.split("/"));
+    if (!fs3.existsSync(absolutePath)) {
       throw new ProviderConnectionError("attachment", `图片不存在：${normalized.path}`);
     }
-    const vaultRealPath = fs2.realpathSync(vaultRoot);
-    const imageRealPath = fs2.realpathSync(absolutePath);
+    const vaultRealPath = fs3.realpathSync(vaultRoot);
+    const imageRealPath = fs3.realpathSync(absolutePath);
     const normalizedVault = vaultRealPath.toLowerCase();
     const normalizedImage = imageRealPath.toLowerCase();
-    if (normalizedImage !== normalizedVault && !normalizedImage.startsWith(`${normalizedVault}${path5.sep}`)) {
+    if (normalizedImage !== normalizedVault && !normalizedImage.startsWith(`${normalizedVault}${path6.sep}`)) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
-    const stat = fs2.statSync(imageRealPath);
+    const stat = fs3.statSync(imageRealPath);
     if (!stat.isFile()) {
       throw new ProviderConnectionError("attachment", "图片路径不是文件");
     }
@@ -6883,7 +7231,7 @@ Execution interrupted before the plugin restarted.`.trim();
         `图片超过 ${(MAX_VAULT_IMAGE_BYTES / 1024 / 1024).toFixed(0)} MiB 上限`
       );
     }
-    const extension = path5.extname(imageRealPath).toLowerCase();
+    const extension = path6.extname(imageRealPath).toLowerCase();
     const mimeType = VAULT_IMAGE_MIME_TYPES[extension];
     if (!mimeType) {
       throw new ProviderConnectionError("attachment", "图片格式不受支持");
@@ -6897,17 +7245,17 @@ Execution interrupted before the plugin restarted.`.trim();
       content: {
         type: "image_url",
         image_url: {
-          url: `data:${mimeType};base64,${fs2.readFileSync(imageRealPath).toString("base64")}`
+          url: `data:${mimeType};base64,${fs3.readFileSync(imageRealPath).toString("base64")}`
         }
       }
     };
   }
   buildDirectQueryMessages(question, priorMessages, evidence, attachments = [], mode = "vault") {
     const webMode = mode === "web";
-    const recentTurns = Array.isArray(priorMessages) ? priorMessages.filter((message) => message.status === "done" && message.content).slice(-6).map((message) => ({
+    const recentTurns = priorMessages.filter((message) => message.status === "done" && message.content).slice(-6).map((message) => ({
       role: message.role === "assistant" ? "assistant" : "user",
       content: String(message.content).slice(0, 1800)
-    })) : [];
+    }));
     const evidenceJson = JSON.stringify(evidence, null, 2);
     const imagePayloads = normalizeVaultImageAttachments(attachments).map((attachment) => this.readVaultImageData(attachment));
     const totalImageBytes = imagePayloads.reduce(
@@ -6938,7 +7286,7 @@ Execution interrupted before the plugin restarted.`.trim();
       ].join("\n") : "",
       webMode ? "本轮已启用 Qwen 原生联网搜索。请先使用 Vault 证据，再补充实时外部信息；分别使用“知识库证据”和“联网补充”小节，不得把两者混为同一来源。若搜索结果提供了可靠 URL，请使用 Markdown 链接；无法确认 URL 时不要编造链接。在“检索路径”中列出实际采用的 Vault 页面，并说明使用了 Qwen 联网搜索。" : "请仅根据这些证据回答，并在“检索路径”中列出实际采用的页面。"
     ].filter(Boolean).join("\n");
-    return [
+    const messages = [
       {
         role: "system",
         content: [
@@ -6959,6 +7307,7 @@ Execution interrupted before the plugin restarted.`.trim();
         content: imageBlocks.length ? [...imageBlocks, { type: "text", text: currentPrompt }] : currentPrompt
       }
     ];
+    return messages;
   }
   runVaultAction(runId, action, input, executionConfig = null, hooks = {}) {
     const registered = ACTION_BY_ID.get(action.id);
@@ -6969,161 +7318,41 @@ Execution interrupted before the plugin restarted.`.trim();
     if (!runtime.ready) {
       return Promise.reject(new Error(runtime.message));
     }
-    const projectRoot = this.settings.projectRoot;
-    const runner = path5.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
-    const timeoutSeconds = Math.max(60, Math.min(14400, Number(this.settings.taskTimeoutMinutes) * 60 || 3600));
-    const effectiveConfig = executionConfig || this.resolveActionExecutionConfig(action);
-    const stopPath = path5.join(
-      projectRoot,
-      "tool-library",
-      "output",
-      "dashboard-runs",
-      "stop",
-      `${runId}.stop`
-    );
-    fs2.mkdirSync(path5.dirname(stopPath), { recursive: true });
-    if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
-    const args = [
-      runner,
-      "--action",
-      action.id,
-      "--project-root",
-      projectRoot,
-      "--codex",
-      this.settings.codexExecutable,
-      "--model",
-      effectiveConfig.model,
-      "--reasoning-effort",
-      effectiveConfig.reasoningEffort,
-      "--service-tier",
-      effectiveConfig.serviceTier,
-      "--python",
-      this.settings.pythonExecutable,
-      "--timeout-seconds",
-      String(timeoutSeconds),
-      "--stop-file",
-      stopPath
-    ];
-    return new Promise((resolve3, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let stderrBuffer = "";
-      const events = [];
-      let settled = false;
-      let timedOut = false;
-      const child = (0, import_node_child_process.spawn)(this.settings.pythonExecutable, args, {
-        cwd: projectRoot,
-        shell: false,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          PYTHONUTF8: "1",
-          PYTHONIOENCODING: "utf-8"
-        }
-      });
-      this.activeProcesses.set(runId, child);
-      this.activeProcessStops.set(runId, stopPath);
-      const clearRunState = () => {
-        this.activeProcesses.delete(runId);
-        this.activeProcessStops.delete(runId);
-        try {
-          if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
-        } catch (error) {
-          console.warn("Could not remove Dashboard stop signal", error);
-        }
-      };
-      const append = (current, chunk) => `${current}${chunk.toString("utf8")}`.slice(-16e4);
-      const consumeStderrLine = (line, keepNewline = true) => {
-        const normalized = line.replace(/\r$/, "");
-        if (normalized.startsWith("DASHBOARD_EVENT ")) {
-          try {
-            const event = JSON.parse(normalized.slice("DASHBOARD_EVENT ".length));
-            events.push(event);
-            if (typeof hooks.onEvent === "function") hooks.onEvent(event);
-          } catch (error) {
-            console.warn("Could not parse Dashboard runner event", error);
-          }
-          return;
-        }
-        stderr = append(stderr, `${line}${keepNewline ? "\n" : ""}`);
-        if (typeof hooks.onStderr === "function") hooks.onStderr(line);
-      };
-      child.stdout.on("data", (chunk) => {
-        stdout = append(stdout, chunk);
-        if (typeof hooks.onStdout === "function") hooks.onStdout(chunk.toString("utf8"));
-      });
-      child.stderr.on("data", (chunk) => {
-        stderrBuffer += chunk.toString("utf8");
-        const lines = stderrBuffer.split("\n");
-        stderrBuffer = lines.pop() || "";
-        lines.forEach((line) => consumeStderrLine(line));
-      });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        clearRunState();
-        reject(error);
-      });
-      child.once("close", (code, signal) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        clearRunState();
-        if (stderrBuffer) consumeStderrLine(stderrBuffer, false);
-        resolve3({
-          exitCode: timedOut ? 124 : typeof code === "number" ? code : 1,
-          signal: signal || "",
-          stdout,
-          stderr: timedOut ? `${stderr}
-任务超过 ${timeoutSeconds} 秒，已请求终止。` : stderr,
-          events
-        });
-      });
-      const timer = window.setTimeout(() => {
-        timedOut = true;
-        this.requestVaultActionStop(runId);
-        window.setTimeout(() => {
-          if (this.activeProcesses.get(runId) === child && !child.killed) child.kill();
-        }, 1e4);
-      }, (timeoutSeconds + 15) * 1e3);
-      child.stdin.end(input, "utf8");
+    const effectiveConfig = executionConfig ? {
+      ...executionConfig,
+      reasoningEffort: executionConfig.reasoningEffort || this.settings.codexReasoningEffort,
+      serviceTier: executionConfig.serviceTier || "default"
+    } : this.resolveActionExecutionConfig(action);
+    return this.processExecution.runVaultAction({
+      runId,
+      action,
+      input,
+      executionConfig: effectiveConfig,
+      settings: this.settings,
+      hooks
     });
   }
   stopVaultAction(runId) {
-    const child = this.activeProcesses.get(runId);
-    if (!child || child.killed) return false;
-    return this.requestVaultActionStop(runId);
+    return this.processExecution.stopVaultAction(runId);
   }
   requestVaultActionStop(runId) {
-    const child = this.activeProcesses.get(runId);
-    const stopPath = this.activeProcessStops.get(runId);
-    if (!child || child.killed || !stopPath) return false;
-    try {
-      fs2.mkdirSync(path5.dirname(stopPath), { recursive: true });
-      fs2.writeFileSync(stopPath, "stop\n", "utf8");
-      return true;
-    } catch (error) {
-      console.error("Could not request Dashboard action stop", error);
-      return false;
-    }
+    return this.processExecution.requestVaultActionStop(runId);
   }
   stopDirectVaultQuery(runId) {
-    const token = this.directQueryRuns.get(runId);
+    const token = this.lifecycleState.directQueryRuns.get(runId);
     if (!token || token.cancelled) return false;
     token.cancelled = true;
-    if (typeof token.abort === "function") token.abort();
-    const child = this.activeProcesses.get(runId);
+    token.abort?.();
+    const child = this.lifecycleState.activeProcesses.get(runId);
     if (child && !child.killed) child.kill();
     return true;
   }
   isVaultActionProcessActive(runId) {
-    const child = this.activeProcesses.get(runId);
-    return Boolean(child && !child.killed);
+    return this.processExecution.isVaultActionProcessActive(runId);
   }
   isQueryExecutionActive(runId, backendId = "codex-cli") {
     if (backendId && backendId !== "codex-cli") {
-      return this.directQueryRuns.has(runId);
+      return this.lifecycleState.directQueryRuns.has(runId);
     }
     return this.isVaultActionProcessActive(runId);
   }
@@ -7142,7 +7371,7 @@ Execution interrupted before the plugin restarted.`.trim();
     if (!existing) {
       await leaf.setViewState({ type: CODE_PRACTICE_VIEW_TYPE, active: true });
     }
-    if (typeof leaf.view?.setRelatedNote === "function") leaf.view.setRelatedNote(contextFile);
+    if (leaf.view instanceof CodePracticeView) leaf.view.setRelatedNote(contextFile);
     await this.app.workspace.revealLeaf(leaf);
   }
   async activateQueryWikiView(initialQuestion = "") {
@@ -7151,7 +7380,7 @@ Execution interrupted before the plugin restarted.`.trim();
     if (!existing) {
       await leaf.setViewState({ type: QUERY_WIKI_VIEW_TYPE, active: true });
     }
-    if (typeof leaf.view?.setInitialQuestion === "function") {
+    if (leaf.view instanceof QueryWikiView) {
       leaf.view.setInitialQuestion(initialQuestion);
     }
     await this.app.workspace.revealLeaf(leaf);
