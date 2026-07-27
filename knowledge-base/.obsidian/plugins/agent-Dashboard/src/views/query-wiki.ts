@@ -830,7 +830,7 @@ export class QueryWikiView extends ItemView {
 			cls: "query-wiki-composer",
 			attr: { "aria-label": "知识库查询输入" },
 		});
-		this.renderRetrievalModeSwitch(composer);
+		this.renderExecutionSettings(composer);
 		const input = composer.createEl("textarea", {
 			cls: "query-wiki-input",
 			attr: {
@@ -892,6 +892,7 @@ export class QueryWikiView extends ItemView {
 			text: `${turnCount}/30 轮`,
 		});
 		const controls = footer.createDiv({ cls: "query-wiki-composer-actions" });
+		this.renderRetrievalModeSwitch(controls);
 		const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
 		const directProfile = backendId === "codex-cli"
 			? null
@@ -956,7 +957,6 @@ export class QueryWikiView extends ItemView {
 		input.addEventListener("keyup", (event) => event.stopPropagation());
 		send.addEventListener("click", submit);
 		if (this.activeRunId) hint.setText("查询运行中，可先输入下一问题");
-		this.renderExecutionSettings(composer);
 	}
 
 	renderRetrievalModeSwitch(parent: HTMLElement): void {
@@ -1028,6 +1028,7 @@ export class QueryWikiView extends ItemView {
 			claudeOverrides,
 		);
 		const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
+		details.open = true;
 		const summary = details.createEl("summary");
 		const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
 		setIcon(icon, "sliders-horizontal");

@@ -3530,6 +3530,16 @@ var DashboardDataService = class {
 
 // src/views/dashboard.ts
 var import_obsidian7 = require("obsidian");
+var ACTION_ICONS = {
+  "paper-ingest": "file-down",
+  "pdf-xray": "scan-search",
+  "code-analysis": "code-xml",
+  "code-practice": "square-terminal",
+  "vault-retrieval": "search",
+  synthesis: "network",
+  "vault-lint": "shield-check",
+  "okf-export": "package-open"
+};
 var DashboardView = class extends import_obsidian7.ItemView {
   get currentData() {
     if (!this.data) throw new Error("Dashboard data is not loaded");
@@ -3687,10 +3697,10 @@ var DashboardView = class extends import_obsidian7.ItemView {
     status.createSpan({ cls: "agent-dashboard-scan-time", text: this.currentData.header.lastScan });
     const refresh = status.createEl("button", {
       cls: "agent-dashboard-refresh-button",
-      text: "刷新",
-      attr: { "aria-label": "刷新控制台状态" }
+      attr: { "aria-label": "刷新控制台状态", title: "刷新" }
     });
     refresh.type = "button";
+    (0, import_obsidian7.setIcon)(refresh, "refresh-cw");
     this.registerDomEvent(refresh, "click", async () => {
       await this.runRefresh(refresh);
     });
@@ -3712,6 +3722,8 @@ var DashboardView = class extends import_obsidian7.ItemView {
       button.disabled = !action.enabled || isStopping || isRunning && !runningTask;
       if (!action.enabled) button.addClass("is-unavailable");
       if (isRunning) button.addClass("is-running");
+      const icon = button.createSpan({ cls: "agent-dashboard-action-icon" });
+      (0, import_obsidian7.setIcon)(icon, isRunning ? "square" : ACTION_ICONS[action.id] || "circle");
       button.createSpan({ cls: "agent-dashboard-action-label", text: action.label });
       button.createSpan({
         cls: "agent-dashboard-action-state",
@@ -3940,13 +3952,20 @@ var DashboardView = class extends import_obsidian7.ItemView {
     return panel;
   }
   async runRefresh(button) {
-    const previous = button.getText();
     button.disabled = true;
-    button.setText("扫描中");
+    button.addClass("is-loading");
+    button.setAttribute("aria-label", "正在刷新控制台状态");
+    button.title = "扫描中";
+    (0, import_obsidian7.setIcon)(button, "loader-circle");
     await this.loadAndRender();
-    button.setText("完成");
+    button.removeClass("is-loading");
+    button.setAttribute("aria-label", "控制台状态已刷新");
+    button.title = "完成";
+    (0, import_obsidian7.setIcon)(button, "check");
     window.setTimeout(() => {
-      button.setText(previous);
+      button.setAttribute("aria-label", "刷新控制台状态");
+      button.title = "刷新";
+      (0, import_obsidian7.setIcon)(button, "refresh-cw");
       button.disabled = false;
     }, 900);
   }
@@ -5029,7 +5048,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       cls: "query-wiki-composer",
       attr: { "aria-label": "知识库查询输入" }
     });
-    this.renderRetrievalModeSwitch(composer);
+    this.renderExecutionSettings(composer);
     const input = composer.createEl("textarea", {
       cls: "query-wiki-input",
       attr: {
@@ -5089,6 +5108,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       text: `${turnCount}/30 轮`
     });
     const controls = footer.createDiv({ cls: "query-wiki-composer-actions" });
+    this.renderRetrievalModeSwitch(controls);
     const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
     const directProfile = backendId === "codex-cli" ? null : this.plugin.getProviderProfile(backendId);
     const canAttachImage = profileSupportsQueryImage(directProfile);
@@ -5143,7 +5163,6 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     input.addEventListener("keyup", (event) => event.stopPropagation());
     send.addEventListener("click", submit);
     if (this.activeRunId) hint.setText("查询运行中，可先输入下一问题");
-    this.renderExecutionSettings(composer);
   }
   renderRetrievalModeSwitch(parent) {
     const currentMode = this.session.retrievalMode === "vault" ? "vault" : "web";
@@ -5203,6 +5222,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       claudeOverrides
     );
     const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
+    details.open = true;
     const summary = details.createEl("summary");
     const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
     (0, import_obsidian9.setIcon)(icon, "sliders-horizontal");

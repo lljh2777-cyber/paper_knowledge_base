@@ -82,7 +82,7 @@
 	max-width: 100%;
 	color: var(--text-normal);
 	font-family: var(--agent-dashboard-mono);
-	font-size: clamp(22px, 2.6cqi, 38px);
+	font-size: 25px;
 	font-weight: 650;
 	line-height: 1.05;
 	overflow-wrap: anywhere;
@@ -312,7 +312,7 @@
 	gap: 6px;
 	color: var(--text-normal);
 	font-family: var(--agent-dashboard-mono);
-	font-size: clamp(32px, 5cqi, 48px);
+	font-size: 34px;
 	font-weight: 700;
 	line-height: 0.95;
 }
@@ -3857,5 +3857,866 @@
 		top: auto !important;
 		width: auto !important;
 		max-height: min(70vh, 620px);
+	}
+}
+
+/* Evidence workbench visual system */
+.agent-dashboard-view,
+.query-wiki-view,
+.code-practice-view,
+.agent-dashboard-settings,
+.agent-annotation-popover,
+.agent-dashboard-modal {
+	--workbench-accent: #b84542;
+	--workbench-accent-strong: #9f3432;
+	--workbench-accent-soft: color-mix(in srgb, var(--workbench-accent), transparent 91%);
+	--workbench-success: #2f9d63;
+	--workbench-hairline: color-mix(in srgb, var(--text-normal), transparent 86%);
+	--workbench-hairline-soft: color-mix(in srgb, var(--text-normal), transparent 93%);
+	--workbench-panel: color-mix(in srgb, var(--background-secondary), var(--background-primary) 34%);
+	--workbench-panel-hover: color-mix(in srgb, var(--text-normal), transparent 95%);
+	--workbench-radius: 5px;
+}
+
+.theme-dark .agent-dashboard-view,
+.theme-dark .query-wiki-view,
+.theme-dark .code-practice-view,
+.theme-dark .agent-dashboard-settings,
+.theme-dark .agent-annotation-popover,
+.theme-dark .agent-dashboard-modal {
+	--workbench-accent: #d45b56;
+	--workbench-accent-strong: #e06a64;
+	--workbench-success: #55b982;
+	--workbench-hairline: color-mix(in srgb, var(--text-normal), transparent 82%);
+	--workbench-hairline-soft: color-mix(in srgb, var(--text-normal), transparent 91%);
+	--workbench-panel: color-mix(in srgb, var(--background-secondary), var(--background-primary) 44%);
+}
+
+.agent-dashboard-view button:focus-visible,
+.query-wiki-view button:focus-visible,
+.query-wiki-view select:focus-visible,
+.query-wiki-view textarea:focus-visible,
+.code-practice-view button:focus-visible,
+.code-practice-view textarea:focus-visible,
+.agent-dashboard-settings button:focus-visible,
+.agent-dashboard-settings input:focus-visible,
+.agent-dashboard-settings select:focus-visible,
+.agent-annotation-popover button:focus-visible,
+.agent-annotation-popover textarea:focus-visible {
+	outline: 2px solid var(--workbench-accent);
+	outline-offset: 2px;
+}
+
+/* Dashboard */
+.agent-dashboard-view {
+	--agent-dashboard-cyan: var(--workbench-accent);
+	--agent-dashboard-border: var(--workbench-hairline);
+	--agent-dashboard-border-strong: color-mix(in srgb, var(--workbench-accent), transparent 42%);
+	--agent-dashboard-radius: var(--workbench-radius);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.agent-dashboard-shell {
+	padding: 16px 18px 28px;
+}
+
+.agent-dashboard-header {
+	gap: 24px;
+	align-items: center;
+	padding: 3px 0 14px;
+}
+
+.agent-dashboard-eyebrow,
+.agent-dashboard-panel-kicker {
+	margin-bottom: 5px;
+	color: var(--workbench-accent);
+	font-size: 10px;
+	letter-spacing: 0;
+}
+
+.agent-dashboard-view h1 {
+	font-size: 25px;
+	font-weight: 680;
+	line-height: 1.12;
+}
+
+.agent-dashboard-view h2 {
+	font-size: 13px;
+	font-weight: 680;
+	letter-spacing: 0;
+}
+
+.agent-dashboard-status-pill,
+.agent-dashboard-vault-chip,
+.agent-dashboard-scan-time {
+	min-height: 30px;
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: transparent;
+	font-size: 10px;
+}
+
+.agent-dashboard-local-pill {
+	border-color: color-mix(in srgb, var(--workbench-success), transparent 52%);
+	background: color-mix(in srgb, var(--workbench-success), transparent 92%);
+	color: var(--workbench-success);
+}
+
+.agent-dashboard-refresh-button {
+	width: 32px;
+	min-width: 32px;
+	min-height: 32px;
+	padding: 0;
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: transparent;
+}
+
+.agent-dashboard-refresh-button svg {
+	width: 15px;
+	height: 15px;
+}
+
+.agent-dashboard-refresh-button.is-loading svg {
+	animation: query-wiki-spin 800ms linear infinite;
+}
+
+.agent-dashboard-action-rail {
+	grid-template-columns: repeat(8, minmax(92px, 1fr));
+	gap: 0;
+	padding: 0;
+	margin: 14px 0 20px;
+	border-top: 1px solid var(--workbench-hairline);
+	border-bottom: 1px solid var(--workbench-hairline);
+	overflow-x: auto;
+}
+
+.agent-dashboard-action-button {
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
+	grid-template-rows: auto auto;
+	gap: 2px 7px;
+	min-height: 58px;
+	padding: 9px 10px;
+	justify-content: stretch;
+	border: 0;
+	border-right: 1px solid var(--workbench-hairline-soft);
+	border-radius: 0;
+	box-shadow: none;
+	background: transparent;
+	text-align: left;
+}
+
+.agent-dashboard-action-button:last-child {
+	border-right: 0;
+}
+
+.agent-dashboard-action-button::before {
+	display: none;
+}
+
+.agent-dashboard-action-button:hover:not(:disabled),
+.agent-dashboard-action-button:focus-visible:not(:disabled) {
+	background: var(--workbench-panel-hover);
+}
+
+.agent-dashboard-action-button.is-running {
+	background: var(--workbench-accent-soft);
+}
+
+.agent-dashboard-action-icon {
+	display: inline-grid;
+	width: 18px;
+	height: 18px;
+	grid-row: 1 / span 2;
+	align-self: center;
+	place-items: center;
+	color: var(--workbench-accent);
+}
+
+.agent-dashboard-action-icon svg {
+	width: 15px;
+	height: 15px;
+}
+
+.agent-dashboard-action-label {
+	align-self: end;
+	font-size: 11px;
+	font-weight: 620;
+	line-height: 1.3;
+}
+
+.agent-dashboard-action-state {
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	border-radius: 0;
+	color: var(--agent-dashboard-quiet);
+	font-size: 8px;
+	line-height: 1.2;
+	text-transform: none;
+}
+
+.agent-dashboard-grid {
+	gap: 20px 18px;
+}
+
+.agent-dashboard-metric-grid {
+	gap: 0;
+	border-top: 1px solid var(--workbench-hairline);
+	border-bottom: 1px solid var(--workbench-hairline);
+}
+
+.agent-dashboard-metric-card,
+.agent-dashboard-panel {
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	background: transparent;
+}
+
+.agent-dashboard-metric-card {
+	gap: 7px;
+	padding: 14px 16px;
+	border-right: 1px solid var(--workbench-hairline-soft);
+}
+
+.agent-dashboard-metric-card:last-child {
+	border-right: 0;
+}
+
+.agent-dashboard-metric-label {
+	font-size: 10px;
+	letter-spacing: 0;
+}
+
+.agent-dashboard-metric-value {
+	font-size: 34px;
+	line-height: 1;
+}
+
+.agent-dashboard-tone-neutral .agent-dashboard-metric-value {
+	color: var(--text-normal);
+}
+
+.agent-dashboard-metric-detail {
+	min-height: 34px;
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.agent-dashboard-panel {
+	padding: 16px 0 4px;
+	border-top: 1px solid var(--workbench-hairline);
+}
+
+.agent-dashboard-panel-heading {
+	margin-bottom: 11px;
+}
+
+.agent-dashboard-data-row,
+.agent-dashboard-coverage-stat {
+	border: 0;
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+	border-radius: 0;
+	background: transparent;
+}
+
+.agent-dashboard-data-row {
+	padding: 9px 4px;
+}
+
+.agent-dashboard-data-row:last-child {
+	border-bottom: 0;
+}
+
+.agent-dashboard-run-row:hover,
+.agent-dashboard-run-row:focus-visible {
+	border-color: transparent;
+	background: var(--workbench-panel-hover);
+	outline: 0;
+}
+
+.agent-dashboard-row-title {
+	font-size: 12px;
+}
+
+.agent-dashboard-status-badge,
+.agent-dashboard-severity-badge,
+.agent-dashboard-okf-state {
+	min-width: 56px;
+	border-radius: 3px;
+	font-size: 9px;
+}
+
+.agent-dashboard-gap-action {
+	min-width: 64px;
+	border: 1px solid color-mix(in srgb, var(--workbench-accent), transparent 50%);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--workbench-accent);
+}
+
+.agent-dashboard-gap-action:hover:not(:disabled),
+.agent-dashboard-gap-action:focus-visible:not(:disabled) {
+	border-color: var(--workbench-accent);
+	background: var(--workbench-accent-soft);
+}
+
+.agent-dashboard-coverage-stats {
+	gap: 0;
+	border-top: 1px solid var(--workbench-hairline-soft);
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+}
+
+.agent-dashboard-coverage-stat {
+	padding: 10px 8px;
+	border-right: 1px solid var(--workbench-hairline-soft);
+	border-bottom: 0;
+}
+
+.agent-dashboard-coverage-stat:last-child {
+	border-right: 0;
+}
+
+/* Query evidence workbench */
+.query-wiki-view {
+	--query-border: var(--workbench-hairline);
+	--query-surface: var(--workbench-panel);
+}
+
+.query-wiki-header {
+	padding: 11px 18px;
+	background: color-mix(in srgb, var(--background-primary), transparent 4%);
+}
+
+.query-wiki-kicker {
+	color: var(--workbench-accent);
+	font-size: 9px;
+}
+
+.query-wiki-title h1 {
+	font-size: 15px;
+}
+
+.query-wiki-icon-button {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: transparent;
+}
+
+.query-wiki-conversation {
+	padding: 18px 22px 30px;
+}
+
+.query-wiki-conversation-region.has-navigator .query-wiki-conversation {
+	padding-left: 58px;
+}
+
+.query-wiki-navigator-marker.is-active::before {
+	background: var(--workbench-accent);
+}
+
+.query-wiki-navigator-tooltip {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--background-primary);
+}
+
+.query-wiki-message {
+	max-width: 880px;
+	gap: 6px;
+	margin-bottom: 24px;
+}
+
+.query-wiki-message-heading {
+	font-size: 9px;
+}
+
+.query-wiki-message-mode,
+.query-wiki-message-backend,
+.query-wiki-message-retrieval,
+.query-wiki-validation,
+.query-wiki-source-badge {
+	border-radius: 3px;
+}
+
+.query-wiki-message-body {
+	font-size: 14px;
+	line-height: 1.72;
+}
+
+.query-wiki-message.is-user .query-wiki-message-heading,
+.query-wiki-message.is-user .query-wiki-message-body {
+	width: min(88%, 700px);
+}
+
+.query-wiki-message.is-user .query-wiki-message-body {
+	padding: 10px 12px;
+	border: 0;
+	border-left: 2px solid var(--workbench-accent);
+	border-radius: 0;
+	background: var(--workbench-panel);
+}
+
+.query-wiki-message.is-assistant .query-wiki-message-body {
+	padding-left: 14px;
+	border-left-color: color-mix(in srgb, var(--workbench-accent), transparent 26%);
+}
+
+.query-wiki-markdown h1 {
+	font-size: 19px;
+}
+
+.query-wiki-markdown h2 {
+	margin-top: 1.5em;
+	padding-bottom: 5px;
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+	color: var(--workbench-accent-strong);
+	font-size: 15px;
+}
+
+.theme-dark .query-wiki-markdown h2 {
+	color: var(--workbench-accent);
+}
+
+.query-wiki-markdown h3 {
+	font-size: 13px;
+}
+
+.query-wiki-sources-content {
+	gap: 14px;
+}
+
+.query-wiki-source-list {
+	gap: 0;
+	border-top: 1px solid var(--workbench-hairline-soft);
+}
+
+.query-wiki-source-item {
+	padding: 8px 4px;
+	border: 0;
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+	border-radius: 0;
+	background: transparent;
+}
+
+.query-wiki-source-item:hover {
+	border-color: var(--workbench-hairline-soft);
+	background: var(--workbench-panel-hover);
+}
+
+.query-wiki-source-number,
+.query-wiki-source-icon {
+	color: var(--workbench-accent);
+}
+
+.query-wiki-composer {
+	gap: 8px;
+	padding: 0 16px 12px;
+	border-top-color: var(--workbench-hairline);
+	box-shadow: none;
+}
+
+.query-wiki-run-settings {
+	padding: 7px 0 6px;
+	border-top: 0;
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+	background: transparent;
+}
+
+.query-wiki-run-settings summary {
+	min-height: 25px;
+	color: var(--query-muted);
+	font-size: 9px;
+}
+
+.query-wiki-run-settings[open] summary {
+	color: var(--workbench-accent);
+}
+
+.query-wiki-settings-grid {
+	grid-template-columns: repeat(4, minmax(112px, 1fr));
+	gap: 8px;
+	padding: 5px 0 2px;
+}
+
+.query-wiki-settings-field {
+	gap: 3px;
+	font-size: 8px;
+}
+
+.query-wiki-settings-field select {
+	height: 28px;
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--workbench-panel);
+	font-size: 9px;
+}
+
+.query-wiki-cli-model-status {
+	margin-top: 5px;
+	font-size: 8px;
+}
+
+.query-wiki-direct-notice {
+	margin-top: 6px;
+	border-left-color: var(--workbench-accent);
+	background: var(--workbench-accent-soft);
+}
+
+.query-wiki-input {
+	min-height: 88px;
+	padding: 11px 12px;
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--workbench-panel);
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.query-wiki-input:focus {
+	border-color: var(--workbench-accent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--workbench-accent), transparent 52%);
+}
+
+.query-wiki-composer-footer {
+	align-items: center;
+}
+
+.query-wiki-composer-actions {
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+.query-wiki-mode-switch {
+	width: 208px;
+	padding: 2px;
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: transparent;
+}
+
+.query-wiki-mode-option {
+	min-height: 28px;
+	border-radius: 3px;
+	font-size: 10px;
+}
+
+.query-wiki-mode-option.is-active {
+	background: var(--workbench-accent);
+	color: white;
+}
+
+.query-wiki-send {
+	height: 30px;
+	border-radius: 4px;
+	background: var(--workbench-accent);
+	color: white;
+}
+
+.query-wiki-send:hover:not(:disabled) {
+	background: var(--workbench-accent-strong);
+}
+
+/* Settings */
+.agent-dashboard-settings {
+	--interactive-accent: var(--workbench-accent);
+}
+
+.agent-dashboard-settings-page-header {
+	margin-bottom: 12px;
+	padding-bottom: 13px;
+	border-bottom: 1px solid var(--workbench-hairline);
+}
+
+.agent-dashboard-settings-page-header h2 {
+	font-size: 18px;
+}
+
+.agent-dashboard-settings-navigation {
+	border-top-color: var(--workbench-hairline);
+}
+
+.agent-dashboard-settings-navigation-item {
+	min-height: 68px;
+	padding: 10px 6px;
+	border-bottom-color: var(--workbench-hairline-soft);
+}
+
+.agent-dashboard-settings-navigation-item:hover,
+.agent-dashboard-settings-navigation-item:focus-visible {
+	background: var(--workbench-panel-hover);
+}
+
+.agent-dashboard-settings-navigation-icon {
+	border: 0;
+	border-radius: 4px;
+	background: var(--workbench-accent-soft);
+	color: var(--workbench-accent);
+}
+
+.agent-dashboard-settings-navigation-copy strong {
+	font-size: 13px;
+}
+
+.agent-dashboard-settings-section {
+	margin-top: 24px;
+	border-bottom: 1px solid var(--workbench-hairline);
+}
+
+.agent-dashboard-settings-section h3 {
+	color: var(--workbench-accent-strong);
+	font-size: 15px;
+}
+
+.theme-dark .agent-dashboard-settings-section h3 {
+	color: var(--workbench-accent);
+}
+
+.agent-dashboard-provider-form > .setting-item {
+	border-top-color: var(--workbench-hairline-soft);
+}
+
+.agent-dashboard-provider-setting-emphasis {
+	border-left: 2px solid var(--workbench-accent);
+	background: var(--workbench-accent-soft);
+}
+
+.agent-dashboard-provider-result {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: transparent;
+}
+
+/* Code practice */
+.code-practice-shell {
+	padding: 16px 18px 28px;
+}
+
+.code-practice-header {
+	padding-bottom: 13px;
+	border-bottom-color: var(--workbench-hairline);
+}
+
+.code-practice-notebook {
+	border-top: 1px solid var(--workbench-hairline);
+	border-bottom: 1px solid var(--workbench-hairline);
+	border-radius: 0;
+	background: transparent;
+}
+
+.code-practice-cell-list {
+	gap: 0;
+}
+
+.code-practice-cell {
+	padding: 13px 0;
+	border: 0;
+	border-top: 1px solid var(--workbench-hairline-soft);
+	border-radius: 0;
+	background: transparent;
+}
+
+.code-practice-cell:first-child {
+	border-top: 0;
+}
+
+.code-practice-cell.is-running {
+	border-color: var(--workbench-accent);
+	background: var(--workbench-accent-soft);
+}
+
+.code-practice-cell-editor {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--workbench-panel);
+	font-size: 13px;
+}
+
+.code-practice-cell-editor:focus {
+	border-color: var(--workbench-accent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--workbench-accent), transparent 52%);
+}
+
+.code-practice-cell-prompt,
+.code-practice-notebook-heading span {
+	color: var(--workbench-accent);
+}
+
+.code-practice-cell-result {
+	border-left-color: var(--workbench-success);
+}
+
+/* Annotation popover and task modals */
+.agent-annotation-popover {
+	border-color: var(--workbench-hairline);
+	border-radius: 6px;
+	background: var(--background-primary);
+	box-shadow: 0 14px 38px color-mix(in srgb, black, transparent 74%);
+}
+
+.agent-annotation-header {
+	padding-bottom: 11px;
+	border-bottom: 1px solid var(--workbench-hairline);
+}
+
+.agent-annotation-choice-list {
+	gap: 0;
+	border-top: 1px solid var(--workbench-hairline-soft);
+}
+
+.agent-annotation-choice {
+	min-height: 68px;
+	border: 0;
+	border-bottom: 1px solid var(--workbench-hairline-soft);
+	border-radius: 0;
+	background: transparent;
+}
+
+.agent-annotation-choice:hover,
+.agent-annotation-choice:focus-visible {
+	border-color: var(--workbench-hairline-soft);
+	background: var(--workbench-panel-hover);
+}
+
+.agent-annotation-choice-icon {
+	border-radius: 4px;
+	background: var(--workbench-accent-soft);
+	color: var(--workbench-accent);
+}
+
+.agent-annotation-editor,
+.agent-annotation-field textarea {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--workbench-panel);
+}
+
+.agent-annotation-section h4 {
+	color: var(--workbench-accent-strong);
+}
+
+.theme-dark .agent-annotation-section h4 {
+	color: var(--workbench-accent);
+}
+
+.agent-dashboard-run-config,
+.agent-dashboard-result-config-item {
+	border-color: var(--workbench-hairline);
+	border-radius: 4px;
+	background: var(--workbench-panel);
+}
+
+.agent-dashboard-modal-warning {
+	border-left-color: var(--workbench-accent);
+	background: var(--workbench-accent-soft);
+}
+
+@container (max-width: 700px) {
+	.agent-dashboard-action-rail {
+		grid-template-columns: repeat(4, minmax(110px, 1fr));
+	}
+
+	.agent-dashboard-metric-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.agent-dashboard-metric-card:nth-child(2) {
+		border-right: 0;
+	}
+
+	.agent-dashboard-metric-card:nth-child(-n + 2) {
+		border-bottom: 1px solid var(--workbench-hairline-soft);
+	}
+
+	.query-wiki-settings-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+@container (max-width: 440px) {
+	.agent-dashboard-shell,
+	.code-practice-shell {
+		padding-right: 12px;
+		padding-left: 12px;
+	}
+
+	.agent-dashboard-header {
+		align-items: start;
+	}
+
+	.agent-dashboard-view h1 {
+		font-size: 21px;
+	}
+
+	.agent-dashboard-action-rail {
+		grid-template-columns: repeat(2, minmax(112px, 1fr));
+	}
+
+	.agent-dashboard-action-button:nth-child(even) {
+		border-right: 0;
+	}
+
+	.agent-dashboard-metric-card {
+		padding: 12px;
+	}
+
+	.agent-dashboard-metric-value {
+		font-size: 29px;
+	}
+
+	.query-wiki-conversation {
+		padding: 14px 10px 24px;
+	}
+
+	.query-wiki-conversation-region.has-navigator .query-wiki-conversation {
+		padding-left: 41px;
+	}
+
+	.query-wiki-message.is-user .query-wiki-message-heading,
+	.query-wiki-message.is-user .query-wiki-message-body {
+		width: 94%;
+	}
+
+	.query-wiki-settings-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.query-wiki-composer {
+		padding-right: 10px;
+		padding-left: 10px;
+	}
+
+	.query-wiki-composer-footer {
+		align-items: stretch;
+		flex-direction: column;
+	}
+
+	.query-wiki-shortcut {
+		order: 2;
+	}
+
+	.query-wiki-composer-actions {
+		width: 100%;
+		justify-content: flex-end;
+	}
+
+	.query-wiki-mode-switch {
+		width: auto;
+		flex: 1 1 180px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.agent-dashboard-view *,
+	.query-wiki-view *,
+	.code-practice-view *,
+	.agent-annotation-popover * {
+		scroll-behavior: auto !important;
+		transition-duration: 0.01ms !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
 	}
 }

@@ -38,6 +38,17 @@ type HeatmapDay = DashboardData["activity"]["days"][number];
 type RunsFilter = "all" | "done" | "open";
 type GapsFilter = "all" | "high" | "medium" | "low";
 
+const ACTION_ICONS: Record<string, string> = {
+	"paper-ingest": "file-down",
+	"pdf-xray": "scan-search",
+	"code-analysis": "code-xml",
+	"code-practice": "square-terminal",
+	"vault-retrieval": "search",
+	synthesis: "network",
+	"vault-lint": "shield-check",
+	"okf-export": "package-open",
+};
+
 interface DashboardHost extends PluginHost {
 	getRunningTaskRun(actionId: string): TaskRun | null;
 	stopDirectVaultQuery(runId: string): boolean;
@@ -237,10 +248,10 @@ export class DashboardView extends ItemView {
 		status.createSpan({ cls: "agent-dashboard-scan-time", text: this.currentData.header.lastScan });
 		const refresh = status.createEl("button", {
 			cls: "agent-dashboard-refresh-button",
-			text: "刷新",
-			attr: { "aria-label": "刷新控制台状态" },
+			attr: { "aria-label": "刷新控制台状态", title: "刷新" },
 		});
 		refresh.type = "button";
+		setIcon(refresh, "refresh-cw");
 		this.registerDomEvent(refresh, "click", async () => {
 			await this.runRefresh(refresh);
 		});
@@ -267,6 +278,8 @@ export class DashboardView extends ItemView {
 			button.disabled = !action.enabled || isStopping || (isRunning && !runningTask);
 			if (!action.enabled) button.addClass("is-unavailable");
 			if (isRunning) button.addClass("is-running");
+			const icon = button.createSpan({ cls: "agent-dashboard-action-icon" });
+			setIcon(icon, isRunning ? "square" : ACTION_ICONS[action.id] || "circle");
 			button.createSpan({ cls: "agent-dashboard-action-label", text: action.label });
 			button.createSpan({
 				cls: "agent-dashboard-action-state",
@@ -523,13 +536,20 @@ export class DashboardView extends ItemView {
 	}
 
 	async runRefresh(button: HTMLButtonElement): Promise<void> {
-		const previous = button.getText();
 		button.disabled = true;
-		button.setText("扫描中");
+		button.addClass("is-loading");
+		button.setAttribute("aria-label", "正在刷新控制台状态");
+		button.title = "扫描中";
+		setIcon(button, "loader-circle");
 		await this.loadAndRender();
-		button.setText("完成");
+		button.removeClass("is-loading");
+		button.setAttribute("aria-label", "控制台状态已刷新");
+		button.title = "完成";
+		setIcon(button, "check");
 		window.setTimeout(() => {
-			button.setText(previous);
+			button.setAttribute("aria-label", "刷新控制台状态");
+			button.title = "刷新";
+			setIcon(button, "refresh-cw");
 			button.disabled = false;
 		}, 900);
 	}
