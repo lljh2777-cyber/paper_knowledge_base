@@ -40,8 +40,11 @@ interface SettingsPluginHost extends PluginHost {
 	getProviderErrorLabel(type: string): string;
 }
 
+type SettingsPage = "home" | "runtime" | "codex" | "direct-api";
+
 export class AgentDashboardSettingTab extends PluginSettingTab {
 	declare plugin: Plugin & SettingsPluginHost;
+	private activePage: SettingsPage = "home";
 
 	constructor(app: App, plugin: Plugin & SettingsPluginHost) {
 		super(app, plugin);
@@ -51,7 +54,70 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl("h2", { text: "Agent Dashboard" });
+		containerEl.addClass("agent-dashboard-settings");
+		switch (this.activePage) {
+			case "runtime":
+				this.renderRuntimeSettings(containerEl);
+				break;
+			case "codex":
+				this.renderCodexSettings(containerEl);
+				break;
+			case "direct-api":
+				this.renderDirectApiSettings(containerEl);
+				break;
+			default:
+				this.renderSettingsHome(containerEl);
+		}
+	}
+
+	private renderSettingsHome(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"Agent Dashboard",
+			"按模块管理运行环境、Codex 模型和 Direct API。进入对应模块后再修改详细设置。",
+		);
+		const navigation = containerEl.createDiv({ cls: "agent-dashboard-settings-navigation" });
+		this.createSettingsNavigationItem(navigation, {
+			page: "runtime",
+			icon: "terminal",
+			title: "运行环境",
+			description: "项目目录、Codex/Python/R 可执行文件、任务超时和环境检查。",
+			status: "本地执行",
+		});
+		const reasoningLabel = REASONING_OPTIONS.find(
+			(option) => option.id === this.plugin.settings.codexReasoningEffort,
+		)?.label || this.plugin.settings.codexReasoningEffort;
+		this.createSettingsNavigationItem(navigation, {
+			page: "codex",
+			icon: "bot",
+			title: "Codex 模型",
+			description: "全局默认模型、推理强度，以及 Codex CLI 连接测试。",
+			status: `${this.plugin.settings.codexModel} · ${reasoningLabel}`,
+		});
+		const profiles = this.plugin.settings.providerProfiles;
+		const activeProfile = profiles.find(
+			(profile) => profile.id === this.plugin.settings.activeProviderId,
+		);
+		this.createSettingsNavigationItem(navigation, {
+			page: "direct-api",
+			icon: "plug-zap",
+			title: "Direct API",
+			description: "供应商、SecretStorage 凭据、模型能力、联网搜索和连接测试。",
+			status: activeProfile
+				? `${activeProfile.name} · 已启用`
+				: profiles.length
+					? `${profiles.length} 个配置`
+					: "未配置",
+		});
+	}
+
+	private renderRuntimeSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"运行环境",
+			"管理 Dashboard 本地任务使用的项目路径、运行时和超时限制。",
+			true,
+		);
 		new Setting(containerEl)
 			.setName("项目根目录")
 			.setDesc("包含 AGENTS.md、.codex/ 和 tool-library/ 的项目目录。")
@@ -116,6 +182,39 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					})
 			);
 		new Setting(containerEl)
+			.setName("任务超时（分钟）")
+			.setDesc("单个本地脚本或 Codex 任务的最长运行时间，范围 1-240 分钟。")
+			.addText((text) =>
+				text
+					.setPlaceholder("60")
+					.setValue(String(this.plugin.settings.taskTimeoutMinutes))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (Number.isFinite(parsed)) {
+							this.plugin.settings.taskTimeoutMinutes = Math.max(1, Math.min(240, parsed));
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+		new Setting(containerEl)
+			.setName("运行环境")
+			.setDesc("检查项目根目录、Codex、Python 和 dashboard runner 是否可用。")
+			.addButton((button) =>
+				button.setButtonText("检查").onClick(() => {
+					const result = this.plugin.checkRuntime();
+					new Notice(result.message, 8000);
+				})
+			);
+	}
+
+	private renderCodexSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"Codex 模型",
+			"配置 Dashboard AI 任务的全局回退模型，并检查 Codex CLI 是否可用。",
+			true,
+		);
+		new Setting(containerEl)
 			.setName("全局默认模型")
 			.setDesc("没有按钮级模型配置的 Dashboard AI 任务使用该模型。")
 			.addText((text) =>
@@ -139,38 +238,10 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
-		new Setting(containerEl)
-			.setName("任务超时（分钟）")
-			.setDesc("单个本地脚本或 Codex 任务的最长运行时间，范围 1-240 分钟。")
-			.addText((text) =>
-				text
-					.setPlaceholder("60")
-					.setValue(String(this.plugin.settings.taskTimeoutMinutes))
-					.onChange(async (value) => {
-						const parsed = Number.parseInt(value, 10);
-						if (Number.isFinite(parsed)) {
-							this.plugin.settings.taskTimeoutMinutes = Math.max(1, Math.min(240, parsed));
-							await this.plugin.saveSettings();
-						}
-					})
-			);
-		this.renderProviderSettings(containerEl);
-		new Setting(containerEl)
-			.setName("运行环境")
-			.setDesc("检查项目根目录、Codex、Python 和 dashboard runner 是否可用。")
-			.addButton((button) =>
-				button.setButtonText("检查").onClick(() => {
-					const result = this.plugin.checkRuntime();
-					new Notice(result.message, 8000);
-				})
-			);
-	}
-
-	renderProviderSettings(containerEl: HTMLElement): void {
 		this.createProviderSectionHeader(
 			containerEl,
 			"模型调用",
-			"写入型 Dashboard 任务继续使用 Codex CLI。知识库查询可切换到已验证的 Direct API；Qwen3.7-Plus 的 OpenAI 兼容配置可单独启用联网搜索。Direct API 不执行 skill 或文件写入。",
+			"写入型 Dashboard 任务使用 Codex CLI；认证、模型调用、沙箱和权限继续由 Codex 管理。",
 		);
 		const codexResult = this.plugin.providerRuntimeState.get("codex-cli") || null;
 		new Setting(containerEl)
@@ -190,7 +261,15 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					});
 			});
 		if (codexResult?.result) this.renderConnectionResult(containerEl, codexResult.result);
+	}
 
+	private renderDirectApiSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"Direct API",
+			"管理知识库查询可用的独立模型服务。Direct API 不执行 skill 或文件写入。",
+			true,
+		);
 		this.createProviderSectionHeader(
 			containerEl,
 			"Direct API 配置",
@@ -267,6 +346,65 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			return;
 		}
 		this.renderProviderProfile(containerEl, selectedProfile);
+	}
+
+	private createSettingsPageHeader(
+		containerEl: HTMLElement,
+		title: string,
+		description: string,
+		showBack = false,
+	): void {
+		const header = containerEl.createDiv({ cls: "agent-dashboard-settings-page-header" });
+		if (showBack) {
+			const backButton = header.createEl("button", {
+				cls: "agent-dashboard-settings-back",
+				attr: {
+					type: "button",
+					"aria-label": "返回设置首页",
+				},
+			});
+			const icon = backButton.createSpan();
+			setIcon(icon, "arrow-left");
+			backButton.createSpan({ text: "设置" });
+			backButton.addEventListener("click", () => {
+				this.activePage = "home";
+				this.display();
+			});
+		}
+		header.createEl("h2", { text: title });
+		header.createEl("p", { text: description });
+	}
+
+	private createSettingsNavigationItem(
+		containerEl: HTMLElement,
+		options: {
+			page: Exclude<SettingsPage, "home">;
+			icon: string;
+			title: string;
+			description: string;
+			status: string;
+		},
+	): void {
+		const button = containerEl.createEl("button", {
+			cls: "agent-dashboard-settings-navigation-item",
+			attr: {
+				type: "button",
+				"aria-label": `打开${options.title}设置`,
+			},
+		});
+		const icon = button.createSpan({ cls: "agent-dashboard-settings-navigation-icon" });
+		setIcon(icon, options.icon);
+		const copy = button.createDiv({ cls: "agent-dashboard-settings-navigation-copy" });
+		copy.createEl("strong", { text: options.title });
+		copy.createSpan({ text: options.description });
+		const trailing = button.createDiv({ cls: "agent-dashboard-settings-navigation-trailing" });
+		trailing.createSpan({ text: options.status });
+		const chevron = trailing.createSpan({ cls: "agent-dashboard-settings-navigation-chevron" });
+		setIcon(chevron, "chevron-right");
+		button.addEventListener("click", () => {
+			this.activePage = options.page;
+			this.display();
+		});
 	}
 
 	getEditorProviderProfile(): ProviderProfile | null {

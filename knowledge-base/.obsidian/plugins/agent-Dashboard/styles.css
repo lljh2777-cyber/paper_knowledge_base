@@ -1062,6 +1062,138 @@
 	white-space: nowrap;
 }
 
+.agent-dashboard-settings-page-header {
+	max-width: 920px;
+	margin-bottom: 14px;
+	padding-bottom: 12px;
+	border-bottom: 2px solid color-mix(in srgb, var(--interactive-accent), transparent 30%);
+}
+
+.agent-dashboard-settings-page-header h2 {
+	margin: 7px 0 0;
+	letter-spacing: 0;
+}
+
+.agent-dashboard-settings-page-header p {
+	max-width: 760px;
+	margin: 6px 0 0;
+	color: var(--text-muted);
+	font-size: 12px;
+	line-height: 1.55;
+}
+
+.agent-dashboard-settings-back {
+	display: inline-flex;
+	gap: 6px;
+	align-items: center;
+	min-height: 30px;
+	padding: 3px 7px;
+	border: 0;
+	box-shadow: none;
+	color: var(--text-muted);
+	background: transparent;
+	font-size: 12px;
+}
+
+.agent-dashboard-settings-back:hover,
+.agent-dashboard-settings-back:focus-visible {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.agent-dashboard-settings-back svg {
+	width: 15px;
+	height: 15px;
+}
+
+.agent-dashboard-settings-navigation {
+	display: grid;
+	max-width: 920px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.agent-dashboard-settings-navigation-item {
+	display: grid;
+	grid-template-columns: 38px minmax(0, 1fr) minmax(130px, auto);
+	gap: 12px;
+	align-items: center;
+	width: 100%;
+	min-height: 74px;
+	padding: 12px 8px;
+	border: 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+	border-radius: 0;
+	box-shadow: none;
+	color: var(--text-normal);
+	background: transparent;
+	text-align: left;
+}
+
+.agent-dashboard-settings-navigation-item:hover,
+.agent-dashboard-settings-navigation-item:focus-visible {
+	background: var(--background-modifier-hover);
+}
+
+.agent-dashboard-settings-navigation-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	color: var(--interactive-accent);
+	background: var(--background-secondary);
+}
+
+.agent-dashboard-settings-navigation-icon svg {
+	width: 18px;
+	height: 18px;
+}
+
+.agent-dashboard-settings-navigation-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.agent-dashboard-settings-navigation-copy strong {
+	font-size: 14px;
+	font-weight: 650;
+}
+
+.agent-dashboard-settings-navigation-copy span {
+	overflow-wrap: anywhere;
+	color: var(--text-muted);
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.agent-dashboard-settings-navigation-trailing {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	justify-content: flex-end;
+	min-width: 0;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: 10px;
+}
+
+.agent-dashboard-settings-navigation-trailing > span:first-child {
+	overflow: hidden;
+	max-width: 210px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.agent-dashboard-settings-navigation-chevron,
+.agent-dashboard-settings-navigation-chevron svg {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 16px;
+}
+
 .agent-dashboard-settings-section {
 	max-width: 920px;
 	margin: 28px 0 6px;
@@ -1117,6 +1249,17 @@
 
 .agent-dashboard-provider-test-setting {
 	border-top: 1px solid color-mix(in srgb, var(--interactive-accent), transparent 65%);
+}
+
+@media (max-width: 720px) {
+	.agent-dashboard-settings-navigation-item {
+		grid-template-columns: 34px minmax(0, 1fr) 16px;
+		gap: 9px;
+	}
+
+	.agent-dashboard-settings-navigation-trailing > span:first-child {
+		display: none;
+	}
 }
 
 .agent-dashboard-provider-empty {

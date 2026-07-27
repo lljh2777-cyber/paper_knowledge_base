@@ -90,6 +90,30 @@ for (const strictSource of [
 		`${strictSource} should remain under strict TypeScript checking`,
 	);
 }
+const settingsSource = fs.readFileSync(
+	path.join(pluginSourceRoot, "settings/settings-tab.ts"),
+	"utf8",
+);
+for (const settingsPage of [
+	'renderSettingsHome(containerEl)',
+	'renderRuntimeSettings(containerEl)',
+	'renderCodexSettings(containerEl)',
+	'renderDirectApiSettings(containerEl)',
+]) {
+	assert.ok(
+		settingsSource.includes(settingsPage),
+		`settings should retain the ${settingsPage} navigation target`,
+	);
+}
+assert.ok(
+	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "direct-api"'),
+	"settings should retain a dedicated page state for each configuration module",
+);
+assert.ok(
+	settingsSource.includes('setIcon(chevron, "chevron-right")')
+		&& settingsSource.includes('"aria-label": "返回设置首页"'),
+	"settings should retain forward and back navigation affordances",
+);
 assert.ok(
 	fs.readFileSync(path.join(pluginSourceRoot, "types/contracts.ts"), "utf8")
 		.includes("export interface PluginHost"),
