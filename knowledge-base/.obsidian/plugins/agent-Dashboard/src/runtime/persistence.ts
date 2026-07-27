@@ -6,6 +6,7 @@ import type {
 	TaskRunStatus,
 } from "../types/contracts";
 import { normalizeProviderProfile } from "../providers/profile";
+import { isCliBackendId } from "../config";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -52,14 +53,19 @@ function normalizeTaskStatus(value: unknown): TaskRunStatus {
 function normalizeExecutionConfig(value: unknown): ExecutionConfig | null {
 	const source = asRecord(value);
 	const model = String(source.model || "").trim();
-	if (!model) return null;
+	const backend = source.backend === "direct-api"
+		? "direct-api"
+		: isCliBackendId(source.backend)
+			? source.backend
+			: "codex-cli";
+	if (!model && backend !== "claude-code") return null;
 	const serviceTier = source.serviceTier === "fast"
 		? "fast"
 		: source.serviceTier === "default"
 			? "default"
 			: null;
 	return {
-		backend: source.backend === "direct-api" ? "direct-api" : "codex-cli",
+		backend,
 		providerId: String(source.providerId || ""),
 		providerName: String(source.providerName || ""),
 		model,

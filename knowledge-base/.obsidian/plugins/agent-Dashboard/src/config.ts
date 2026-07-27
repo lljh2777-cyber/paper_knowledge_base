@@ -2,6 +2,16 @@ export const VIEW_TYPE = "agent-dashboard-research-vault";
 export const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 export const QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 
+export type CliBackendId = "codex-cli" | "claude-code";
+
+export function isCliBackendId(value: unknown): value is CliBackendId {
+	return value === "codex-cli" || value === "claude-code";
+}
+
+export function getCliBackendLabel(value: unknown): string {
+	return value === "claude-code" ? "Claude Code" : "Codex CLI";
+}
+
 export const MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
 export const MAX_QUERY_IMAGE_ATTACHMENTS = 6;
 export const MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;

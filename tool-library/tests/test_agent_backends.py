@@ -180,6 +180,31 @@ class AgentBackendProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "write access is not enabled"):
             backend.build_command("claude.exe", request)
 
+    def test_claude_annotation_uses_zero_tools_without_plan_mode(self) -> None:
+        backend = get_backend("claude-code")
+        request = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            access_policy=BackendAccessPolicy(
+                mode="read-only",
+                write_scope="none",
+                allowed_roots=(PROJECT_ROOT,),
+            ),
+        )
+
+        command = backend.build_command("claude.exe", request)
+
+        self.assertIn("dontAsk", command)
+        self.assertIn("--tools=", command)
+        self.assertNotIn("Read,Glob,Grep", command)
+        self.assertEqual(command[-2:], ["--output-format", "text"])
+
     def test_claude_adapter_normalizes_init_tool_and_result_events(
         self,
     ) -> None:

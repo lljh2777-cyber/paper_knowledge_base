@@ -4,7 +4,12 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { App, TFile } from "obsidian";
 
 import type { DashboardAction, ReasoningEffort } from "../actions";
-import type { ChatMessage, ProviderCapabilities, ProviderTypeId } from "../config";
+import type {
+	ChatMessage,
+	CliBackendId,
+	ProviderCapabilities,
+	ProviderTypeId,
+} from "../config";
 import type {
 	QueryCitationValidation,
 	QueryRetrievalPath,
@@ -24,7 +29,7 @@ export interface ExecutionOverrides {
 }
 
 export interface ExecutionConfig {
-	backend?: "codex-cli" | "direct-api";
+	backend?: CliBackendId | "direct-api";
 	providerId?: string;
 	providerName?: string;
 	providerType?: ProviderTypeId;
@@ -36,9 +41,28 @@ export interface ExecutionConfig {
 }
 
 export interface CodexExecutionConfig extends ExecutionConfig {
-	backend?: "codex-cli";
+	backend?: CliBackendId;
 	reasoningEffort: ReasoningEffort | string;
 	serviceTier: ServiceTier;
+}
+
+export interface CliDiscoveredModel {
+	id: string;
+	label: string;
+	description?: string;
+	isDefault?: boolean;
+	supportedReasoningEfforts?: string[];
+	supportsFast: boolean;
+}
+
+export interface CliModelDiscoveryResult {
+	backendId: CliBackendId;
+	models: CliDiscoveredModel[];
+	effectiveModel: string;
+	source: string;
+	complete: boolean;
+	message?: string;
+	discoveredAt: string;
 }
 
 export type TaskRunStatus =
@@ -273,7 +297,7 @@ export interface ProviderCapabilityCheck {
 export interface ProviderConnectionTestResult {
 	ok: boolean;
 	type: string;
-	provider?: ProviderTypeId | "codex-cli";
+	provider?: ProviderTypeId | CliBackendId;
 	endpoint?: string;
 	model: string;
 	modelExists?: boolean | null;

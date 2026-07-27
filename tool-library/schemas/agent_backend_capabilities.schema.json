@@ -70,6 +70,22 @@
           "type": "boolean"
         }
       }
+    },
+    "write_support": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "reason"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
     }
   }
 }

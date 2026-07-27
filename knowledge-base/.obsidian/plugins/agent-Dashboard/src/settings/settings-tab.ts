@@ -40,7 +40,7 @@ interface SettingsPluginHost extends PluginHost {
 	getProviderErrorLabel(type: string): string;
 }
 
-type SettingsPage = "home" | "runtime" | "codex" | "direct-api";
+type SettingsPage = "home" | "runtime" | "codex" | "claude" | "direct-api";
 
 export class AgentDashboardSettingTab extends PluginSettingTab {
 	declare plugin: Plugin & SettingsPluginHost;
@@ -62,6 +62,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			case "codex":
 				this.renderCodexSettings(containerEl);
 				break;
+			case "claude":
+				this.renderClaudeSettings(containerEl);
+				break;
 			case "direct-api":
 				this.renderDirectApiSettings(containerEl);
 				break;
@@ -74,14 +77,14 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsPageHeader(
 			containerEl,
 			"Agent Dashboard",
-			"按模块管理运行环境、Codex 模型和 Direct API。进入对应模块后再修改详细设置。",
+			"按模块管理运行环境、CLI 后端和 Direct API。进入对应模块后再修改详细设置。",
 		);
 		const navigation = containerEl.createDiv({ cls: "agent-dashboard-settings-navigation" });
 		this.createSettingsNavigationItem(navigation, {
 			page: "runtime",
 			icon: "terminal",
 			title: "运行环境",
-			description: "项目目录、Codex/Python/R 可执行文件、任务超时和环境检查。",
+			description: "项目目录、Codex/Claude/Python/R 可执行文件、任务超时和环境检查。",
 			status: "本地执行",
 		});
 		const reasoningLabel = REASONING_OPTIONS.find(
@@ -93,6 +96,16 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			title: "Codex 模型",
 			description: "全局默认模型、推理强度，以及 Codex CLI 连接测试。",
 			status: `${this.plugin.settings.codexModel} · ${reasoningLabel}`,
+		});
+		const claudeReasoningLabel = REASONING_OPTIONS.find(
+			(option) => option.id === this.plugin.settings.claudeReasoningEffort,
+		)?.label || this.plugin.settings.claudeReasoningEffort;
+		this.createSettingsNavigationItem(navigation, {
+			page: "claude",
+			icon: "sparkles",
+			title: "Claude Code",
+			description: "只读检索与批注解释、CC Switch 模型覆盖和连接测试。",
+			status: `${this.plugin.settings.claudeModel || "CC Switch 默认"} · ${claudeReasoningLabel}`,
 		});
 		const profiles = this.plugin.settings.providerProfiles;
 		const activeProfile = profiles.find(
@@ -139,6 +152,18 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.codexExecutable)
 					.onChange(async (value) => {
 						this.plugin.settings.codexExecutable = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Claude Code 可执行文件")
+			.setDesc("用于只读知识库检索与批注解释。原生安装通常位于用户目录的 .local\\bin\\claude.exe。")
+			.addText((text) =>
+				text
+					.setPlaceholder("C:\\Users\\<user>\\.local\\bin\\claude.exe")
+					.setValue(this.plugin.settings.claudeExecutable)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeExecutable = value.trim();
 						await this.plugin.saveSettings();
 					})
 			);
@@ -261,6 +286,82 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					});
 			});
 		if (codexResult?.result) this.renderConnectionResult(containerEl, codexResult.result);
+	}
+
+	private renderClaudeSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"Claude Code",
+			"配置只读 CLI 后端。第一阶段不会向 Claude Code 开放任何文件写入任务。",
+			true,
+		);
+		new Setting(containerEl)
+			.setName("模型覆盖")
+			.setDesc("留空时沿用 CC Switch 当前模型；填写后仅覆盖 Dashboard 发起的 Claude Code 任务。")
+			.addText((text) =>
+				text
+					.setPlaceholder("留空使用 CC Switch 默认模型")
+					.setValue(this.plugin.settings.claudeModel)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeModel = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("默认推理强度")
+			.setDesc("用于 Claude Code 的只读知识库检索和批注解释。")
+			.addDropdown((dropdown) => {
+				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+				dropdown
+					.setValue(this.plugin.settings.claudeReasoningEffort)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeReasoningEffort = value;
+						await this.plugin.saveSettings();
+					});
+			});
+		new Setting(containerEl)
+			.setName("批注解释后端")
+			.setDesc("自动模式优先使用已启用的 Direct API，否则使用 Codex。也可固定为某个本地 CLI。")
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption("auto", "自动")
+					.addOption("codex-cli", "Codex CLI")
+					.addOption("claude-code", "Claude Code")
+					.setValue(this.plugin.settings.annotationBackendId)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationBackendId = value === "claude-code"
+							? "claude-code"
+							: value === "codex-cli"
+								? "codex-cli"
+								: "auto";
+						await this.plugin.saveSettings();
+					});
+			});
+		this.createProviderSectionHeader(
+			containerEl,
+			"只读执行边界",
+			"连接测试不发送 Vault 内容。检索只开放 Read、Glob 和 Grep；批注解释不开放任何工具。",
+		);
+		const resultState = this.plugin.providerRuntimeState.get("claude-code") || null;
+		new Setting(containerEl)
+			.setName("Claude Code / CC Switch")
+			.setDesc("验证 CLI、当前模型、JSONL 输出以及自定义 endpoint 是否可用。")
+			.addButton((button) => {
+				const testing = resultState?.status === "testing";
+				button
+					.setButtonText(testing ? "测试中…" : "测试连接")
+					.setDisabled(testing)
+					.onClick(async () => {
+						this.plugin.providerRuntimeState.set("claude-code", { status: "testing" });
+						this.display();
+						const result = await this.plugin.testProviderConnection("claude-code");
+						this.plugin.providerRuntimeState.set("claude-code", { status: "done", result });
+						this.display();
+					});
+			});
+		if (resultState?.result) {
+			this.renderConnectionResult(containerEl, resultState.result);
+		}
 	}
 
 	private renderDirectApiSettings(containerEl: HTMLElement): void {

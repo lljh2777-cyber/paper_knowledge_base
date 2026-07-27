@@ -51,6 +51,14 @@ const pluginSource = fs.readdirSync(pluginSourceRoot, { recursive: true })
 	.sort()
 	.map((file) => fs.readFileSync(path.join(pluginSourceRoot, file), "utf8"))
 	.join("\n");
+const queryViewSource = fs.readFileSync(
+	path.join(pluginSourceRoot, "views/query-wiki.ts"),
+	"utf8",
+);
+const pluginStyles = fs.readFileSync(
+	path.resolve(pluginSourceRoot, "../styles.css"),
+	"utf8",
+);
 const entrySource = fs.readFileSync(path.join(pluginSourceRoot, "main.ts"), "utf8").trim();
 assert.strictEqual(
 	entrySource,
@@ -94,10 +102,15 @@ const settingsSource = fs.readFileSync(
 	path.join(pluginSourceRoot, "settings/settings-tab.ts"),
 	"utf8",
 );
+const processExecutionSource = fs.readFileSync(
+	path.join(pluginSourceRoot, "runtime/process-execution.ts"),
+	"utf8",
+);
 for (const settingsPage of [
 	'renderSettingsHome(containerEl)',
 	'renderRuntimeSettings(containerEl)',
 	'renderCodexSettings(containerEl)',
+	'renderClaudeSettings(containerEl)',
 	'renderDirectApiSettings(containerEl)',
 ]) {
 	assert.ok(
@@ -106,7 +119,7 @@ for (const settingsPage of [
 	);
 }
 assert.ok(
-	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "direct-api"'),
+	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "claude" | "direct-api"'),
 	"settings should retain a dedicated page state for each configuration module",
 );
 assert.ok(
@@ -118,6 +131,23 @@ assert.ok(
 	fs.readFileSync(path.join(pluginSourceRoot, "types/contracts.ts"), "utf8")
 		.includes("export interface PluginHost"),
 	"shared runtime contracts should expose the PluginHost boundary",
+);
+assert.ok(
+	queryViewSource.includes('"CC Switch 默认模型"')
+		&& queryViewSource.includes("claudeModel.parentElement.hidden = !usingClaude")
+		&& queryViewSource.includes("executionOverridesByBackend"),
+	"query settings should keep Codex and Claude model overrides independent",
+);
+assert.ok(
+	pluginStyles.includes(".query-wiki-settings-field[hidden]")
+		&& pluginStyles.includes("display: none !important;"),
+	"query settings should honor hidden backend-specific fields",
+);
+assert.ok(
+	processExecutionSource.includes('["app-server", "--stdio"]')
+		&& processExecutionSource.includes('method: "model/list"')
+		&& processExecutionSource.includes('"Claude settings / CC Switch"'),
+	"CLI model discovery should use the Codex catalog and Claude/CC Switch settings",
 );
 
 const plugin = new AgentDashboardPlugin();
@@ -186,6 +216,36 @@ assert.strictEqual(vaultPayload.mode, "vault");
 const session = plugin.makeQuerySession();
 assert.strictEqual(session.retrievalMode, "web");
 assert.strictEqual(session.queryBackendId, "codex-cli");
+
+const claudePlugin = new AgentDashboardPlugin();
+claudePlugin.settings = {
+	projectRoot: path.resolve(__dirname, "../.."),
+	codexExecutable: process.execPath,
+	codexModel: "gpt-5.6-terra",
+	codexReasoningEffort: "medium",
+	claudeExecutable: process.execPath,
+	claudeModel: "",
+	claudeReasoningEffort: "high",
+	annotationBackendId: "claude-code",
+	providerProfiles: [],
+};
+assert.strictEqual(
+	claudePlugin.resolveQueryBackendId("claude-code"),
+	"claude-code",
+);
+const claudeExecution = claudePlugin.resolveCliActionExecutionConfig(
+	{ id: "vault-retrieval", reasoningEffort: "medium" },
+	"claude-code",
+);
+assert.strictEqual(claudeExecution.backend, "claude-code");
+assert.strictEqual(claudeExecution.model, "");
+assert.strictEqual(claudeExecution.reasoningEffort, "high");
+assert.strictEqual(claudeExecution.serviceTier, "default");
+assert.ok(
+	pluginSource.includes('"--backend-executable"')
+		&& pluginSource.includes('executionConfig.backend === "claude-code"'),
+	"local action execution should pass the selected CLI adapter and executable",
+);
 
 async function testDirectApiQuery() {
 	const profile = {
@@ -563,7 +623,31 @@ async function testSerializedSettingsSnapshots() {
 	);
 }
 
-Promise.all([testDirectApiQuery(), testSerializedSettingsSnapshots()])
+async function testClaudeCliModelDiscovery() {
+	const discoveryPlugin = new AgentDashboardPlugin();
+	discoveryPlugin.settings = {
+		projectRoot: path.resolve(__dirname, "../.."),
+		claudeExecutable: process.execPath,
+		claudeModel: "qwen-test-model",
+		claudeReasoningEffort: "medium",
+		providerProfiles: [],
+	};
+	const discovery = await discoveryPlugin.discoverCliModels("claude-code", true);
+	assert.strictEqual(discovery.backendId, "claude-code");
+	assert.strictEqual(discovery.effectiveModel, "qwen-test-model");
+	assert.ok(discovery.models.some((model) => model.id === "qwen-test-model"));
+	assert.strictEqual(discovery.source, "插件设置覆盖");
+	assert.strictEqual(
+		discoveryPlugin.getCliModelDiscovery("claude-code").effectiveModel,
+		"qwen-test-model",
+	);
+}
+
+Promise.all([
+	testDirectApiQuery(),
+	testSerializedSettingsSnapshots(),
+	testClaudeCliModelDiscovery(),
+])
 	.then(() => console.log("DASHBOARD_QUERY_VIEW_TEST_OK"))
 	.catch((error) => {
 		console.error(error);

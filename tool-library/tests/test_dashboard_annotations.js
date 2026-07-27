@@ -61,6 +61,9 @@ assert.match(
 );
 assert.match(serviceSource, /wiki\/annotations/);
 assert.match(serviceSource, /#\^\$\{record\.id\}/);
+assert.match(serviceSource, /settings\.annotationBackendId/);
+assert.match(serviceSource, /resolveCliActionExecutionConfig/);
+assert.match(serviceSource, /getCliBackendLabel/);
 assert.match(pluginSource, /archiveStatus:\s*"pending"/);
 assert.match(popoverSource, /保留并存档/);
 assert.match(popoverSource, /手动批注/);

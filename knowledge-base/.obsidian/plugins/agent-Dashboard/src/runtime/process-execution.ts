@@ -4,10 +4,13 @@ import { spawn } from "node:child_process";
 
 import type { DashboardAction } from "../actions";
 import { MODEL_OPTIONS } from "../config";
+import { getCliBackendLabel } from "../config";
 import { ProviderConnectionError } from "../providers/shared";
 import type { DashboardSettings } from "./settings";
 import type { DashboardLifecycleState } from "./lifecycle-state";
 import type {
+	CliDiscoveredModel,
+	CliModelDiscoveryResult,
 	CodePracticeRequest,
 	CodePracticeResult,
 	CodexExecutionConfig,
@@ -43,8 +46,219 @@ function appendOutput(current: string, chunk: Buffer | string, limit: number): s
 	return `${current}${chunk.toString()}`.slice(-limit);
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object"
+		? value as Record<string, unknown>
+		: {};
+}
+
 export class ProcessExecutionService {
 	constructor(private readonly state: DashboardLifecycleState) {}
+
+	discoverCliModels(
+		settings: DashboardSettings,
+		backendId: "codex-cli" | "claude-code",
+	): Promise<CliModelDiscoveryResult> {
+		return backendId === "claude-code"
+			? Promise.resolve(this.discoverClaudeModels(settings))
+			: this.discoverCodexModels(settings);
+	}
+
+	private discoverCodexModels(settings: DashboardSettings): Promise<CliModelDiscoveryResult> {
+		const executable = String(settings.codexExecutable || "");
+		const fallback = (message = ""): CliModelDiscoveryResult => ({
+			backendId: "codex-cli",
+			models: MODEL_OPTIONS.map((model) => ({
+				id: model.id,
+				label: model.label,
+				description: model.description,
+				supportsFast: model.supportsFast,
+			})),
+			effectiveModel: settings.codexModel,
+			source: "插件静态回退",
+			complete: false,
+			message,
+			discoveredAt: new Date().toISOString(),
+		});
+		if (!executable || !fs.existsSync(executable)) {
+			return Promise.resolve(fallback(`Codex 可执行文件不存在：${executable || "未配置"}`));
+		}
+		return new Promise((resolve) => {
+			let settled = false;
+			let stdoutBuffer = "";
+			let stderr = "";
+			let timer = 0;
+			const child = spawn(executable, ["app-server", "--stdio"], {
+				cwd: settings.projectRoot,
+				shell: false,
+				windowsHide: true,
+			});
+			const finish = (result: CliModelDiscoveryResult): void => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				if (!child.killed) child.kill();
+				resolve(result);
+			};
+			const send = (payload: Record<string, unknown>): void => {
+				if (!child.stdin.destroyed) child.stdin.write(`${JSON.stringify(payload)}\n`);
+			};
+			const inspectLine = (line: string): void => {
+				if (!line.trim()) return;
+				let event: Record<string, unknown>;
+				try {
+					event = asRecord(JSON.parse(line));
+				} catch {
+					return;
+				}
+				if (event.id === 1 && event.result) {
+					send({
+						method: "model/list",
+						id: 2,
+						params: { limit: 100, includeHidden: false },
+					});
+					return;
+				}
+				if (event.id !== 2) return;
+				const result = asRecord(event.result);
+				const data = Array.isArray(result.data) ? result.data : [];
+				const models = data
+					.map((value): CliDiscoveredModel | null => {
+						const model = asRecord(value);
+						const id = String(model.id || model.model || "").trim();
+						if (!id) return null;
+						const tiers = Array.isArray(model.serviceTiers) ? model.serviceTiers : [];
+						const legacyTiers = Array.isArray(model.additionalSpeedTiers)
+							? model.additionalSpeedTiers
+							: [];
+						const reasoning = Array.isArray(model.supportedReasoningEfforts)
+							? model.supportedReasoningEfforts
+								.map((option) => String(asRecord(option).reasoningEffort || "").trim())
+								.filter(Boolean)
+							: [];
+						return {
+							id,
+							label: String(model.displayName || id),
+							description: String(model.description || ""),
+							isDefault: model.isDefault === true,
+							supportedReasoningEfforts: reasoning,
+							supportsFast: tiers.length > 0 || legacyTiers.includes("fast"),
+						};
+					})
+					.filter((model): model is CliDiscoveredModel => model !== null);
+				if (!models.length) {
+					finish(fallback("Codex app-server 返回了空模型目录"));
+					return;
+				}
+				const catalogDefault = models.find((model) => model.isDefault)?.id || "";
+				finish({
+					backendId: "codex-cli",
+					models,
+					effectiveModel: settings.codexModel || catalogDefault,
+					source: "Codex app-server",
+					complete: true,
+					discoveredAt: new Date().toISOString(),
+				});
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdoutBuffer += chunk.toString();
+				const lines = stdoutBuffer.split(/\r?\n/);
+				stdoutBuffer = lines.pop() || "";
+				lines.forEach(inspectLine);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendOutput(stderr, chunk, 4000);
+			});
+			child.once("error", (error: Error) => finish(fallback(error.message)));
+			child.once("close", () => {
+				if (stdoutBuffer) inspectLine(stdoutBuffer);
+				if (!settled) finish(fallback(stderr.trim() || "Codex app-server 提前退出"));
+			});
+			send({
+				method: "initialize",
+				id: 1,
+				params: {
+					clientInfo: {
+						name: "agent-dashboard",
+						title: "Agent Dashboard",
+						version: "0.24.0",
+					},
+					capabilities: {
+						experimentalApi: false,
+						requestAttestation: false,
+					},
+				},
+			});
+			timer = window.setTimeout(() => {
+				finish(fallback("Codex 模型目录检测超过 15 秒"));
+			}, 15000);
+		});
+	}
+
+	private discoverClaudeModels(settings: DashboardSettings): CliModelDiscoveryResult {
+		const candidates = new Map<string, CliDiscoveredModel>();
+		const addModel = (id: unknown, label: string): void => {
+			const normalized = String(id || "").trim();
+			if (!normalized || candidates.has(normalized)) return;
+			candidates.set(normalized, {
+				id: normalized,
+				label,
+				supportsFast: false,
+				supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+			});
+		};
+		let configuredModel = "";
+		let settingsFound = false;
+		const settingsPath = path.join(
+			process.env.USERPROFILE || "",
+			".claude",
+			"settings.json",
+		);
+		try {
+			const source = asRecord(JSON.parse(fs.readFileSync(settingsPath, "utf8")));
+			const env = asRecord(source.env);
+			settingsFound = true;
+			configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
+			addModel(configuredModel, configuredModel ? `当前模型 · ${configuredModel}` : "");
+			for (const [key, label] of [
+				["ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"],
+				["ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"],
+				["ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"],
+				["ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"],
+			] as const) {
+				const model = String(env[key] || "").trim();
+				addModel(model, model ? `${label} · ${model}` : "");
+			}
+		} catch {
+			// Claude can still use an explicit plugin model or its own internal default.
+		}
+		const testedResult = this.state.providerRuntimeState.get("claude-code")?.result;
+		const testedModel = testedResult?.ok
+			? String(testedResult.model || "").trim()
+			: "";
+		addModel(settings.claudeModel, `插件设置 · ${settings.claudeModel}`);
+		addModel(testedModel, `初始化事件 · ${testedModel}`);
+		const effectiveModel = settings.claudeModel.trim()
+			|| testedModel
+			|| configuredModel;
+		return {
+			backendId: "claude-code",
+			models: [...candidates.values()],
+			effectiveModel,
+			source: settings.claudeModel.trim()
+				? "插件设置覆盖"
+				: testedModel
+					? "Claude 初始化事件"
+					: settingsFound
+						? "Claude settings / CC Switch"
+						: "Claude Code 默认配置",
+			complete: false,
+			message: settingsFound
+				? "Claude Code 不提供完整模型目录；此处列出 CC Switch/Claude 设置中可识别的模型。"
+				: "Claude Code 不提供完整模型目录，且未找到可读取的 CC Switch/Claude 模型设置。",
+			discoveredAt: new Date().toISOString(),
+		};
+	}
 
 	recoverInterruptedPracticeRuns(settings: DashboardSettings): void {
 		const runsDirectory = path.join(
@@ -191,10 +405,12 @@ export class ProcessExecutionService {
 			action.id,
 			"--project-root",
 			projectRoot,
-			"--codex",
-			settings.codexExecutable,
-			"--model",
-			executionConfig.model,
+			"--backend",
+			executionConfig.backend === "claude-code" ? "claude-code" : "codex-cli",
+			"--backend-executable",
+			executionConfig.backend === "claude-code"
+				? settings.claudeExecutable
+				: settings.codexExecutable,
 			"--reasoning-effort",
 			executionConfig.reasoningEffort,
 			"--service-tier",
@@ -206,6 +422,13 @@ export class ProcessExecutionService {
 			"--stop-file",
 			stopPath,
 		];
+		if (executionConfig.backend === "claude-code") {
+			if (executionConfig.model) {
+				args.push("--backend-model", executionConfig.model);
+			}
+		} else {
+			args.push("--model", executionConfig.model);
+		}
 
 		return new Promise((resolve, reject) => {
 			let stdout = "";
@@ -416,6 +639,134 @@ export class ProcessExecutionService {
 				if (!child.killed) child.kill();
 				finish({ ok: false, type: "timeout", message: "Codex CLI 版本检查超过 10 秒" });
 			}, 10000);
+		});
+	}
+
+	probeClaudeCode(settings: DashboardSettings): Promise<ProviderConnectionTestResult> {
+		const startedAt = Date.now();
+		const executable = String(settings.claudeExecutable || "");
+		if (!executable || !fs.existsSync(executable)) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				provider: "claude-code",
+				model: settings.claudeModel || "CC Switch 默认模型",
+				message: `Claude Code 可执行文件不存在：${executable || "未配置"}`,
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			let timer = 0;
+			let detectedModel = "";
+			let responsePreview = "";
+			const args = [
+				"-p",
+				"--safe-mode",
+				"--permission-mode",
+				"dontAsk",
+				"--tools=",
+				"--output-format",
+				"stream-json",
+				"--verbose",
+				"--no-session-persistence",
+			];
+			if (settings.claudeModel.trim()) {
+				args.push("--model", settings.claudeModel.trim());
+			}
+			args.push("仅回复：CLAUDE_BACKEND_OK");
+			const child = spawn(executable, args, {
+				cwd: settings.projectRoot,
+				shell: false,
+				windowsHide: true,
+				env: {
+					...process.env,
+					PYTHONUTF8: "1",
+					PYTHONIOENCODING: "utf-8",
+				},
+			});
+			const finish = (
+				result: Omit<ProviderConnectionTestResult, "model" | "responseTimeMs" | "testedAt">,
+			): void => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				resolve({
+					model: detectedModel || settings.claudeModel || "CC Switch 默认模型",
+					responseTimeMs: Date.now() - startedAt,
+					testedAt: new Date().toISOString(),
+					...result,
+				});
+			};
+			const inspectLine = (line: string): void => {
+				if (!line.trim()) return;
+				try {
+					const event = JSON.parse(line) as Record<string, unknown>;
+					if (event.type === "system" && event.subtype === "init") {
+						detectedModel = String(event.model || "");
+					}
+					if (event.type === "result") {
+						responsePreview = String(event.result || "").trim().slice(0, 160);
+					}
+				} catch {
+					// Preserve non-JSON diagnostics for the final error.
+				}
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout = appendOutput(stdout, chunk, 20000);
+				String(chunk).split(/\r?\n/).forEach(inspectLine);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendOutput(stderr, chunk, 8000);
+			});
+			child.once("error", (error: Error) => {
+				finish({
+					ok: false,
+					type: "local-service-offline",
+					provider: "claude-code",
+					message: error.message,
+				});
+			});
+			child.once("close", (code) => {
+				stdout.split(/\r?\n/).forEach(inspectLine);
+				if (code === 0 && detectedModel) {
+					finish({
+						ok: true,
+						type: "success",
+						provider: "claude-code",
+						endpoint: "Claude Code / CC Switch",
+						modelExists: null,
+						streaming: { supported: true, verified: true },
+						pdf: { supported: false, verified: false },
+						vision: { supported: false, verified: false },
+						webSearch: {
+							supported: false,
+							verified: false,
+							note: "第一阶段仅开放知识库只读检索",
+						},
+						responsePreview: responsePreview || "Claude Code 可用",
+					});
+					return;
+				}
+				finish({
+					ok: false,
+					type: "local-service-offline",
+					provider: "claude-code",
+					message: stderr.trim() || stdout.trim() || `Claude Code 退出码 ${code}`,
+				});
+			});
+			timer = window.setTimeout(() => {
+				if (!child.killed) child.kill();
+				finish({
+					ok: false,
+					type: "timeout",
+					provider: "claude-code",
+					message: `${getCliBackendLabel("claude-code")} 连接测试超过 45 秒`,
+				});
+			}, 45000);
 		});
 	}
 

@@ -58,18 +58,25 @@ class ClaudeCodeBackend:
                 "change manifest and post-run path audit are required first"
             )
 
+        needs_vault_read = request.action == "vault-retrieval"
         command = [
             executable,
             "-p",
             "--safe-mode",
             "--permission-mode",
-            "plan",
-            "--tools",
-            _READ_TOOLS,
+            "plan" if needs_vault_read else "dontAsk",
+        ]
+        if needs_vault_read:
+            command.extend(["--tools", _READ_TOOLS])
+        else:
+            command.append("--tools=")
+        command.extend(
+            [
             "--disallowedTools",
             ",".join(_WRITE_TOOL_NAMES),
             "--no-session-persistence",
-        ]
+            ]
+        )
         effort = str(request.reasoning_effort or "").strip().lower()
         if effort in {"low", "medium", "high", "xhigh"}:
             command.extend(["--effort", effort])

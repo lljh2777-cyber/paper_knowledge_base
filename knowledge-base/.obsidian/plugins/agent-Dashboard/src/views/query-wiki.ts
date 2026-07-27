@@ -17,6 +17,9 @@ import {
 	MODEL_OPTIONS,
 	QUERY_WIKI_VIEW_TYPE,
 	REASONING_OPTIONS,
+	getCliBackendLabel,
+	isCliBackendId,
+	type CliBackendId,
 } from "../config";
 import {
 	ActionInputModal,
@@ -38,6 +41,7 @@ import {
 	type ProviderProfile,
 } from "../providers/profile";
 import type {
+	CliModelDiscoveryResult,
 	DashboardProcessEvent,
 	DashboardProcessResult,
 	ExecutionConfig,
@@ -107,12 +111,24 @@ interface QueryViewHost extends PluginHost {
 	setActiveQueryMode(mode: QueryRetrievalMode | string): Promise<void>;
 	setActiveQueryBackend(backendId: string): Promise<void>;
 	resolveQueryBackendId(backendId?: string): string;
+	isCliBackendAvailable(backendId: CliBackendId): boolean;
 	getProviderProfile(profileId: string): ProviderProfile | null;
 	getVerifiedProviderProfiles(): ProviderProfile[];
 	buildVaultImageReferenceIndex(
 		files: TFile[],
 	): Map<string, Array<{ title: string; path: string; count: number }>>;
 	resolveDirectQueryExecutionConfig(profile: ProviderProfile): ExecutionConfig;
+	resolveCliActionExecutionConfig(
+		action: DashboardAction,
+		backendId: CliBackendId,
+		overrides?: ExecutionOverrides,
+	): ExecutionConfig;
+	getCliModelDiscovery(backendId: CliBackendId): CliModelDiscoveryResult | null;
+	discoverCliModels(
+		backendId: CliBackendId,
+		force?: boolean,
+	): Promise<CliModelDiscoveryResult>;
+	invalidateCliModelDiscovery(backendId: CliBackendId): void;
 	resolveQuestionImageAttachments(
 		question: string,
 		existingAttachments?: VaultImageAttachment[],
@@ -156,7 +172,7 @@ export class QueryWikiView extends ItemView {
 	private pendingImages: VaultImageAttachment[];
 	private readonly queryDrafts: Map<string, string>;
 	private navigatorFrame: number;
-	private executionOverrides: QueryExecutionOverrides;
+	private executionOverridesByBackend: Record<CliBackendId, QueryExecutionOverrides>;
 
 	constructor(leaf: WorkspaceLeaf, plugin: QueryViewHost) {
 		super(leaf);
@@ -172,10 +188,17 @@ export class QueryWikiView extends ItemView {
 		this.pendingImages = [];
 		this.queryDrafts = new Map();
 		this.navigatorFrame = 0;
-		this.executionOverrides = {
-			model: "",
-			reasoningEffort: "",
-			serviceTier: "default",
+		this.executionOverridesByBackend = {
+			"codex-cli": {
+				model: "",
+				reasoningEffort: "",
+				serviceTier: "default",
+			},
+			"claude-code": {
+				model: "",
+				reasoningEffort: "",
+				serviceTier: "default",
+			},
 		};
 	}
 
@@ -477,14 +500,22 @@ export class QueryWikiView extends ItemView {
 			});
 		}
 		if (message.role === "assistant" && message.queryBackendId) {
+			const cliBackend = isCliBackendId(message.queryBackendId);
+			const backendLabel = cliBackend
+				? getCliBackendLabel(message.queryBackendId)
+				: message.providerName || "Direct API";
 			identity.createSpan({
-				cls: `query-wiki-message-backend ${message.queryBackendId === "codex-cli" ? "is-codex" : "is-direct"}`,
-				text: message.queryBackendId === "codex-cli"
-					? "Codex CLI"
-					: message.providerName || "Direct API",
+				cls: `query-wiki-message-backend ${
+					message.queryBackendId === "claude-code"
+						? "is-claude"
+						: message.queryBackendId === "codex-cli"
+							? "is-codex"
+							: "is-direct"
+				}`,
+				text: backendLabel,
 				attr: {
 					title: message.model
-						? `${message.queryBackendId === "codex-cli" ? "Codex CLI" : "Direct API"} · ${message.model}`
+						? `${backendLabel} · ${message.model}`
 						: message.queryBackendId,
 				},
 			});
@@ -955,7 +986,7 @@ export class QueryWikiView extends ItemView {
 				if (button.disabled || value === currentMode) return;
 				this.initialQuestion = this.inputEl?.value || "";
 				const activeBackendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-				const activeProfile = activeBackendId === "codex-cli"
+				const activeProfile = isCliBackendId(activeBackendId)
 					? null
 					: this.plugin.getProviderProfile(activeBackendId);
 				if (
@@ -965,7 +996,11 @@ export class QueryWikiView extends ItemView {
 				) {
 					if (this.pendingImages.length) this.pendingImages = [];
 					await this.plugin.setActiveQueryBackend("codex-cli");
-					new Notice("当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI");
+					new Notice(
+						activeBackendId === "claude-code"
+							? "Claude Code 第一阶段不支持联网搜索；已切换到 Codex CLI"
+							: "当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI",
+					);
 				}
 				await this.plugin.setActiveQueryMode(value);
 				await this.render();
@@ -979,10 +1014,19 @@ export class QueryWikiView extends ItemView {
 		if (!action) return;
 		const directProfiles = this.plugin.getVerifiedProviderProfiles();
 		const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-		const directProfile = backendId === "codex-cli"
+		const directProfile = isCliBackendId(backendId)
 			? null
 			: directProfiles.find((profile) => profile.id === backendId) || null;
-		const effective = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+		const codexOverrides = this.executionOverridesByBackend["codex-cli"];
+		const claudeOverrides = this.executionOverridesByBackend["claude-code"];
+		let codexDiscovery = this.plugin.getCliModelDiscovery("codex-cli");
+		let claudeDiscovery = this.plugin.getCliModelDiscovery("claude-code");
+		const effective = this.plugin.resolveActionExecutionConfig(action, codexOverrides);
+		const claudeEffective = this.plugin.resolveCliActionExecutionConfig(
+			action,
+			"claude-code",
+			claudeOverrides,
+		);
 		const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
 		const summary = details.createEl("summary");
 		const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
@@ -990,6 +1034,8 @@ export class QueryWikiView extends ItemView {
 		const summaryText = summary.createSpan({
 			text: directProfile
 				? `Direct API · ${directProfile.name} · ${directProfile.model}`
+				: backendId === "claude-code"
+					? `Claude Code · ${claudeEffective.model || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
 				: `Codex CLI · ${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`,
 		});
 		const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
@@ -998,6 +1044,11 @@ export class QueryWikiView extends ItemView {
 			text: "Codex CLI",
 			attr: { value: "codex-cli" },
 		});
+		const claudeOption = backend.createEl("option", {
+			text: "Claude Code · 只读",
+			attr: { value: "claude-code" },
+		});
+		claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
 		directProfiles.forEach((profile) => {
 			backend.createEl("option", {
 				text: `Direct API · ${profile.name} · ${profile.model}${profileSupportsDirectWebSearch(profile) ? " · 可联网" : ""}`,
@@ -1006,36 +1057,113 @@ export class QueryWikiView extends ItemView {
 		});
 		backend.value = backendId;
 		const model = this.createSelectField(grid, "模型");
-		model.createEl("option", {
-			text: `使用检索默认 · ${this.plugin.getModelLabel(this.plugin.resolveActionExecutionConfig(action).model)}`,
-			attr: { value: "" },
-		});
-		MODEL_OPTIONS.forEach((option) => {
-			model.createEl("option", {
-				text: option.description ? `${option.label} · ${option.description}` : option.label,
-				attr: { value: option.id },
-			});
-		});
-		model.value = this.executionOverrides.model;
 		const reasoning = this.createSelectField(grid, "推理强度");
 		reasoning.createEl("option", { text: "使用检索默认", attr: { value: "" } });
 		REASONING_OPTIONS.forEach((option) => {
 			reasoning.createEl("option", { text: option.label, attr: { value: option.id } });
 		});
-		reasoning.value = this.executionOverrides.reasoningEffort;
+		reasoning.value = codexOverrides.reasoningEffort;
 		const speed = this.createSelectField(grid, "速度");
 		speed.createEl("option", { text: "标准", attr: { value: "default" } });
 		speed.createEl("option", { text: "快速", attr: { value: "fast" } });
-		speed.value = this.executionOverrides.serviceTier;
-		const directNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
+		speed.value = codexOverrides.serviceTier;
+		const claudeModel = this.createSelectField(grid, "模型");
+		const claudeReasoning = this.createSelectField(grid, "推理强度");
+		claudeReasoning.createEl("option", {
+			text: "使用 Claude 默认",
+			attr: { value: "" },
+		});
+		REASONING_OPTIONS.forEach((option) => {
+			claudeReasoning.createEl("option", {
+				text: option.label,
+				attr: { value: option.id },
+			});
+		});
+		claudeReasoning.value = claudeOverrides.reasoningEffort;
+		const modelStatus = details.createDiv({ cls: "query-wiki-cli-model-status" });
+		const backendNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
+		const populateModelSelect = (
+			select: HTMLSelectElement,
+			defaultLabel: string,
+			discovery: CliModelDiscoveryResult | null,
+			selectedValue: string,
+		): void => {
+			select.replaceChildren();
+			select.createEl("option", {
+				text: defaultLabel,
+				attr: { value: "" },
+			});
+			const models = discovery?.models || (
+				select === model
+					? MODEL_OPTIONS.map((option) => ({
+						id: option.id,
+						label: option.label,
+						description: option.description,
+						supportsFast: option.supportsFast,
+					}))
+					: []
+			);
+			models.forEach((option) => {
+				select.createEl("option", {
+					text: option.description
+						? `${option.label} · ${option.description}`
+						: option.label,
+					attr: { value: option.id },
+				});
+			});
+			if (
+				selectedValue
+				&& !models.some((option) => option.id === selectedValue)
+			) {
+				select.createEl("option", {
+					text: `${selectedValue} · 已保存的自定义模型`,
+					attr: { value: selectedValue },
+				});
+			}
+			select.value = selectedValue;
+		};
+		const renderCodexModels = (): void => {
+			const defaultModel = this.plugin.resolveActionExecutionConfig(action).model;
+			populateModelSelect(
+				model,
+				`使用检索默认 · ${this.plugin.getModelLabel(defaultModel)}`,
+				codexDiscovery,
+				codexOverrides.model,
+			);
+		};
+		const renderClaudeModels = (): void => {
+			const detectedModel = claudeDiscovery?.effectiveModel
+				|| claudeEffective.model
+				|| "CC Switch 默认模型";
+			populateModelSelect(
+				claudeModel,
+				`使用后端默认 · ${detectedModel}`,
+				claudeDiscovery,
+				claudeOverrides.model,
+			);
+		};
+		renderCodexModels();
+		renderClaudeModels();
 		const sync = () => {
 			const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
 			const usingDirect = Boolean(selectedProfile);
-			if (model.parentElement) model.parentElement.hidden = usingDirect;
-			if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect;
-			if (speed.parentElement) speed.parentElement.hidden = usingDirect;
-			directNotice.toggleClass("is-visible", usingDirect);
-			directNotice.setText(
+			const usingClaude = backend.value === "claude-code";
+			if (model.parentElement) model.parentElement.hidden = usingDirect || usingClaude;
+			if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingClaude;
+			if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingClaude;
+			if (claudeModel.parentElement) claudeModel.parentElement.hidden = !usingClaude;
+			if (claudeReasoning.parentElement) claudeReasoning.parentElement.hidden = !usingClaude;
+			modelStatus.hidden = usingDirect;
+			const activeDiscovery = usingClaude ? claudeDiscovery : codexDiscovery;
+			modelStatus.setText(
+				activeDiscovery
+					? `模型来源：${activeDiscovery.source} · 可识别 ${activeDiscovery.models.length} 个模型${
+						activeDiscovery.complete ? "" : "（候选列表可能不完整）"
+					}${activeDiscovery.message ? `。${activeDiscovery.message}` : ""}`
+					: "正在识别当前后端的可用模型…",
+			);
+			backendNotice.toggleClass("is-visible", usingDirect || usingClaude);
+			backendNotice.setText(
 				selectedProfile
 					? [
 						`将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。`,
@@ -1047,27 +1175,47 @@ export class QueryWikiView extends ItemView {
 							: "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
 						"Direct API 不执行 Codex skill 或文件写入。",
 					].join("")
+					: usingClaude
+						? "Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。当前仅支持知识库检索，不执行联网搜索或文件写入。模型由 CC Switch 或插件中的模型覆盖决定。"
 					: "",
 			);
 			if (selectedProfile) {
 				summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
 				return;
 			}
+			if (usingClaude) {
+				claudeOverrides.model = claudeModel.value;
+				claudeOverrides.reasoningEffort = claudeReasoning.value;
+				claudeOverrides.serviceTier = "default";
+				const next = this.plugin.resolveCliActionExecutionConfig(
+					action,
+					"claude-code",
+					claudeOverrides,
+				);
+				summaryText.setText(
+					`Claude Code · ${next.model || claudeDiscovery?.effectiveModel || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
+				);
+				return;
+			}
 			const selectedModel = model.value || this.plugin.resolveActionExecutionConfig(action).model;
 			if (!this.plugin.supportsFast(selectedModel) && speed.value === "fast") speed.value = "default";
 			const fastOption = speed.querySelector<HTMLOptionElement>('option[value="fast"]');
 			if (fastOption) fastOption.disabled = !this.plugin.supportsFast(selectedModel);
-			this.executionOverrides = {
-				model: model.value,
-				reasoningEffort: reasoning.value,
-				serviceTier: speed.value === "fast" ? "fast" : "default",
-			};
-			const next = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+			codexOverrides.model = model.value;
+			codexOverrides.reasoningEffort = reasoning.value;
+			codexOverrides.serviceTier = speed.value === "fast" ? "fast" : "default";
+			const next = this.plugin.resolveActionExecutionConfig(
+				action,
+				codexOverrides,
+			);
 			summaryText.setText(`Codex CLI · ${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
 		};
 		backend.addEventListener("change", async () => {
 			this.initialQuestion = this.inputEl?.value || "";
 			const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
+			if (isCliBackendId(backend.value)) {
+				this.plugin.invalidateCliModelDiscovery(backend.value);
+			}
 			if (this.pendingImages.length && !profileSupportsQueryImage(selectedProfile)) {
 				this.pendingImages = [];
 				new Notice("所选后端未启用视觉输入，已移除待发送图片");
@@ -1079,7 +1227,11 @@ export class QueryWikiView extends ItemView {
 				&& !profileSupportsDirectWebSearch(selectedProfile)
 			) {
 				await this.plugin.setActiveQueryMode("vault");
-				new Notice("所选 Direct API 未通过联网搜索测试；已切换为知识库模式");
+				new Notice(
+					backend.value === "claude-code"
+						? "Claude Code 第一阶段仅支持知识库模式"
+						: "所选 Direct API 未通过联网搜索测试；已切换为知识库模式",
+				);
 			}
 			await this.render();
 			this.inputEl?.focus();
@@ -1087,7 +1239,27 @@ export class QueryWikiView extends ItemView {
 		model.addEventListener("change", sync);
 		reasoning.addEventListener("change", sync);
 		speed.addEventListener("change", sync);
+		claudeModel.addEventListener("change", sync);
+		claudeReasoning.addEventListener("change", sync);
 		sync();
+		if (isCliBackendId(backendId)) {
+			void this.plugin.discoverCliModels(backendId)
+				.then((discovery) => {
+					if (backend.value !== backendId) return;
+					if (backendId === "claude-code") {
+						claudeDiscovery = discovery;
+						renderClaudeModels();
+					} else {
+						codexDiscovery = discovery;
+						renderCodexModels();
+					}
+					sync();
+				})
+				.catch((error) => {
+					if (backend.value !== backendId) return;
+					modelStatus.setText(`模型识别失败：${String(error)}`);
+				});
+		}
 	}
 
 	createSelectField(parent: HTMLElement, labelText: string): HTMLSelectElement {
@@ -1118,10 +1290,10 @@ export class QueryWikiView extends ItemView {
 		}
 		const session = this.session;
 		const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
-		const directProfile = backendId === "codex-cli"
+		const directProfile = isCliBackendId(backendId)
 			? null
 			: this.plugin.getProviderProfile(backendId);
-		if (backendId !== "codex-cli" && !directProfile) {
+		if (!isCliBackendId(backendId) && !directProfile) {
 			new Notice("所选 Direct API 配置不可用，请重新选择执行后端");
 			return;
 		}
@@ -1189,17 +1361,36 @@ export class QueryWikiView extends ItemView {
 			error: "",
 			retrievalMode,
 			queryBackendId: backendId,
-			providerName: directProfile?.name || "Codex CLI",
-			model: directProfile?.model || "",
+			providerName: directProfile?.name || getCliBackendLabel(backendId),
+			model: directProfile?.model || (
+				backendId === "claude-code"
+					? this.plugin.resolveCliActionExecutionConfig(
+						action,
+						"claude-code",
+						this.executionOverridesByBackend["claude-code"],
+					).model
+						|| this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel
+						|| "CC Switch 默认模型"
+					: ""
+			),
 		};
 		this.activeRunId = "starting";
 		this.activeMessageId = assistantMessage.id;
 		this.stopRequested = false;
 		const executionConfig: ExecutionConfig = directProfile
 			? this.plugin.resolveDirectQueryExecutionConfig(directProfile)
+			: backendId === "claude-code"
+				? this.plugin.resolveCliActionExecutionConfig(
+					action,
+					"claude-code",
+					this.executionOverridesByBackend["claude-code"],
+				)
 			: {
 				backend: "codex-cli" as const,
-				...this.plugin.resolveActionExecutionConfig(action, this.executionOverrides),
+				...this.plugin.resolveActionExecutionConfig(
+					action,
+					this.executionOverridesByBackend["codex-cli"],
+				),
 			};
 		assistantMessage.model = executionConfig.model;
 		const input = this.plugin.buildQueryActionInput(question, priorMessages, retrievalMode);
@@ -1270,8 +1461,10 @@ export class QueryWikiView extends ItemView {
 						? "web"
 						: retrievalMode,
 				queryBackendId: backendId,
-				providerName: directProfile?.name || "Codex CLI",
-				model: executionConfig.model,
+				providerName: directProfile?.name || getCliBackendLabel(backendId),
+				model: executionConfig.model || (
+					backendId === "claude-code" ? "CC Switch 默认模型" : ""
+				),
 			});
 			const output = [
 				response,
@@ -1387,7 +1580,7 @@ export class QueryWikiView extends ItemView {
 	stopQuery(): void {
 		if (!this.activeRunId || this.activeRunId === "starting" || this.stopRequested) return;
 		const message = this.session.messages.find((item) => item.id === this.activeMessageId);
-		this.stopRequested = message?.queryBackendId && message.queryBackendId !== "codex-cli"
+		this.stopRequested = message?.queryBackendId && !isCliBackendId(message.queryBackendId)
 			? this.plugin.stopDirectVaultQuery(this.activeRunId)
 			: this.plugin.stopVaultAction(this.activeRunId);
 		if (!this.stopRequested) {

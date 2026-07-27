@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { ACTION_BY_ID, type DashboardAction } from "./actions";
 import {
 	DEFAULT_SETTINGS,
+	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
 	isManagedCodexExecutable,
 } from "./runtime/settings";
@@ -42,7 +43,10 @@ import {
 	REASONING_OPTIONS,
 	VAULT_IMAGE_MIME_TYPES,
 	VIEW_TYPE,
+	getCliBackendLabel,
+	isCliBackendId,
 	type ChatMessage,
+	type CliBackendId,
 } from "./config";
 import {
 	normalizeQueryCitationValidation,
@@ -81,6 +85,7 @@ import {
 	type VaultEvidencePacket,
 } from "./query/direct-query-service";
 import type {
+	CliModelDiscoveryResult,
 	CodePracticeRequest,
 	CodePracticeResult,
 	CodexExecutionConfig,
@@ -172,6 +177,14 @@ export default class AgentDashboardPlugin extends Plugin {
 	private annotationService?: AnnotationService;
 	private annotationPopover: AnnotationPopover | null = null;
 	private persistence?: DashboardPersistence;
+	private readonly cliModelDiscoveryCache = new Map<
+		CliBackendId,
+		{ expiresAt: number; signature: string; result: CliModelDiscoveryResult }
+	>();
+	private readonly cliModelDiscoveryInFlight = new Map<
+		CliBackendId,
+		Promise<CliModelDiscoveryResult>
+	>();
 
 	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
 		return this.lifecycleState.providerRuntimeState;
@@ -684,7 +697,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 		this.querySessions = this.querySessions.map((session) => {
 			const queryBackendId = this.resolveQueryBackendId(session.queryBackendId);
-			const queryProfile = queryBackendId === "codex-cli"
+			const queryProfile = isCliBackendId(queryBackendId)
 				? null
 				: this.getProviderProfile(queryBackendId);
 			const retrievalMode = (
@@ -720,12 +733,26 @@ export default class AgentDashboardPlugin extends Plugin {
 				changed = true;
 			}
 		}
+		const preferredClaudeExecutable = findPreferredClaudeExecutable();
+		const configuredClaudeExecutable = String(this.settings.claudeExecutable || "").trim();
+		if (!configuredClaudeExecutable && preferredClaudeExecutable) {
+			this.settings.claudeExecutable = preferredClaudeExecutable;
+			changed = true;
+		}
 		if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
 			this.settings.codexModel = "gpt-5.6-terra";
 			changed = true;
 		}
 		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.codexReasoningEffort)) {
 			this.settings.codexReasoningEffort = DEFAULT_SETTINGS.codexReasoningEffort;
+			changed = true;
+		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.claudeReasoningEffort)) {
+			this.settings.claudeReasoningEffort = DEFAULT_SETTINGS.claudeReasoningEffort;
+			changed = true;
+		}
+		if (!["auto", "codex-cli", "claude-code"].includes(this.settings.annotationBackendId)) {
+			this.settings.annotationBackendId = "auto";
 			changed = true;
 		}
 		this.taskRuns = this.taskRuns.map((run) => {
@@ -787,9 +814,21 @@ export default class AgentDashboardPlugin extends Plugin {
 	resolveQueryBackendId(backendId?: string): string {
 		const normalized = String(backendId || "codex-cli");
 		if (normalized === "codex-cli") return "codex-cli";
+		if (normalized === "claude-code") {
+			return this.isCliBackendAvailable("claude-code")
+				? "claude-code"
+				: "codex-cli";
+		}
 		return this.getVerifiedProviderProfiles().some((profile) => profile.id === normalized)
 			? normalized
 			: "codex-cli";
+	}
+
+	isCliBackendAvailable(backendId: CliBackendId): boolean {
+		const executable = backendId === "claude-code"
+			? this.settings.claudeExecutable
+			: this.settings.codexExecutable;
+		return Boolean(executable && fs.existsSync(executable));
 	}
 
 	resolveDirectQueryExecutionConfig(profile: ProviderProfile): ExecutionConfig {
@@ -838,7 +877,59 @@ export default class AgentDashboardPlugin extends Plugin {
 		return provider.listModels();
 	}
 
+	getCliModelDiscovery(backendId: CliBackendId): CliModelDiscoveryResult | null {
+		return this.cliModelDiscoveryCache.get(backendId)?.result || null;
+	}
+
+	async discoverCliModels(
+		backendId: CliBackendId,
+		force = false,
+	): Promise<CliModelDiscoveryResult> {
+		const executable = backendId === "claude-code"
+			? this.settings.claudeExecutable
+			: this.settings.codexExecutable;
+		const configuredModel = backendId === "claude-code"
+			? this.settings.claudeModel
+			: this.settings.codexModel;
+		const signature = `${executable}\u0000${configuredModel}`;
+		const cached = this.cliModelDiscoveryCache.get(backendId);
+		if (
+			!force
+			&& cached
+			&& cached.signature === signature
+			&& cached.expiresAt > Date.now()
+		) {
+			return cached.result;
+		}
+		const existing = this.cliModelDiscoveryInFlight.get(backendId);
+		if (existing) return existing;
+		const pending = this.processExecution.discoverCliModels(this.settings, backendId)
+			.then((result) => {
+				this.cliModelDiscoveryCache.set(backendId, {
+					signature,
+					expiresAt: Date.now() + (backendId === "codex-cli" ? 300000 : 5000),
+					result,
+				});
+				return result;
+			})
+			.finally(() => {
+				this.cliModelDiscoveryInFlight.delete(backendId);
+			});
+		this.cliModelDiscoveryInFlight.set(backendId, pending);
+		return pending;
+	}
+
+	invalidateCliModelDiscovery(backendId: CliBackendId): void {
+		this.cliModelDiscoveryCache.delete(backendId);
+	}
+
 	async testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult> {
+		if (profileId === "claude-code") {
+			const result = await this.processExecution.probeClaudeCode(this.settings);
+			this.providerRuntimeState.set("claude-code", { status: "done", result });
+			this.invalidateCliModelDiscovery("claude-code");
+			return result;
+		}
 		const provider = this.createLLMProvider(profileId);
 		const result = await provider.testConnection();
 		if (profileId !== "codex-cli") {
@@ -1208,6 +1299,10 @@ export default class AgentDashboardPlugin extends Plugin {
 	}
 
 	getModelLabel(model: string): string {
+		for (const cached of this.cliModelDiscoveryCache.values()) {
+			const discovered = cached.result.models.find((option) => option.id === model);
+			if (discovered) return discovered.label;
+		}
 		return MODEL_OPTIONS.find((option) => option.id === model)?.label || model;
 	}
 
@@ -1216,6 +1311,10 @@ export default class AgentDashboardPlugin extends Plugin {
 	}
 
 	supportsFast(model: string): boolean {
+		const discovered = this.cliModelDiscoveryCache
+			.get("codex-cli")
+			?.result.models.find((option) => option.id === model);
+		if (discovered) return discovered.supportsFast;
 		return MODEL_OPTIONS.find((option) => option.id === model)?.supportsFast === true;
 	}
 
@@ -1233,11 +1332,49 @@ export default class AgentDashboardPlugin extends Plugin {
 			? requestedReasoning
 			: buttonReasoning;
 		return {
+			backend: "codex-cli",
 			model: requestedModel || buttonModel,
 			reasoningEffort,
 			serviceTier: overrides.serviceTier === "fast" && this.supportsFast(requestedModel || buttonModel) ? "fast" : "default",
 			modelSource: requestedModel ? "本次覆盖" : action.model ? "按钮默认" : "全局默认",
 			reasoningSource: requestedReasoning ? "本次覆盖" : action.reasoningEffort ? "按钮默认" : "全局默认",
+		};
+	}
+
+	resolveCliActionExecutionConfig(
+		action: DashboardAction,
+		backendId: CliBackendId,
+		overrides: ExecutionOverrides = {},
+	): CodexExecutionConfig {
+		if (backendId === "codex-cli") {
+			return this.resolveActionExecutionConfig(action, overrides);
+		}
+		const requestedModel = typeof overrides.model === "string"
+			? overrides.model.trim()
+			: "";
+		const requestedReasoning = typeof overrides.reasoningEffort === "string"
+			? overrides.reasoningEffort.trim()
+			: "";
+		const defaultReasoning = REASONING_OPTIONS.some(
+			(option) => option.id === this.settings.claudeReasoningEffort,
+		)
+			? this.settings.claudeReasoningEffort
+			: DEFAULT_SETTINGS.claudeReasoningEffort;
+		return {
+			backend: "claude-code",
+			model: requestedModel || this.settings.claudeModel.trim(),
+			reasoningEffort: REASONING_OPTIONS.some(
+				(option) => option.id === requestedReasoning,
+			)
+				? requestedReasoning
+				: defaultReasoning,
+			serviceTier: "default",
+			modelSource: requestedModel
+				? "本次覆盖"
+				: this.settings.claudeModel.trim()
+					? "Claude 默认"
+					: "CC Switch 默认",
+			reasoningSource: requestedReasoning ? "本次覆盖" : "Claude 默认",
 		};
 	}
 
@@ -1319,7 +1456,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		return { latest, error };
 	}
 
-	checkRuntime(action: DashboardAction | null = null): { ready: boolean; message: string } {
+	checkRuntime(
+		action: DashboardAction | null = null,
+		backendId: CliBackendId = "codex-cli",
+	): { ready: boolean; message: string } {
 		const projectRoot = this.settings.projectRoot;
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
 		const practiceRunner = path.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
@@ -1342,7 +1482,10 @@ export default class AgentDashboardPlugin extends Plugin {
 			checks.push(["Vault lint", fs.existsSync(lintScript)]);
 		}
 		if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
-			checks.push(["Codex", fs.existsSync(this.settings.codexExecutable)]);
+			const executable = backendId === "claude-code"
+				? this.settings.claudeExecutable
+				: this.settings.codexExecutable;
+			checks.push([getCliBackendLabel(backendId), fs.existsSync(executable)]);
 		}
 		const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
 		return {
@@ -1757,18 +1900,30 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!registered || !registered.enabled) {
 			return Promise.reject(new Error(`操作尚未启用：${action.label}`));
 		}
-		const runtime = this.checkRuntime(action);
-		if (!runtime.ready) {
-			return Promise.reject(new Error(runtime.message));
-		}
 		const effectiveConfig = executionConfig
 			? {
 				...executionConfig,
 				reasoningEffort: executionConfig.reasoningEffort
-					|| this.settings.codexReasoningEffort,
+					|| (
+						executionConfig.backend === "claude-code"
+							? this.settings.claudeReasoningEffort
+							: this.settings.codexReasoningEffort
+					),
 				serviceTier: executionConfig.serviceTier || "default",
 			} as CodexExecutionConfig
 			: this.resolveActionExecutionConfig(action);
+		const backendId: CliBackendId = effectiveConfig.backend === "claude-code"
+			? "claude-code"
+			: "codex-cli";
+		if (action.writes && backendId !== "codex-cli") {
+			return Promise.reject(
+				new Error("Claude Code 第一阶段仅允许只读任务；写入型操作仍使用 Codex CLI"),
+			);
+		}
+		const runtime = this.checkRuntime(action, backendId);
+		if (!runtime.ready) {
+			return Promise.reject(new Error(runtime.message));
+		}
 		return this.processExecution.runVaultAction({
 			runId,
 			action,
@@ -1796,7 +1951,7 @@ export default class AgentDashboardPlugin extends Plugin {
 	}
 
 	isQueryExecutionActive(runId: string, backendId = "codex-cli"): boolean {
-		if (backendId && backendId !== "codex-cli") {
+		if (!isCliBackendId(backendId)) {
 			return this.directQueryService.isActive(runId);
 		}
 		return this.isVaultActionProcessActive(runId);

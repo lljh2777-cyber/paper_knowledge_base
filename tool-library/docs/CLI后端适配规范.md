@@ -31,9 +31,10 @@ tool-library/schemas/
 
 ## Claude Code 第一阶段
 
-`claude-code` 当前只开放只读任务。适配器使用 `plan` 权限模式，仅开放
-`Read`、`Glob`、`Grep`，并显式禁用 `Edit`、`Write`、`NotebookEdit`、
-`Bash`。CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
+`claude-code` 当前只开放只读任务。知识库检索使用 `plan` 权限模式，仅开放
+`Read`、`Glob`、`Grep`；批注解释和关键词扩展使用 `dontAsk` 且不开放任何
+工具。两类任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`。
+CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
 `--backend-model` 时，runner 才覆盖该模型。
 
 Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。访问
@@ -42,6 +43,27 @@ Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。访�
 
 若原生安装目录未加入 `PATH`，插件或 runner 应保存并传入 `claude.exe`
 绝对路径，不应依赖交互式终端的临时环境。
+
+插件设置为 Claude Code 提供独立二级页面，可配置可执行文件、可选模型覆盖、
+默认推理强度和批注解释后端。查询侧边栏可在 Codex CLI、Claude Code 和
+已验证的 Direct API 配置之间选择。选择 Claude Code 时必须自动限制为
+知识库模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
+模型选择只显示从 CC Switch/Claude 设置或初始化事件中识别出的候选。
+
+## CLI 模型发现
+
+模型发现属于宿主与 CLI 的适配层，不属于 Direct API Provider：
+
+- Codex CLI 通过 `app-server` 的 `initialize` 与 `model/list` 获取当前账号
+  可用的动态模型目录、默认模型、推理档位和 service tier 能力。
+- Claude Code 没有完整模型目录接口。插件读取
+  `%USERPROFILE%\.claude\settings.json` 中 CC Switch/Claude 写入的当前模型
+  和 Fable、Haiku、Opus、Sonnet 映射，并用 `stream-json` 初始化事件校验
+  实际模型。
+- Codex 目录检测失败时回退到插件内置模型表；Claude 无法读取配置时回退到
+  Claude Code 自身默认模型。回退必须在界面明确标记，不能伪装成完整目录。
+- Codex 与 Claude 的运行时模型覆盖必须分别保存。切换后端不得把一种 CLI
+  的模型 ID 传给另一种 CLI。
 
 ## 适配器职责
 

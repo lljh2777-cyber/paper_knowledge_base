@@ -7,6 +7,7 @@ import {
 } from "obsidian";
 
 import type AgentDashboardPlugin from "../plugin";
+import { getCliBackendLabel, type CliBackendId } from "../config";
 import type {
 	AnnotationDraft,
 	AnnotationExplanation,
@@ -435,8 +436,9 @@ export class AnnotationService {
 			"上下文：",
 			selection.context,
 		].filter(Boolean).join("\n");
+		const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
 		const activeProfile = this.plugin.getProviderProfile(this.plugin.settings.activeProviderId);
-		if (activeProfile?.lastTest?.ok) {
+		if (configuredBackend === "auto" && activeProfile?.lastTest?.ok) {
 			const provider = this.plugin.createLLMProvider(activeProfile);
 			const result = await provider.complete(
 				{
@@ -464,7 +466,13 @@ export class AnnotationService {
 		registerCancel(() => {
 			this.plugin.requestVaultActionStop(runId);
 		});
-		const executionConfig = this.plugin.resolveActionExecutionConfig(action);
+		const cliBackend: CliBackendId = configuredBackend === "claude-code"
+			? "claude-code"
+			: "codex-cli";
+		const executionConfig = this.plugin.resolveCliActionExecutionConfig(
+			action,
+			cliBackend,
+		);
 		const result = await this.plugin.runVaultAction(
 			runId,
 			action,
@@ -478,8 +486,8 @@ export class AnnotationService {
 		if (!text) throw new Error("模型返回了空解释");
 		return {
 			text,
-			provider: "Codex CLI",
-			model: executionConfig.model,
+			provider: getCliBackendLabel(cliBackend),
+			model: executionConfig.model || "CC Switch 默认模型",
 		};
 	}
 

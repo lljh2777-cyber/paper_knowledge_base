@@ -171,6 +171,20 @@ var MANAGED_CODEX_BIN_ROOT = path.join(
   "Codex",
   "bin"
 );
+var DEFAULT_CLAUDE_EXECUTABLE = path.join(
+  process.env.USERPROFILE || "",
+  ".local",
+  "bin",
+  "claude.exe"
+);
+function findPreferredClaudeExecutable() {
+  const candidates = [
+    String(process.env.CLAUDE_CODE_PATH || "").trim(),
+    DEFAULT_CLAUDE_EXECUTABLE,
+    path.join(process.env.LOCALAPPDATA || "", "AnthropicClaude", "claude.exe")
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || DEFAULT_CLAUDE_EXECUTABLE;
+}
 function findPreferredCodexExecutable() {
   const candidates = /* @__PURE__ */ new Set();
   if (process.env.CODEX_CLI_PATH) candidates.add(process.env.CODEX_CLI_PATH);
@@ -207,6 +221,10 @@ var DEFAULT_SETTINGS = {
   codexExecutable: findPreferredCodexExecutable(),
   codexModel: "gpt-5.6-terra",
   codexReasoningEffort: "medium",
+  claudeExecutable: findPreferredClaudeExecutable(),
+  claudeModel: "",
+  claudeReasoningEffort: "medium",
+  annotationBackendId: "auto",
   pythonExecutable: "D:\\python\\python.exe",
   rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
   codePracticeTimeoutSeconds: 30,
@@ -238,6 +256,12 @@ var DashboardLifecycleState = class {
 var VIEW_TYPE = "agent-dashboard-research-vault";
 var CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 var QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
+function isCliBackendId(value) {
+  return value === "codex-cli" || value === "claude-code";
+}
+function getCliBackendLabel(value) {
+  return value === "claude-code" ? "Claude Code" : "Codex CLI";
+}
 var MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
 var MAX_QUERY_IMAGE_ATTACHMENTS = 6;
 var MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
@@ -463,10 +487,11 @@ function normalizeTaskStatus(value) {
 function normalizeExecutionConfig(value) {
   const source = asRecord2(value);
   const model = String(source.model || "").trim();
-  if (!model) return null;
+  const backend = source.backend === "direct-api" ? "direct-api" : isCliBackendId(source.backend) ? source.backend : "codex-cli";
+  if (!model && backend !== "claude-code") return null;
   const serviceTier = source.serviceTier === "fast" ? "fast" : source.serviceTier === "default" ? "default" : null;
   return {
-    backend: source.backend === "direct-api" ? "direct-api" : "codex-cli",
+    backend,
     providerId: String(source.providerId || ""),
     providerName: String(source.providerName || ""),
     model,
@@ -666,9 +691,189 @@ var import_node_child_process = require("node:child_process");
 function appendOutput(current, chunk, limit) {
   return `${current}${chunk.toString()}`.slice(-limit);
 }
+function asRecord4(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
 var ProcessExecutionService = class {
   constructor(state) {
     this.state = state;
+  }
+  discoverCliModels(settings, backendId) {
+    return backendId === "claude-code" ? Promise.resolve(this.discoverClaudeModels(settings)) : this.discoverCodexModels(settings);
+  }
+  discoverCodexModels(settings) {
+    const executable = String(settings.codexExecutable || "");
+    const fallback = (message = "") => ({
+      backendId: "codex-cli",
+      models: MODEL_OPTIONS.map((model) => ({
+        id: model.id,
+        label: model.label,
+        description: model.description,
+        supportsFast: model.supportsFast
+      })),
+      effectiveModel: settings.codexModel,
+      source: "插件静态回退",
+      complete: false,
+      message,
+      discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve(fallback(`Codex 可执行文件不存在：${executable || "未配置"}`));
+    }
+    return new Promise((resolve4) => {
+      let settled = false;
+      let stdoutBuffer = "";
+      let stderr = "";
+      let timer = 0;
+      const child = (0, import_node_child_process.spawn)(executable, ["app-server", "--stdio"], {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true
+      });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (!child.killed) child.kill();
+        resolve4(result);
+      };
+      const send = (payload) => {
+        if (!child.stdin.destroyed) child.stdin.write(`${JSON.stringify(payload)}
+`);
+      };
+      const inspectLine = (line) => {
+        if (!line.trim()) return;
+        let event;
+        try {
+          event = asRecord4(JSON.parse(line));
+        } catch {
+          return;
+        }
+        if (event.id === 1 && event.result) {
+          send({
+            method: "model/list",
+            id: 2,
+            params: { limit: 100, includeHidden: false }
+          });
+          return;
+        }
+        if (event.id !== 2) return;
+        const result = asRecord4(event.result);
+        const data = Array.isArray(result.data) ? result.data : [];
+        const models = data.map((value) => {
+          const model = asRecord4(value);
+          const id = String(model.id || model.model || "").trim();
+          if (!id) return null;
+          const tiers = Array.isArray(model.serviceTiers) ? model.serviceTiers : [];
+          const legacyTiers = Array.isArray(model.additionalSpeedTiers) ? model.additionalSpeedTiers : [];
+          const reasoning = Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts.map((option) => String(asRecord4(option).reasoningEffort || "").trim()).filter(Boolean) : [];
+          return {
+            id,
+            label: String(model.displayName || id),
+            description: String(model.description || ""),
+            isDefault: model.isDefault === true,
+            supportedReasoningEfforts: reasoning,
+            supportsFast: tiers.length > 0 || legacyTiers.includes("fast")
+          };
+        }).filter((model) => model !== null);
+        if (!models.length) {
+          finish(fallback("Codex app-server 返回了空模型目录"));
+          return;
+        }
+        const catalogDefault = models.find((model) => model.isDefault)?.id || "";
+        finish({
+          backendId: "codex-cli",
+          models,
+          effectiveModel: settings.codexModel || catalogDefault,
+          source: "Codex app-server",
+          complete: true,
+          discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      };
+      child.stdout.on("data", (chunk) => {
+        stdoutBuffer += chunk.toString();
+        const lines = stdoutBuffer.split(/\r?\n/);
+        stdoutBuffer = lines.pop() || "";
+        lines.forEach(inspectLine);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 4e3);
+      });
+      child.once("error", (error) => finish(fallback(error.message)));
+      child.once("close", () => {
+        if (stdoutBuffer) inspectLine(stdoutBuffer);
+        if (!settled) finish(fallback(stderr.trim() || "Codex app-server 提前退出"));
+      });
+      send({
+        method: "initialize",
+        id: 1,
+        params: {
+          clientInfo: {
+            name: "agent-dashboard",
+            title: "Agent Dashboard",
+            version: "0.24.0"
+          },
+          capabilities: {
+            experimentalApi: false,
+            requestAttestation: false
+          }
+        }
+      });
+      timer = window.setTimeout(() => {
+        finish(fallback("Codex 模型目录检测超过 15 秒"));
+      }, 15e3);
+    });
+  }
+  discoverClaudeModels(settings) {
+    const candidates = /* @__PURE__ */ new Map();
+    const addModel = (id, label) => {
+      const normalized = String(id || "").trim();
+      if (!normalized || candidates.has(normalized)) return;
+      candidates.set(normalized, {
+        id: normalized,
+        label,
+        supportsFast: false,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+      });
+    };
+    let configuredModel = "";
+    let settingsFound = false;
+    const settingsPath = path2.join(
+      process.env.USERPROFILE || "",
+      ".claude",
+      "settings.json"
+    );
+    try {
+      const source = asRecord4(JSON.parse(fs2.readFileSync(settingsPath, "utf8")));
+      const env = asRecord4(source.env);
+      settingsFound = true;
+      configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
+      addModel(configuredModel, configuredModel ? `当前模型 · ${configuredModel}` : "");
+      for (const [key, label] of [
+        ["ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"],
+        ["ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"],
+        ["ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"],
+        ["ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"]
+      ]) {
+        const model = String(env[key] || "").trim();
+        addModel(model, model ? `${label} · ${model}` : "");
+      }
+    } catch {
+    }
+    const testedResult = this.state.providerRuntimeState.get("claude-code")?.result;
+    const testedModel = testedResult?.ok ? String(testedResult.model || "").trim() : "";
+    addModel(settings.claudeModel, `插件设置 · ${settings.claudeModel}`);
+    addModel(testedModel, `初始化事件 · ${testedModel}`);
+    const effectiveModel = settings.claudeModel.trim() || testedModel || configuredModel;
+    return {
+      backendId: "claude-code",
+      models: [...candidates.values()],
+      effectiveModel,
+      source: settings.claudeModel.trim() ? "插件设置覆盖" : testedModel ? "Claude 初始化事件" : settingsFound ? "Claude settings / CC Switch" : "Claude Code 默认配置",
+      complete: false,
+      message: settingsFound ? "Claude Code 不提供完整模型目录；此处列出 CC Switch/Claude 设置中可识别的模型。" : "Claude Code 不提供完整模型目录，且未找到可读取的 CC Switch/Claude 模型设置。",
+      discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
   }
   recoverInterruptedPracticeRuns(settings) {
     const runsDirectory = path2.join(
@@ -807,10 +1012,10 @@ Execution interrupted before the plugin restarted.`.trim();
       action.id,
       "--project-root",
       projectRoot,
-      "--codex",
-      settings.codexExecutable,
-      "--model",
-      executionConfig.model,
+      "--backend",
+      executionConfig.backend === "claude-code" ? "claude-code" : "codex-cli",
+      "--backend-executable",
+      executionConfig.backend === "claude-code" ? settings.claudeExecutable : settings.codexExecutable,
       "--reasoning-effort",
       executionConfig.reasoningEffort,
       "--service-tier",
@@ -822,6 +1027,13 @@ Execution interrupted before the plugin restarted.`.trim();
       "--stop-file",
       stopPath
     ];
+    if (executionConfig.backend === "claude-code") {
+      if (executionConfig.model) {
+        args.push("--backend-model", executionConfig.model);
+      }
+    } else {
+      args.push("--model", executionConfig.model);
+    }
     return new Promise((resolve4, reject) => {
       let stdout = "";
       let stderr = "";
@@ -1028,6 +1240,130 @@ Execution interrupted before the plugin restarted.`.trim();
       }, 1e4);
     });
   }
+  probeClaudeCode(settings) {
+    const startedAt = Date.now();
+    const executable = String(settings.claudeExecutable || "");
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        provider: "claude-code",
+        model: settings.claudeModel || "CC Switch 默认模型",
+        message: `Claude Code 可执行文件不存在：${executable || "未配置"}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    return new Promise((resolve4) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      let detectedModel = "";
+      let responsePreview = "";
+      const args = [
+        "-p",
+        "--safe-mode",
+        "--permission-mode",
+        "dontAsk",
+        "--tools=",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence"
+      ];
+      if (settings.claudeModel.trim()) {
+        args.push("--model", settings.claudeModel.trim());
+      }
+      args.push("仅回复：CLAUDE_BACKEND_OK");
+      const child = (0, import_node_child_process.spawn)(executable, args, {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        }
+      });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve4({
+          model: detectedModel || settings.claudeModel || "CC Switch 默认模型",
+          responseTimeMs: Date.now() - startedAt,
+          testedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          ...result
+        });
+      };
+      const inspectLine = (line) => {
+        if (!line.trim()) return;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "system" && event.subtype === "init") {
+            detectedModel = String(event.model || "");
+          }
+          if (event.type === "result") {
+            responsePreview = String(event.result || "").trim().slice(0, 160);
+          }
+        } catch {
+        }
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 2e4);
+        String(chunk).split(/\r?\n/).forEach(inspectLine);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 8e3);
+      });
+      child.once("error", (error) => {
+        finish({
+          ok: false,
+          type: "local-service-offline",
+          provider: "claude-code",
+          message: error.message
+        });
+      });
+      child.once("close", (code) => {
+        stdout.split(/\r?\n/).forEach(inspectLine);
+        if (code === 0 && detectedModel) {
+          finish({
+            ok: true,
+            type: "success",
+            provider: "claude-code",
+            endpoint: "Claude Code / CC Switch",
+            modelExists: null,
+            streaming: { supported: true, verified: true },
+            pdf: { supported: false, verified: false },
+            vision: { supported: false, verified: false },
+            webSearch: {
+              supported: false,
+              verified: false,
+              note: "第一阶段仅开放知识库只读检索"
+            },
+            responsePreview: responsePreview || "Claude Code 可用"
+          });
+          return;
+        }
+        finish({
+          ok: false,
+          type: "local-service-offline",
+          provider: "claude-code",
+          message: stderr.trim() || stdout.trim() || `Claude Code 退出码 ${code}`
+        });
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish({
+          ok: false,
+          type: "timeout",
+          provider: "claude-code",
+          message: `${getCliBackendLabel("claude-code")} 连接测试超过 45 秒`
+        });
+      }, 45e3);
+    });
+  }
   stopVaultAction(runId) {
     const child = this.state.activeProcesses.get(runId);
     if (!child || child.killed) return false;
@@ -1085,6 +1421,9 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       case "codex":
         this.renderCodexSettings(containerEl);
         break;
+      case "claude":
+        this.renderClaudeSettings(containerEl);
+        break;
       case "direct-api":
         this.renderDirectApiSettings(containerEl);
         break;
@@ -1096,14 +1435,14 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     this.createSettingsPageHeader(
       containerEl,
       "Agent Dashboard",
-      "按模块管理运行环境、Codex 模型和 Direct API。进入对应模块后再修改详细设置。"
+      "按模块管理运行环境、CLI 后端和 Direct API。进入对应模块后再修改详细设置。"
     );
     const navigation = containerEl.createDiv({ cls: "agent-dashboard-settings-navigation" });
     this.createSettingsNavigationItem(navigation, {
       page: "runtime",
       icon: "terminal",
       title: "运行环境",
-      description: "项目目录、Codex/Python/R 可执行文件、任务超时和环境检查。",
+      description: "项目目录、Codex/Claude/Python/R 可执行文件、任务超时和环境检查。",
       status: "本地执行"
     });
     const reasoningLabel = REASONING_OPTIONS.find(
@@ -1115,6 +1454,16 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       title: "Codex 模型",
       description: "全局默认模型、推理强度，以及 Codex CLI 连接测试。",
       status: `${this.plugin.settings.codexModel} · ${reasoningLabel}`
+    });
+    const claudeReasoningLabel = REASONING_OPTIONS.find(
+      (option) => option.id === this.plugin.settings.claudeReasoningEffort
+    )?.label || this.plugin.settings.claudeReasoningEffort;
+    this.createSettingsNavigationItem(navigation, {
+      page: "claude",
+      icon: "sparkles",
+      title: "Claude Code",
+      description: "只读检索与批注解释、CC Switch 模型覆盖和连接测试。",
+      status: `${this.plugin.settings.claudeModel || "CC Switch 默认"} · ${claudeReasoningLabel}`
     });
     const profiles = this.plugin.settings.providerProfiles;
     const activeProfile = profiles.find(
@@ -1144,6 +1493,12 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Codex 可执行文件").setDesc("用于文献、代码、检索和综合任务。默认自动选择当前 Codex 应用携带的最新 CLI；手动填写的外部路径会保留。").addText(
       (text) => text.setPlaceholder("codex.exe").setValue(this.plugin.settings.codexExecutable).onChange(async (value) => {
         this.plugin.settings.codexExecutable = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Claude Code 可执行文件").setDesc("用于只读知识库检索与批注解释。原生安装通常位于用户目录的 .local\\bin\\claude.exe。").addText(
+      (text) => text.setPlaceholder("C:\\Users\\<user>\\.local\\bin\\claude.exe").setValue(this.plugin.settings.claudeExecutable).onChange(async (value) => {
+        this.plugin.settings.claudeExecutable = value.trim();
         await this.plugin.saveSettings();
       })
     );
@@ -1221,6 +1576,52 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       });
     });
     if (codexResult?.result) this.renderConnectionResult(containerEl, codexResult.result);
+  }
+  renderClaudeSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "Claude Code",
+      "配置只读 CLI 后端。第一阶段不会向 Claude Code 开放任何文件写入任务。",
+      true
+    );
+    new import_obsidian.Setting(containerEl).setName("模型覆盖").setDesc("留空时沿用 CC Switch 当前模型；填写后仅覆盖 Dashboard 发起的 Claude Code 任务。").addText(
+      (text) => text.setPlaceholder("留空使用 CC Switch 默认模型").setValue(this.plugin.settings.claudeModel).onChange(async (value) => {
+        this.plugin.settings.claudeModel = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("用于 Claude Code 的只读知识库检索和批注解释。").addDropdown((dropdown) => {
+      REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+      dropdown.setValue(this.plugin.settings.claudeReasoningEffort).onChange(async (value) => {
+        this.plugin.settings.claudeReasoningEffort = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("批注解释后端").setDesc("自动模式优先使用已启用的 Direct API，否则使用 Codex。也可固定为某个本地 CLI。").addDropdown((dropdown) => {
+      dropdown.addOption("auto", "自动").addOption("codex-cli", "Codex CLI").addOption("claude-code", "Claude Code").setValue(this.plugin.settings.annotationBackendId).onChange(async (value) => {
+        this.plugin.settings.annotationBackendId = value === "claude-code" ? "claude-code" : value === "codex-cli" ? "codex-cli" : "auto";
+        await this.plugin.saveSettings();
+      });
+    });
+    this.createProviderSectionHeader(
+      containerEl,
+      "只读执行边界",
+      "连接测试不发送 Vault 内容。检索只开放 Read、Glob 和 Grep；批注解释不开放任何工具。"
+    );
+    const resultState = this.plugin.providerRuntimeState.get("claude-code") || null;
+    new import_obsidian.Setting(containerEl).setName("Claude Code / CC Switch").setDesc("验证 CLI、当前模型、JSONL 输出以及自定义 endpoint 是否可用。").addButton((button) => {
+      const testing = resultState?.status === "testing";
+      button.setButtonText(testing ? "测试中…" : "测试连接").setDisabled(testing).onClick(async () => {
+        this.plugin.providerRuntimeState.set("claude-code", { status: "testing" });
+        this.display();
+        const result = await this.plugin.testProviderConnection("claude-code");
+        this.plugin.providerRuntimeState.set("claude-code", { status: "done", result });
+        this.display();
+      });
+    });
+    if (resultState?.result) {
+      this.renderConnectionResult(containerEl, resultState.result);
+    }
   }
   renderDirectApiSettings(containerEl) {
     this.createSettingsPageHeader(
@@ -3328,7 +3729,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   requestStopRun(run) {
     if (!run || this.stoppingRunIds.has(run.id)) return;
     const backend = String(run.executionConfig?.backend || "codex-cli");
-    const requested = backend !== "codex-cli" ? this.plugin.stopDirectVaultQuery(run.id) : this.plugin.stopVaultAction(run.id);
+    const requested = !isCliBackendId(backend) ? this.plugin.stopDirectVaultQuery(run.id) : this.plugin.stopVaultAction(run.id);
     if (!requested) {
       new import_obsidian7.Notice("任务进程已经结束，正在刷新运行状态");
       void this.loadAndRender();
@@ -3701,11 +4102,11 @@ ${result.stderr.trim()}`);
 
 // src/query/normalization.ts
 var import_node_path2 = __toESM(require("node:path"));
-function asRecord4(value) {
+function asRecord5(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeVaultImageAttachment(value) {
-  const source = asRecord4(value);
+  const source = asRecord5(value);
   const attachmentPath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   const extension = import_node_path2.default.posix.extname(attachmentPath).toLowerCase();
   const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
@@ -3738,7 +4139,7 @@ function normalizeQueryVaultSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord4(value);
+    const source = asRecord5(value);
     let sourcePath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^knowledge-base\//i, "").replace(/^\/+/, "");
     if (!sourcePath || seen.has(sourcePath.toLowerCase())) continue;
     seen.add(sourcePath.toLowerCase());
@@ -3755,7 +4156,7 @@ function normalizeQueryWebSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord4(value);
+    const source = asRecord5(value);
     let parsed;
     try {
       parsed = new URL(String(source.url || "").trim());
@@ -3800,7 +4201,7 @@ function extractModelProvidedWebSources(text) {
   return normalizeQueryWebSources(matches);
 }
 function normalizeQueryRetrievalPath(value) {
-  const source = asRecord4(value);
+  const source = asRecord5(value);
   return {
     stage: String(source.stage || "").slice(0, 200),
     inspectedVaultPaths: (Array.isArray(source.inspected_vault_paths) ? source.inspected_vault_paths : Array.isArray(source.inspectedVaultPaths) ? source.inspectedVaultPaths : []).map((item) => String(item || "").trim().replace(/\\/g, "/").slice(0, 1e3)).filter(Boolean).slice(0, 30),
@@ -3809,7 +4210,7 @@ function normalizeQueryRetrievalPath(value) {
   };
 }
 function normalizeQueryCitationValidation(value) {
-  const source = asRecord4(value);
+  const source = asRecord5(value);
   const allowedStatuses = /* @__PURE__ */ new Set([
     "verified",
     "structured",
@@ -4066,10 +4467,17 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     this.pendingImages = [];
     this.queryDrafts = /* @__PURE__ */ new Map();
     this.navigatorFrame = 0;
-    this.executionOverrides = {
-      model: "",
-      reasoningEffort: "",
-      serviceTier: "default"
+    this.executionOverridesByBackend = {
+      "codex-cli": {
+        model: "",
+        reasoningEffort: "",
+        serviceTier: "default"
+      },
+      "claude-code": {
+        model: "",
+        reasoningEffort: "",
+        serviceTier: "default"
+      }
     };
   }
   getViewType() {
@@ -4330,11 +4738,13 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       });
     }
     if (message.role === "assistant" && message.queryBackendId) {
+      const cliBackend = isCliBackendId(message.queryBackendId);
+      const backendLabel = cliBackend ? getCliBackendLabel(message.queryBackendId) : message.providerName || "Direct API";
       identity.createSpan({
-        cls: `query-wiki-message-backend ${message.queryBackendId === "codex-cli" ? "is-codex" : "is-direct"}`,
-        text: message.queryBackendId === "codex-cli" ? "Codex CLI" : message.providerName || "Direct API",
+        cls: `query-wiki-message-backend ${message.queryBackendId === "claude-code" ? "is-claude" : message.queryBackendId === "codex-cli" ? "is-codex" : "is-direct"}`,
+        text: backendLabel,
         attr: {
-          title: message.model ? `${message.queryBackendId === "codex-cli" ? "Codex CLI" : "Direct API"} · ${message.model}` : message.queryBackendId
+          title: message.model ? `${backendLabel} · ${message.model}` : message.queryBackendId
         }
       });
     }
@@ -4762,11 +5172,13 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         if (button.disabled || value === currentMode) return;
         this.initialQuestion = this.inputEl?.value || "";
         const activeBackendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-        const activeProfile = activeBackendId === "codex-cli" ? null : this.plugin.getProviderProfile(activeBackendId);
+        const activeProfile = isCliBackendId(activeBackendId) ? null : this.plugin.getProviderProfile(activeBackendId);
         if (value === "web" && activeBackendId !== "codex-cli" && !profileSupportsDirectWebSearch(activeProfile)) {
           if (this.pendingImages.length) this.pendingImages = [];
           await this.plugin.setActiveQueryBackend("codex-cli");
-          new import_obsidian9.Notice("当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI");
+          new import_obsidian9.Notice(
+            activeBackendId === "claude-code" ? "Claude Code 第一阶段不支持联网搜索；已切换到 Codex CLI" : "当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI"
+          );
         }
         await this.plugin.setActiveQueryMode(value);
         await this.render();
@@ -4779,14 +5191,23 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     if (!action) return;
     const directProfiles = this.plugin.getVerifiedProviderProfiles();
     const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-    const directProfile = backendId === "codex-cli" ? null : directProfiles.find((profile) => profile.id === backendId) || null;
-    const effective = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+    const directProfile = isCliBackendId(backendId) ? null : directProfiles.find((profile) => profile.id === backendId) || null;
+    const codexOverrides = this.executionOverridesByBackend["codex-cli"];
+    const claudeOverrides = this.executionOverridesByBackend["claude-code"];
+    let codexDiscovery = this.plugin.getCliModelDiscovery("codex-cli");
+    let claudeDiscovery = this.plugin.getCliModelDiscovery("claude-code");
+    const effective = this.plugin.resolveActionExecutionConfig(action, codexOverrides);
+    const claudeEffective = this.plugin.resolveCliActionExecutionConfig(
+      action,
+      "claude-code",
+      claudeOverrides
+    );
     const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
     const summary = details.createEl("summary");
     const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
     (0, import_obsidian9.setIcon)(icon, "sliders-horizontal");
     const summaryText = summary.createSpan({
-      text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : `Codex CLI · ${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`
+      text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : backendId === "claude-code" ? `Claude Code · ${claudeEffective.model || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}` : `Codex CLI · ${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`
     });
     const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
     const backend = this.createSelectField(grid, "执行后端");
@@ -4794,6 +5215,11 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       text: "Codex CLI",
       attr: { value: "codex-cli" }
     });
+    const claudeOption = backend.createEl("option", {
+      text: "Claude Code · 只读",
+      attr: { value: "claude-code" }
+    });
+    claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
     directProfiles.forEach((profile) => {
       backend.createEl("option", {
         text: `Direct API · ${profile.name} · ${profile.model}${profileSupportsDirectWebSearch(profile) ? " · 可联网" : ""}`,
@@ -4802,62 +5228,137 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     });
     backend.value = backendId;
     const model = this.createSelectField(grid, "模型");
-    model.createEl("option", {
-      text: `使用检索默认 · ${this.plugin.getModelLabel(this.plugin.resolveActionExecutionConfig(action).model)}`,
-      attr: { value: "" }
-    });
-    MODEL_OPTIONS.forEach((option) => {
-      model.createEl("option", {
-        text: option.description ? `${option.label} · ${option.description}` : option.label,
-        attr: { value: option.id }
-      });
-    });
-    model.value = this.executionOverrides.model;
     const reasoning = this.createSelectField(grid, "推理强度");
     reasoning.createEl("option", { text: "使用检索默认", attr: { value: "" } });
     REASONING_OPTIONS.forEach((option) => {
       reasoning.createEl("option", { text: option.label, attr: { value: option.id } });
     });
-    reasoning.value = this.executionOverrides.reasoningEffort;
+    reasoning.value = codexOverrides.reasoningEffort;
     const speed = this.createSelectField(grid, "速度");
     speed.createEl("option", { text: "标准", attr: { value: "default" } });
     speed.createEl("option", { text: "快速", attr: { value: "fast" } });
-    speed.value = this.executionOverrides.serviceTier;
-    const directNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
+    speed.value = codexOverrides.serviceTier;
+    const claudeModel = this.createSelectField(grid, "模型");
+    const claudeReasoning = this.createSelectField(grid, "推理强度");
+    claudeReasoning.createEl("option", {
+      text: "使用 Claude 默认",
+      attr: { value: "" }
+    });
+    REASONING_OPTIONS.forEach((option) => {
+      claudeReasoning.createEl("option", {
+        text: option.label,
+        attr: { value: option.id }
+      });
+    });
+    claudeReasoning.value = claudeOverrides.reasoningEffort;
+    const modelStatus = details.createDiv({ cls: "query-wiki-cli-model-status" });
+    const backendNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
+    const populateModelSelect = (select, defaultLabel, discovery, selectedValue) => {
+      select.replaceChildren();
+      select.createEl("option", {
+        text: defaultLabel,
+        attr: { value: "" }
+      });
+      const models = discovery?.models || (select === model ? MODEL_OPTIONS.map((option) => ({
+        id: option.id,
+        label: option.label,
+        description: option.description,
+        supportsFast: option.supportsFast
+      })) : []);
+      models.forEach((option) => {
+        select.createEl("option", {
+          text: option.description ? `${option.label} · ${option.description}` : option.label,
+          attr: { value: option.id }
+        });
+      });
+      if (selectedValue && !models.some((option) => option.id === selectedValue)) {
+        select.createEl("option", {
+          text: `${selectedValue} · 已保存的自定义模型`,
+          attr: { value: selectedValue }
+        });
+      }
+      select.value = selectedValue;
+    };
+    const renderCodexModels = () => {
+      const defaultModel = this.plugin.resolveActionExecutionConfig(action).model;
+      populateModelSelect(
+        model,
+        `使用检索默认 · ${this.plugin.getModelLabel(defaultModel)}`,
+        codexDiscovery,
+        codexOverrides.model
+      );
+    };
+    const renderClaudeModels = () => {
+      const detectedModel = claudeDiscovery?.effectiveModel || claudeEffective.model || "CC Switch 默认模型";
+      populateModelSelect(
+        claudeModel,
+        `使用后端默认 · ${detectedModel}`,
+        claudeDiscovery,
+        claudeOverrides.model
+      );
+    };
+    renderCodexModels();
+    renderClaudeModels();
     const sync = () => {
       const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
       const usingDirect = Boolean(selectedProfile);
-      if (model.parentElement) model.parentElement.hidden = usingDirect;
-      if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect;
-      if (speed.parentElement) speed.parentElement.hidden = usingDirect;
-      directNotice.toggleClass("is-visible", usingDirect);
-      directNotice.setText(
+      const usingClaude = backend.value === "claude-code";
+      if (model.parentElement) model.parentElement.hidden = usingDirect || usingClaude;
+      if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingClaude;
+      if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingClaude;
+      if (claudeModel.parentElement) claudeModel.parentElement.hidden = !usingClaude;
+      if (claudeReasoning.parentElement) claudeReasoning.parentElement.hidden = !usingClaude;
+      modelStatus.hidden = usingDirect;
+      const activeDiscovery = usingClaude ? claudeDiscovery : codexDiscovery;
+      modelStatus.setText(
+        activeDiscovery ? `模型来源：${activeDiscovery.source} · 可识别 ${activeDiscovery.models.length} 个模型${activeDiscovery.complete ? "" : "（候选列表可能不完整）"}${activeDiscovery.message ? `。${activeDiscovery.message}` : ""}` : "正在识别当前后端的可用模型…"
+      );
+      backendNotice.toggleClass("is-visible", usingDirect || usingClaude);
+      backendNotice.setText(
         selectedProfile ? [
           `将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。`,
           profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
           profileSupportsDirectWebSearch(selectedProfile) ? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。" : "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
           "Direct API 不执行 Codex skill 或文件写入。"
-        ].join("") : ""
+        ].join("") : usingClaude ? "Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。当前仅支持知识库检索，不执行联网搜索或文件写入。模型由 CC Switch 或插件中的模型覆盖决定。" : ""
       );
       if (selectedProfile) {
         summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
+        return;
+      }
+      if (usingClaude) {
+        claudeOverrides.model = claudeModel.value;
+        claudeOverrides.reasoningEffort = claudeReasoning.value;
+        claudeOverrides.serviceTier = "default";
+        const next2 = this.plugin.resolveCliActionExecutionConfig(
+          action,
+          "claude-code",
+          claudeOverrides
+        );
+        summaryText.setText(
+          `Claude Code · ${next2.model || claudeDiscovery?.effectiveModel || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(next2.reasoningEffort || "")}`
+        );
         return;
       }
       const selectedModel = model.value || this.plugin.resolveActionExecutionConfig(action).model;
       if (!this.plugin.supportsFast(selectedModel) && speed.value === "fast") speed.value = "default";
       const fastOption = speed.querySelector('option[value="fast"]');
       if (fastOption) fastOption.disabled = !this.plugin.supportsFast(selectedModel);
-      this.executionOverrides = {
-        model: model.value,
-        reasoningEffort: reasoning.value,
-        serviceTier: speed.value === "fast" ? "fast" : "default"
-      };
-      const next = this.plugin.resolveActionExecutionConfig(action, this.executionOverrides);
+      codexOverrides.model = model.value;
+      codexOverrides.reasoningEffort = reasoning.value;
+      codexOverrides.serviceTier = speed.value === "fast" ? "fast" : "default";
+      const next = this.plugin.resolveActionExecutionConfig(
+        action,
+        codexOverrides
+      );
       summaryText.setText(`Codex CLI · ${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
     };
     backend.addEventListener("change", async () => {
       this.initialQuestion = this.inputEl?.value || "";
       const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
+      if (isCliBackendId(backend.value)) {
+        this.plugin.invalidateCliModelDiscovery(backend.value);
+      }
       if (this.pendingImages.length && !profileSupportsQueryImage(selectedProfile)) {
         this.pendingImages = [];
         new import_obsidian9.Notice("所选后端未启用视觉输入，已移除待发送图片");
@@ -4865,7 +5366,9 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       await this.plugin.setActiveQueryBackend(backend.value);
       if (backend.value !== "codex-cli" && this.session.retrievalMode === "web" && !profileSupportsDirectWebSearch(selectedProfile)) {
         await this.plugin.setActiveQueryMode("vault");
-        new import_obsidian9.Notice("所选 Direct API 未通过联网搜索测试；已切换为知识库模式");
+        new import_obsidian9.Notice(
+          backend.value === "claude-code" ? "Claude Code 第一阶段仅支持知识库模式" : "所选 Direct API 未通过联网搜索测试；已切换为知识库模式"
+        );
       }
       await this.render();
       this.inputEl?.focus();
@@ -4873,7 +5376,25 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     model.addEventListener("change", sync);
     reasoning.addEventListener("change", sync);
     speed.addEventListener("change", sync);
+    claudeModel.addEventListener("change", sync);
+    claudeReasoning.addEventListener("change", sync);
     sync();
+    if (isCliBackendId(backendId)) {
+      void this.plugin.discoverCliModels(backendId).then((discovery) => {
+        if (backend.value !== backendId) return;
+        if (backendId === "claude-code") {
+          claudeDiscovery = discovery;
+          renderClaudeModels();
+        } else {
+          codexDiscovery = discovery;
+          renderCodexModels();
+        }
+        sync();
+      }).catch((error) => {
+        if (backend.value !== backendId) return;
+        modelStatus.setText(`模型识别失败：${String(error)}`);
+      });
+    }
   }
   createSelectField(parent, labelText) {
     const label = parent.createEl("label", { cls: "query-wiki-settings-field" });
@@ -4897,8 +5418,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     }
     const session = this.session;
     const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
-    const directProfile = backendId === "codex-cli" ? null : this.plugin.getProviderProfile(backendId);
-    if (backendId !== "codex-cli" && !directProfile) {
+    const directProfile = isCliBackendId(backendId) ? null : this.plugin.getProviderProfile(backendId);
+    if (!isCliBackendId(backendId) && !directProfile) {
       new import_obsidian9.Notice("所选 Direct API 配置不可用，请重新选择执行后端");
       return;
     }
@@ -4961,15 +5482,26 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       error: "",
       retrievalMode,
       queryBackendId: backendId,
-      providerName: directProfile?.name || "Codex CLI",
-      model: directProfile?.model || ""
+      providerName: directProfile?.name || getCliBackendLabel(backendId),
+      model: directProfile?.model || (backendId === "claude-code" ? this.plugin.resolveCliActionExecutionConfig(
+        action,
+        "claude-code",
+        this.executionOverridesByBackend["claude-code"]
+      ).model || this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel || "CC Switch 默认模型" : "")
     };
     this.activeRunId = "starting";
     this.activeMessageId = assistantMessage.id;
     this.stopRequested = false;
-    const executionConfig = directProfile ? this.plugin.resolveDirectQueryExecutionConfig(directProfile) : {
+    const executionConfig = directProfile ? this.plugin.resolveDirectQueryExecutionConfig(directProfile) : backendId === "claude-code" ? this.plugin.resolveCliActionExecutionConfig(
+      action,
+      "claude-code",
+      this.executionOverridesByBackend["claude-code"]
+    ) : {
       backend: "codex-cli",
-      ...this.plugin.resolveActionExecutionConfig(action, this.executionOverrides)
+      ...this.plugin.resolveActionExecutionConfig(
+        action,
+        this.executionOverridesByBackend["codex-cli"]
+      )
     };
     assistantMessage.model = executionConfig.model;
     const input = this.plugin.buildQueryActionInput(question, priorMessages, retrievalMode);
@@ -5024,8 +5556,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         retrievalPath: normalizeQueryRetrievalPath(structuredResult?.retrieval_path),
         retrievalMode: traceEvent?.mode === "vault" ? "vault" : traceEvent?.mode === "web" ? "web" : retrievalMode,
         queryBackendId: backendId,
-        providerName: directProfile?.name || "Codex CLI",
-        model: executionConfig.model
+        providerName: directProfile?.name || getCliBackendLabel(backendId),
+        model: executionConfig.model || (backendId === "claude-code" ? "CC Switch 默认模型" : "")
       });
       const output = [
         response,
@@ -5138,7 +5670,7 @@ ${result.stderr.trim()}` : ""
   stopQuery() {
     if (!this.activeRunId || this.activeRunId === "starting" || this.stopRequested) return;
     const message = this.session.messages.find((item) => item.id === this.activeMessageId);
-    this.stopRequested = message?.queryBackendId && message.queryBackendId !== "codex-cli" ? this.plugin.stopDirectVaultQuery(this.activeRunId) : this.plugin.stopVaultAction(this.activeRunId);
+    this.stopRequested = message?.queryBackendId && !isCliBackendId(message.queryBackendId) ? this.plugin.stopDirectVaultQuery(this.activeRunId) : this.plugin.stopVaultAction(this.activeRunId);
     if (!this.stopRequested) {
       new import_obsidian9.Notice("当前查询进程已经结束");
       return;
@@ -6021,8 +6553,9 @@ var AnnotationService = class {
       "上下文：",
       selection.context
     ].filter(Boolean).join("\n");
+    const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
     const activeProfile = this.plugin.getProviderProfile(this.plugin.settings.activeProviderId);
-    if (activeProfile?.lastTest?.ok) {
+    if (configuredBackend === "auto" && activeProfile?.lastTest?.ok) {
       const provider = this.plugin.createLLMProvider(activeProfile);
       const result2 = await provider.complete(
         {
@@ -6049,7 +6582,11 @@ var AnnotationService = class {
     registerCancel(() => {
       this.plugin.requestVaultActionStop(runId);
     });
-    const executionConfig = this.plugin.resolveActionExecutionConfig(action);
+    const cliBackend = configuredBackend === "claude-code" ? "claude-code" : "codex-cli";
+    const executionConfig = this.plugin.resolveCliActionExecutionConfig(
+      action,
+      cliBackend
+    );
     const result = await this.plugin.runVaultAction(
       runId,
       action,
@@ -6065,8 +6602,8 @@ ${user}`,
     if (!text) throw new Error("模型返回了空解释");
     return {
       text,
-      provider: "Codex CLI",
-      model: executionConfig.model
+      provider: getCliBackendLabel(cliBackend),
+      model: executionConfig.model || "CC Switch 默认模型"
     };
   }
   async getRecordExplanationContext(record) {
@@ -7453,7 +7990,7 @@ var DirectQueryService = class {
 var import_obsidian12 = require("obsidian");
 var fs4 = __toESM(require("node:fs"));
 var path7 = __toESM(require("node:path"));
-function asRecord5(value) {
+function asRecord6(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeQueryMessageStatus(value) {
@@ -7485,6 +8022,8 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
       readVaultImageData: (attachment) => this.readVaultImageData(attachment)
     });
     this.annotationPopover = null;
+    this.cliModelDiscoveryCache = /* @__PURE__ */ new Map();
+    this.cliModelDiscoveryInFlight = /* @__PURE__ */ new Map();
   }
   get providerRuntimeState() {
     return this.lifecycleState.providerRuntimeState;
@@ -7935,7 +8474,7 @@ ${result.stderr.trim()}` : ""
     }
     this.querySessions = this.querySessions.map((session) => {
       const queryBackendId = this.resolveQueryBackendId(session.queryBackendId);
-      const queryProfile = queryBackendId === "codex-cli" ? null : this.getProviderProfile(queryBackendId);
+      const queryProfile = isCliBackendId(queryBackendId) ? null : this.getProviderProfile(queryBackendId);
       const retrievalMode = queryBackendId === "codex-cli" || profileSupportsDirectWebSearch(queryProfile) ? session.retrievalMode : "vault";
       if (queryBackendId !== session.queryBackendId || retrievalMode !== session.retrievalMode) {
         changed = true;
@@ -7960,12 +8499,26 @@ ${result.stderr.trim()}` : ""
         changed = true;
       }
     }
+    const preferredClaudeExecutable = findPreferredClaudeExecutable();
+    const configuredClaudeExecutable = String(this.settings.claudeExecutable || "").trim();
+    if (!configuredClaudeExecutable && preferredClaudeExecutable) {
+      this.settings.claudeExecutable = preferredClaudeExecutable;
+      changed = true;
+    }
     if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
       this.settings.codexModel = "gpt-5.6-terra";
       changed = true;
     }
     if (!REASONING_OPTIONS.some((option) => option.id === this.settings.codexReasoningEffort)) {
       this.settings.codexReasoningEffort = DEFAULT_SETTINGS.codexReasoningEffort;
+      changed = true;
+    }
+    if (!REASONING_OPTIONS.some((option) => option.id === this.settings.claudeReasoningEffort)) {
+      this.settings.claudeReasoningEffort = DEFAULT_SETTINGS.claudeReasoningEffort;
+      changed = true;
+    }
+    if (!["auto", "codex-cli", "claude-code"].includes(this.settings.annotationBackendId)) {
+      this.settings.annotationBackendId = "auto";
       changed = true;
     }
     this.taskRuns = this.taskRuns.map((run) => {
@@ -8012,7 +8565,14 @@ ${result.stderr.trim()}` : ""
   resolveQueryBackendId(backendId) {
     const normalized = String(backendId || "codex-cli");
     if (normalized === "codex-cli") return "codex-cli";
+    if (normalized === "claude-code") {
+      return this.isCliBackendAvailable("claude-code") ? "claude-code" : "codex-cli";
+    }
     return this.getVerifiedProviderProfiles().some((profile) => profile.id === normalized) ? normalized : "codex-cli";
+  }
+  isCliBackendAvailable(backendId) {
+    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
+    return Boolean(executable && fs4.existsSync(executable));
   }
   resolveDirectQueryExecutionConfig(profile) {
     return {
@@ -8055,7 +8615,42 @@ ${result.stderr.trim()}` : ""
     const provider = this.createLLMProvider(profileId);
     return provider.listModels();
   }
+  getCliModelDiscovery(backendId) {
+    return this.cliModelDiscoveryCache.get(backendId)?.result || null;
+  }
+  async discoverCliModels(backendId, force = false) {
+    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
+    const configuredModel = backendId === "claude-code" ? this.settings.claudeModel : this.settings.codexModel;
+    const signature = `${executable}\0${configuredModel}`;
+    const cached = this.cliModelDiscoveryCache.get(backendId);
+    if (!force && cached && cached.signature === signature && cached.expiresAt > Date.now()) {
+      return cached.result;
+    }
+    const existing = this.cliModelDiscoveryInFlight.get(backendId);
+    if (existing) return existing;
+    const pending = this.processExecution.discoverCliModels(this.settings, backendId).then((result) => {
+      this.cliModelDiscoveryCache.set(backendId, {
+        signature,
+        expiresAt: Date.now() + (backendId === "codex-cli" ? 3e5 : 5e3),
+        result
+      });
+      return result;
+    }).finally(() => {
+      this.cliModelDiscoveryInFlight.delete(backendId);
+    });
+    this.cliModelDiscoveryInFlight.set(backendId, pending);
+    return pending;
+  }
+  invalidateCliModelDiscovery(backendId) {
+    this.cliModelDiscoveryCache.delete(backendId);
+  }
   async testProviderConnection(profileId) {
+    if (profileId === "claude-code") {
+      const result2 = await this.processExecution.probeClaudeCode(this.settings);
+      this.providerRuntimeState.set("claude-code", { status: "done", result: result2 });
+      this.invalidateCliModelDiscovery("claude-code");
+      return result2;
+    }
     const provider = this.createLLMProvider(profileId);
     const result = await provider.testConnection();
     if (profileId !== "codex-cli") {
@@ -8138,10 +8733,10 @@ ${result.stderr.trim()}` : ""
     };
   }
   normalizeQuerySession(session) {
-    const source = asRecord5(session);
+    const source = asRecord6(session);
     const fallback = this.makeQuerySession();
     const messages = Array.isArray(source.messages) ? source.messages.slice(-60).map((value) => {
-      const message = asRecord5(value);
+      const message = asRecord6(value);
       return {
         id: String(message.id || this.createQueryMessageId()),
         role: message.role === "user" ? "user" : "assistant",
@@ -8360,12 +8955,18 @@ ${result.stderr.trim()}` : ""
     return this.taskRuns.some((run) => actionIds.has(run.actionId) && (run.status === "running" || run.status === "queued"));
   }
   getModelLabel(model) {
+    for (const cached of this.cliModelDiscoveryCache.values()) {
+      const discovered = cached.result.models.find((option) => option.id === model);
+      if (discovered) return discovered.label;
+    }
     return MODEL_OPTIONS.find((option) => option.id === model)?.label || model;
   }
   getReasoningLabel(reasoningEffort) {
     return REASONING_OPTIONS.find((option) => option.id === reasoningEffort)?.label || reasoningEffort;
   }
   supportsFast(model) {
+    const discovered = this.cliModelDiscoveryCache.get("codex-cli")?.result.models.find((option) => option.id === model);
+    if (discovered) return discovered.supportsFast;
     return MODEL_OPTIONS.find((option) => option.id === model)?.supportsFast === true;
   }
   resolveActionExecutionConfig(action, overrides = {}) {
@@ -8375,11 +8976,32 @@ ${result.stderr.trim()}` : ""
     const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
     const reasoningEffort = REASONING_OPTIONS.some((option) => option.id === requestedReasoning) ? requestedReasoning : buttonReasoning;
     return {
+      backend: "codex-cli",
       model: requestedModel || buttonModel,
       reasoningEffort,
       serviceTier: overrides.serviceTier === "fast" && this.supportsFast(requestedModel || buttonModel) ? "fast" : "default",
       modelSource: requestedModel ? "本次覆盖" : action.model ? "按钮默认" : "全局默认",
       reasoningSource: requestedReasoning ? "本次覆盖" : action.reasoningEffort ? "按钮默认" : "全局默认"
+    };
+  }
+  resolveCliActionExecutionConfig(action, backendId, overrides = {}) {
+    if (backendId === "codex-cli") {
+      return this.resolveActionExecutionConfig(action, overrides);
+    }
+    const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
+    const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
+    const defaultReasoning = REASONING_OPTIONS.some(
+      (option) => option.id === this.settings.claudeReasoningEffort
+    ) ? this.settings.claudeReasoningEffort : DEFAULT_SETTINGS.claudeReasoningEffort;
+    return {
+      backend: "claude-code",
+      model: requestedModel || this.settings.claudeModel.trim(),
+      reasoningEffort: REASONING_OPTIONS.some(
+        (option) => option.id === requestedReasoning
+      ) ? requestedReasoning : defaultReasoning,
+      serviceTier: "default",
+      modelSource: requestedModel ? "本次覆盖" : this.settings.claudeModel.trim() ? "Claude 默认" : "CC Switch 默认",
+      reasoningSource: requestedReasoning ? "本次覆盖" : "Claude 默认"
     };
   }
   async startTaskRun(action, summary, executionConfig = null) {
@@ -8449,7 +9071,7 @@ ${result.stderr.trim()}` : ""
     }
     return { latest, error };
   }
-  checkRuntime(action = null) {
+  checkRuntime(action = null, backendId = "codex-cli") {
     const projectRoot = this.settings.projectRoot;
     const runner = path7.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
     const practiceRunner = path7.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
@@ -8472,7 +9094,8 @@ ${result.stderr.trim()}` : ""
       checks.push(["Vault lint", fs4.existsSync(lintScript)]);
     }
     if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
-      checks.push(["Codex", fs4.existsSync(this.settings.codexExecutable)]);
+      const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
+      checks.push([getCliBackendLabel(backendId), fs4.existsSync(executable)]);
     }
     const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
     return {
@@ -8789,15 +9412,21 @@ ${result.stderr.trim()}` : ""
     if (!registered || !registered.enabled) {
       return Promise.reject(new Error(`操作尚未启用：${action.label}`));
     }
-    const runtime = this.checkRuntime(action);
+    const effectiveConfig = executionConfig ? {
+      ...executionConfig,
+      reasoningEffort: executionConfig.reasoningEffort || (executionConfig.backend === "claude-code" ? this.settings.claudeReasoningEffort : this.settings.codexReasoningEffort),
+      serviceTier: executionConfig.serviceTier || "default"
+    } : this.resolveActionExecutionConfig(action);
+    const backendId = effectiveConfig.backend === "claude-code" ? "claude-code" : "codex-cli";
+    if (action.writes && backendId !== "codex-cli") {
+      return Promise.reject(
+        new Error("Claude Code 第一阶段仅允许只读任务；写入型操作仍使用 Codex CLI")
+      );
+    }
+    const runtime = this.checkRuntime(action, backendId);
     if (!runtime.ready) {
       return Promise.reject(new Error(runtime.message));
     }
-    const effectiveConfig = executionConfig ? {
-      ...executionConfig,
-      reasoningEffort: executionConfig.reasoningEffort || this.settings.codexReasoningEffort,
-      serviceTier: executionConfig.serviceTier || "default"
-    } : this.resolveActionExecutionConfig(action);
     return this.processExecution.runVaultAction({
       runId,
       action,
@@ -8820,7 +9449,7 @@ ${result.stderr.trim()}` : ""
     return this.processExecution.isVaultActionProcessActive(runId);
   }
   isQueryExecutionActive(runId, backendId = "codex-cli") {
-    if (backendId && backendId !== "codex-cli") {
+    if (!isCliBackendId(backendId)) {
       return this.directQueryService.isActive(runId);
     }
     return this.isVaultActionProcessActive(runId);

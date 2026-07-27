@@ -13,7 +13,7 @@ import {
 	ACTION_BY_ID,
 	type DashboardAction,
 } from "../actions";
-import { VIEW_TYPE } from "../config";
+import { VIEW_TYPE, isCliBackendId } from "../config";
 import {
 	ActionInputModal,
 	type ExecutionOverrides,
@@ -285,7 +285,7 @@ export class DashboardView extends ItemView {
 	requestStopRun(run: TaskRun): void {
 		if (!run || this.stoppingRunIds.has(run.id)) return;
 		const backend = String(run.executionConfig?.backend || "codex-cli");
-		const requested = backend !== "codex-cli"
+		const requested = !isCliBackendId(backend)
 			? this.plugin.stopDirectVaultQuery(run.id)
 			: this.plugin.stopVaultAction(run.id);
 		if (!requested) {

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { ProviderProfile } from "../providers/profile";
+import type { CliBackendId } from "../config";
 
 const LEGACY_CODEX_EXECUTABLE =
 	"C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
@@ -11,12 +12,22 @@ const MANAGED_CODEX_BIN_ROOT = path.join(
 	"Codex",
 	"bin",
 );
+const DEFAULT_CLAUDE_EXECUTABLE = path.join(
+	process.env.USERPROFILE || "",
+	".local",
+	"bin",
+	"claude.exe",
+);
 
 export interface DashboardSettings {
 	projectRoot: string;
 	codexExecutable: string;
 	codexModel: string;
 	codexReasoningEffort: string;
+	claudeExecutable: string;
+	claudeModel: string;
+	claudeReasoningEffort: string;
+	annotationBackendId: "auto" | CliBackendId;
 	pythonExecutable: string;
 	rscriptExecutable: string;
 	codePracticeTimeoutSeconds: number;
@@ -24,6 +35,16 @@ export interface DashboardSettings {
 	activeProviderId: string;
 	providerProfiles: ProviderProfile[];
 	providerTimeoutSeconds: number;
+}
+
+export function findPreferredClaudeExecutable(): string {
+	const candidates = [
+		String(process.env.CLAUDE_CODE_PATH || "").trim(),
+		DEFAULT_CLAUDE_EXECUTABLE,
+		path.join(process.env.LOCALAPPDATA || "", "AnthropicClaude", "claude.exe"),
+	].filter(Boolean);
+	return candidates.find((candidate) => fs.existsSync(candidate))
+		|| DEFAULT_CLAUDE_EXECUTABLE;
 }
 
 export function findPreferredCodexExecutable(): string {
@@ -70,6 +91,10 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	codexExecutable: findPreferredCodexExecutable(),
 	codexModel: "gpt-5.6-terra",
 	codexReasoningEffort: "medium",
+	claudeExecutable: findPreferredClaudeExecutable(),
+	claudeModel: "",
+	claudeReasoningEffort: "medium",
+	annotationBackendId: "auto",
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
 	codePracticeTimeoutSeconds: 30,
