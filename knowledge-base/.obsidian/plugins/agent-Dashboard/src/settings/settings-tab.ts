@@ -292,7 +292,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsPageHeader(
 			containerEl,
 			"Claude Code",
-			"配置只读 CLI 后端。第一阶段不会向 Claude Code 开放任何文件写入任务。",
+			"配置 Claude Code CLI。查询与批注保持只读；代码分析和综合分析可使用阶段所有权写入。",
 			true,
 		);
 		new Setting(containerEl)
@@ -309,7 +309,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("默认推理强度")
-			.setDesc("用于 Claude Code 的只读知识库检索和批注解释。")
+			.setDesc("用于 Claude Code 的检索、批注解释、代码分析和综合分析。")
 			.addDropdown((dropdown) => {
 				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
 				dropdown

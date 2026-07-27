@@ -1478,7 +1478,15 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!action || action.id === "okf-export") {
 			checks.push(["OKF exporter", fs.existsSync(exporter)]);
 		}
-		if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id)) {
+		if (
+			!action
+			|| ["vault-lint", "vault-lint-fix"].includes(action.id)
+			|| (
+				backendId === "claude-code"
+				&& action.writes
+				&& ["code-analysis", "synthesis"].includes(action.id)
+			)
+		) {
 			checks.push(["Vault lint", fs.existsSync(lintScript)]);
 		}
 		if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
@@ -1915,9 +1923,11 @@ export default class AgentDashboardPlugin extends Plugin {
 		const backendId: CliBackendId = effectiveConfig.backend === "claude-code"
 			? "claude-code"
 			: "codex-cli";
-		if (action.writes && backendId !== "codex-cli") {
+		const claudeStageWriteAllowed = backendId === "claude-code"
+			&& ["code-analysis", "synthesis"].includes(action.id);
+		if (action.writes && backendId !== "codex-cli" && !claudeStageWriteAllowed) {
 			return Promise.reject(
-				new Error("Claude Code 第一阶段仅允许只读任务；写入型操作仍使用 Codex CLI"),
+				new Error("Claude Code 当前仅开放“代码分析”和“综合分析”的阶段所有权写入"),
 			);
 		}
 		const runtime = this.checkRuntime(action, backendId);

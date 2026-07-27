@@ -421,6 +421,8 @@ export class ProcessExecutionService {
 			String(timeoutSeconds),
 			"--stop-file",
 			stopPath,
+			"--run-id",
+			runId,
 		];
 		if (executionConfig.backend === "claude-code") {
 			if (executionConfig.model) {
@@ -745,7 +747,7 @@ export class ProcessExecutionService {
 						webSearch: {
 							supported: false,
 							verified: false,
-							note: "第一阶段仅开放知识库只读检索",
+							note: "Claude Code 后端当前不开放联网搜索",
 						},
 						responsePreview: responsePreview || "Claude Code 可用",
 					});

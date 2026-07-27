@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -17,6 +19,7 @@ from agent_backends import (  # noqa: E402
     BACKEND_PROTOCOL_VERSION,
     BackendAccessPolicy,
     BackendCommandRequest,
+    WorkspaceChangeAudit,
     build_action_access_policy,
     get_backend,
     list_backends,
@@ -40,7 +43,7 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertTrue(
             by_id["claude-code"]["capabilities"]["structured_output"]
         )
-        self.assertFalse(
+        self.assertTrue(
             by_id["claude-code"]["capabilities"]["file_write"]
         )
 
@@ -155,10 +158,15 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("--json-schema", command)
         self.assertNotIn("--model", command)
 
-    def test_claude_adapter_rejects_write_mode_until_host_audit_exists(
+    def test_claude_adapter_builds_stage_owned_write_command(
         self,
     ) -> None:
         backend = get_backend("claude-code")
+        policy = build_action_access_policy(
+            "synthesis",
+            {"writes": True},
+            PROJECT_ROOT,
+        )
         request = BackendCommandRequest(
             action="synthesis",
             agent="research-vault-synthesis",
@@ -168,16 +176,39 @@ class AgentBackendProtocolTests(unittest.TestCase):
             model="",
             reasoning_effort="high",
             service_tier="default",
-            access_policy=BackendAccessPolicy(
-                mode="workspace-write",
-                write_scope="stage-owned",
-                allowed_roots=(
-                    PROJECT_ROOT / "knowledge-base" / "wiki" / "methods",
-                ),
+            access_policy=policy,
+        )
+
+        command = backend.build_command("claude.exe", request)
+
+        self.assertIn("dontAsk", command)
+        self.assertIn("Read,Glob,Grep,Edit,Write,NotebookEdit", command)
+        allowed = command[command.index("--allowedTools") + 1]
+        denied = command[command.index("--disallowedTools") + 1]
+        self.assertIn("Edit(knowledge-base/wiki/methods/**)", allowed)
+        self.assertNotIn(",Edit,", f",{allowed},")
+        self.assertIn("Bash", denied)
+        self.assertIn("Edit(tool-library/raw/**)", denied)
+
+    def test_claude_adapter_rejects_full_write_scope(self) -> None:
+        backend = get_backend("claude-code")
+        request = BackendCommandRequest(
+            action="pdf-xray",
+            agent="paper_xray",
+            project_root=PROJECT_ROOT,
+            sandbox="workspace-write",
+            writes=True,
+            model="",
+            reasoning_effort="high",
+            service_tier="default",
+            access_policy=build_action_access_policy(
+                "pdf-xray",
+                {"writes": True},
+                PROJECT_ROOT,
             ),
         )
 
-        with self.assertRaisesRegex(ValueError, "write access is not enabled"):
+        with self.assertRaisesRegex(ValueError, "stage-owned writes"):
             backend.build_command("claude.exe", request)
 
     def test_claude_annotation_uses_zero_tools_without_plan_mode(self) -> None:
@@ -327,6 +358,97 @@ class AgentBackendProtocolTests(unittest.TestCase):
         payload = json.loads(line.removeprefix("DASHBOARD_EVENT "))
         self.assertEqual(payload["schema_version"], BACKEND_PROTOCOL_VERSION)
         self.assertEqual(payload["type"], "status")
+
+    def test_change_audit_accepts_stage_changes_and_rejects_outside_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed_root = root / "knowledge-base" / "wiki" / "methods"
+            allowed_root.mkdir(parents=True)
+            allowed_file = allowed_root / "method.md"
+            allowed_file.write_text("before\n", encoding="utf-8")
+            outside_file = root / "README.md"
+            outside_file.write_text("outside before\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "add", "README.md", "knowledge-base/wiki/methods/method.md"],
+                cwd=root,
+                check=True,
+            )
+            policy = BackendAccessPolicy(
+                mode="workspace-write",
+                write_scope="stage-owned",
+                allowed_roots=(allowed_root,),
+                require_change_manifest=True,
+                rollback_on_failure=True,
+            )
+            audit = WorkspaceChangeAudit(
+                project_root=root,
+                policy=policy,
+                run_id="test-run",
+                action="synthesis",
+                backend_id="claude-code",
+            )
+            audit.capture()
+            allowed_file.write_text("after\n", encoding="utf-8")
+            outside_file.write_text("outside after\n", encoding="utf-8")
+
+            changes = audit.inspect()
+
+            self.assertEqual(
+                {change.kind for change in changes},
+                {"modified"},
+            )
+            self.assertEqual(len(audit.violations()), 1)
+            self.assertEqual(
+                audit.violations()[0].path,
+                outside_file.resolve(),
+            )
+            rollback = audit.rollback()
+            self.assertTrue(rollback["succeeded"])
+            self.assertEqual(
+                allowed_file.read_text(encoding="utf-8"),
+                "before\n",
+            )
+            self.assertEqual(
+                outside_file.read_text(encoding="utf-8"),
+                "outside before\n",
+            )
+
+    def test_change_audit_rejects_and_restores_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed_root = root / "knowledge-base" / "wiki" / "code"
+            allowed_root.mkdir(parents=True)
+            target = allowed_root / "script.md"
+            target.write_text("content\n", encoding="utf-8")
+            policy = BackendAccessPolicy(
+                mode="workspace-write",
+                write_scope="stage-owned",
+                allowed_roots=(allowed_root,),
+                require_change_manifest=True,
+                rollback_on_failure=True,
+            )
+            audit = WorkspaceChangeAudit(
+                project_root=root,
+                policy=policy,
+                run_id="delete-run",
+                action="code-analysis",
+                backend_id="claude-code",
+            )
+            audit.capture()
+            target.unlink()
+
+            audit.inspect()
+
+            self.assertEqual(audit.violations()[0].kind, "deleted")
+            self.assertTrue(audit.rollback()["succeeded"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "content\n")
 
 
 if __name__ == "__main__":

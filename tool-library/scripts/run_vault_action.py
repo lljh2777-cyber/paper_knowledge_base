@@ -30,6 +30,7 @@ from agent_backends import (  # noqa: E402
     BACKEND_PROTOCOL_VERSION,
     AgentCliBackend,
     BackendCommandRequest,
+    WorkspaceChangeAudit,
     build_action_access_policy,
     get_backend,
     list_backends,
@@ -255,6 +256,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Stable Dashboard run identifier used for change manifests.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-actions", action="store_true")
     parser.add_argument("--list-backends", action="store_true")
@@ -1389,6 +1395,179 @@ def run_process(
     return return_code
 
 
+def _project_relative(path: Path, project_root: Path) -> str:
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def run_audited_stage_write(
+    command: list[str],
+    project_root: Path,
+    timeout_seconds: int,
+    prompt: str,
+    stop_file: Path | None,
+    backend: AgentCliBackend,
+    action: str,
+    spec: dict[str, Any],
+    run_id: str,
+    python_value: str,
+) -> int:
+    """Run a stage-owned write with host audit, validation, and rollback."""
+
+    policy = build_action_access_policy(action, spec, project_root)
+    safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", run_id).strip("-")
+    if not safe_run_id:
+        safe_run_id = f"{action}-{int(time.time())}"
+    audit = WorkspaceChangeAudit(
+        project_root=project_root,
+        policy=policy,
+        run_id=safe_run_id,
+        action=action,
+        backend_id=backend.backend_id,
+    )
+    print("Capturing pre-run workspace snapshot.", file=sys.stderr)
+    audit.capture()
+    result = run_process(
+        command,
+        project_root,
+        timeout_seconds,
+        prompt,
+        stop_file,
+    )
+    audit.inspect()
+    violations = audit.violations()
+    if result != 0 or violations:
+        if policy.rollback_on_failure:
+            rollback = audit.rollback()
+            print(
+                "Stage changes rolled back."
+                if rollback["succeeded"]
+                else "Stage rollback was incomplete; inspect the manifest.",
+                file=sys.stderr,
+            )
+        manifest = audit.write_manifest(result if result != 0 else 2)
+        emit_dashboard_event(
+            {
+                "type": "change-manifest",
+                "status": "rolled-back",
+                "path": _project_relative(manifest, project_root),
+                "change_count": len(audit.changes),
+                "violation_count": len(violations),
+            }
+        )
+        if violations:
+            print("Write boundary violations:", file=sys.stderr)
+            for violation in violations:
+                print(
+                    f"  {violation.kind}: "
+                    f"{_project_relative(violation.path, project_root)} "
+                    f"({violation.reason})",
+                    file=sys.stderr,
+                )
+        return result if result != 0 else 2
+
+    for validator in policy.post_validators:
+        if validator != "vault-lint":
+            audit.add_validator(
+                validator,
+                2,
+                "failed",
+                "unknown post-validator",
+            )
+            audit.rollback()
+            manifest = audit.write_manifest(2)
+            emit_dashboard_event(
+                {
+                    "type": "change-manifest",
+                    "status": "rolled-back",
+                    "path": _project_relative(manifest, project_root),
+                    "change_count": len(audit.changes),
+                    "violation_count": 0,
+                }
+            )
+            return 2
+        python = resolve_executable(python_value, "Python")
+        lint_script = (
+            project_root / "tool-library" / "scripts" / "lint_vault.py"
+        )
+        if not lint_script.is_file():
+            audit.add_validator(
+                validator,
+                2,
+                "failed",
+                f"validator not found: {lint_script}",
+            )
+            audit.rollback()
+            manifest = audit.write_manifest(2)
+            emit_dashboard_event(
+                {
+                    "type": "change-manifest",
+                    "status": "rolled-back",
+                    "path": _project_relative(manifest, project_root),
+                    "change_count": len(audit.changes),
+                    "violation_count": 0,
+                }
+            )
+            return 2
+        print("\nPost-write vault lint:")
+        lint_result = run_process(
+            [
+                python,
+                str(lint_script),
+                "--report",
+                str(
+                    project_root
+                    / "tool-library"
+                    / "output"
+                    / "lint"
+                    / "latest.json"
+                ),
+            ],
+            project_root,
+            timeout_seconds,
+            stop_file=stop_file,
+        )
+        if lint_result in {0, 1}:
+            audit.add_validator(
+                validator,
+                lint_result,
+                "passed" if lint_result == 0 else "completed-with-findings",
+            )
+            continue
+        audit.add_validator(
+            validator,
+            lint_result,
+            "failed",
+            "validator execution failed or was stopped",
+        )
+        audit.rollback()
+        manifest = audit.write_manifest(lint_result)
+        emit_dashboard_event(
+            {
+                "type": "change-manifest",
+                "status": "rolled-back",
+                "path": _project_relative(manifest, project_root),
+                "change_count": len(audit.changes),
+                "violation_count": 0,
+            }
+        )
+        return lint_result
+
+    manifest = audit.write_manifest(0)
+    emit_dashboard_event(
+        {
+            "type": "change-manifest",
+            "status": "accepted",
+            "path": _project_relative(manifest, project_root),
+            "change_count": len(audit.changes),
+            "violation_count": 0,
+        }
+    )
+    return 0
+
+
 def dry_run_payload(
     action: str,
     project_root: Path,
@@ -1721,6 +1900,22 @@ def main() -> int:
             retrieval_mode,
             stop_file,
             backend,
+        )
+    elif (
+        backend.backend_id == "claude-code"
+        and spec.get("writes")
+    ):
+        result = run_audited_stage_write(
+            command=command,
+            project_root=project_root,
+            timeout_seconds=args.timeout_seconds,
+            prompt=prompt,
+            stop_file=stop_file,
+            backend=backend,
+            action=args.action,
+            spec=spec,
+            run_id=args.run_id,
+            python_value=args.python,
         )
     else:
         result = run_process(

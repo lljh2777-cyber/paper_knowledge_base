@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .base import (
@@ -15,6 +16,22 @@ from .base import (
 
 _READ_TOOLS = "Read,Glob,Grep"
 _WRITE_TOOL_NAMES = ("Edit", "Write", "NotebookEdit", "Bash")
+_STAGE_WRITE_ACTIONS = {"code-analysis", "synthesis"}
+
+
+def _permission_path(project_root: Path, path: Path) -> str:
+    root = project_root.resolve()
+    target = path.resolve()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as error:
+        raise ValueError(
+            f"Claude Code permission path is outside project root: {target}"
+        ) from error
+    value = relative.as_posix()
+    if target.is_dir() or not target.suffix:
+        return f"{value}/**"
+    return value
 
 
 def _message_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -37,7 +54,7 @@ class ClaudeCodeBackend:
         model_selection=True,
         reasoning_effort=True,
         service_tier=False,
-        file_write=False,
+        file_write=True,
         web_search=False,
         citations=False,
         image_input=False,
@@ -52,10 +69,18 @@ class ClaudeCodeBackend:
         request: BackendCommandRequest,
     ) -> list[str]:
         policy = request.resolved_access_policy()
-        if policy.mode != "read-only" or policy.write_scope != "none":
+        is_read_only = policy.mode == "read-only" and policy.write_scope == "none"
+        is_stage_write = (
+            request.action in _STAGE_WRITE_ACTIONS
+            and policy.mode == "workspace-write"
+            and policy.write_scope == "stage-owned"
+            and policy.require_change_manifest
+            and policy.rollback_on_failure
+        )
+        if not is_read_only and not is_stage_write:
             raise ValueError(
-                "Claude Code write access is not enabled yet; "
-                "change manifest and post-run path audit are required first"
+                "Claude Code currently permits read-only actions and "
+                "stage-owned writes for code-analysis or synthesis only"
             )
 
         needs_vault_read = request.action == "vault-retrieval"
@@ -66,17 +91,52 @@ class ClaudeCodeBackend:
             "--permission-mode",
             "plan" if needs_vault_read else "dontAsk",
         ]
-        if needs_vault_read:
+        if is_stage_write:
+            command.extend(
+                [
+                    "--tools",
+                    "Read,Glob,Grep,Edit,Write,NotebookEdit",
+                    "--allowedTools",
+                    ",".join(
+                        [
+                            "Read",
+                            "Glob",
+                            "Grep",
+                            *[
+                                f"Edit({_permission_path(request.project_root, root)})"
+                                for root in policy.allowed_roots
+                            ],
+                        ]
+                    ),
+                    "--disallowedTools",
+                    ",".join(
+                        [
+                            "Bash",
+                            *[
+                                f"Edit({_permission_path(request.project_root, root)})"
+                                for root in policy.denied_roots
+                            ],
+                        ]
+                    ),
+                ]
+            )
+        elif needs_vault_read:
             command.extend(["--tools", _READ_TOOLS])
+            command.extend(
+                [
+                    "--disallowedTools",
+                    ",".join(_WRITE_TOOL_NAMES),
+                ]
+            )
         else:
             command.append("--tools=")
-        command.extend(
-            [
-            "--disallowedTools",
-            ",".join(_WRITE_TOOL_NAMES),
-            "--no-session-persistence",
-            ]
-        )
+            command.extend(
+                [
+                    "--disallowedTools",
+                    ",".join(_WRITE_TOOL_NAMES),
+                ]
+            )
+        command.append("--no-session-persistence")
         effort = str(request.reasoning_effort or "").strip().lower()
         if effort in {"low", "medium", "high", "xhigh"}:
             command.extend(["--effort", effort])
@@ -161,10 +221,15 @@ class ClaudeCodeBackend:
             "label": self.label,
             "capabilities": self.capabilities.to_payload(),
             "write_support": {
-                "enabled": False,
-                "reason": (
-                    "Pending change manifest, post-run path audit, "
-                    "validation, and rollback support"
-                ),
+                "enabled": True,
+                "scopes": ["stage-owned"],
+                "actions": sorted(_STAGE_WRITE_ACTIONS),
+                "guardrails": [
+                    "path-specific Edit allow rules",
+                    "Bash disabled",
+                    "host change manifest",
+                    "post-run path audit",
+                    "validator and rollback",
+                ],
             },
         }

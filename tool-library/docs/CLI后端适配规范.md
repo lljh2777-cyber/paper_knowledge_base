@@ -17,6 +17,7 @@ tool-library/scripts/agent_backends/claude_code.py
 tool-library/scripts/agent_backends/
   base.py           # 稳定接口、能力和数据结构
   access_policy.py  # 操作级权限和写入范围
+  change_audit.py   # 变更清单、路径审计和失败回滚
   registry.py       # 后端发现
   codex_cli.py      # Codex CLI 方言
   claude_code.py    # Claude Code 方言
@@ -29,17 +30,21 @@ tool-library/schemas/
 
 新增 CLI 时，应增加一个适配器文件并在 `registry.py` 注册。不要在 Dashboard 的视图、按钮或结果弹窗中增加工具名称判断。
 
-## Claude Code 第一阶段
+## Claude Code 当前边界
 
-`claude-code` 当前只开放只读任务。知识库检索使用 `plan` 权限模式，仅开放
+`claude-code` 的知识库检索使用 `plan` 权限模式，仅开放
 `Read`、`Glob`、`Grep`；批注解释和关键词扩展使用 `dontAsk` 且不开放任何
 工具。两类任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`。
 CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
 `--backend-model` 时，runner 才覆盖该模型。
 
-Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。访问
-策略已经表达这些级别，但在变更清单、运行后路径审计、后置验证和失败恢复
-完成之前，适配器必须拒绝全部写入操作。
+Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。当前只
+开放 `code-analysis` 和 `synthesis` 的 `stage-owned` 写入。CLI 仅获得阶段
+目录对应的 `Edit(path/**)` 白名单，`Bash` 和 `tool-library/raw/` 始终禁用。
+宿主在运行前建立文件指纹和可回滚快照，运行后生成变更清单、检查越界路径与
+删除操作，并执行知识库体检；进程失败、越界、删除或验证器执行失败时回滚本轮
+变更。`paper-ingest`、`pdf-xray` 和 `vault-lint-fix` 等完整写入操作仍拒绝
+Claude Code。
 
 若原生安装目录未加入 `PATH`，插件或 runner 应保存并传入 `claude.exe`
 绝对路径，不应依赖交互式终端的临时环境。
@@ -49,6 +54,8 @@ Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。访�
 已验证的 Direct API 配置之间选择。选择 Claude Code 时必须自动限制为
 知识库模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
 模型选择只显示从 CC Switch/Claude 设置或初始化事件中识别出的候选。
+代码分析和综合分析的运行弹窗可切换 Codex CLI 或 Claude Code；Claude 模式
+必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。
 
 ## CLI 模型发现
 

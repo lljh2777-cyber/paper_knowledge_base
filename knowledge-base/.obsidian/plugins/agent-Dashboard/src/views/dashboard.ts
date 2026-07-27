@@ -589,8 +589,15 @@ export class DashboardView extends ItemView {
 		executionOverrides: ExecutionOverrides = {},
 	): Promise<void> {
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
+		const backendId = executionOverrides.backend === "claude-code"
+			? "claude-code"
+			: "codex-cli";
 		const executionConfig = action.ai
-			? this.plugin.resolveActionExecutionConfig(action, executionOverrides)
+			? this.plugin.resolveCliActionExecutionConfig(
+				action,
+				backendId,
+				executionOverrides,
+			)
 			: null;
 		const run = await this.plugin.startTaskRun(action, summary, executionConfig);
 		await this.loadAndRender();

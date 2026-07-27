@@ -1025,7 +1025,9 @@ Execution interrupted before the plugin restarted.`.trim();
       "--timeout-seconds",
       String(timeoutSeconds),
       "--stop-file",
-      stopPath
+      stopPath,
+      "--run-id",
+      runId
     ];
     if (executionConfig.backend === "claude-code") {
       if (executionConfig.model) {
@@ -1340,7 +1342,7 @@ Execution interrupted before the plugin restarted.`.trim();
             webSearch: {
               supported: false,
               verified: false,
-              note: "第一阶段仅开放知识库只读检索"
+              note: "Claude Code 后端当前不开放联网搜索"
             },
             responsePreview: responsePreview || "Claude Code 可用"
           });
@@ -1581,7 +1583,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     this.createSettingsPageHeader(
       containerEl,
       "Claude Code",
-      "配置只读 CLI 后端。第一阶段不会向 Claude Code 开放任何文件写入任务。",
+      "配置 Claude Code CLI。查询与批注保持只读；代码分析和综合分析可使用阶段所有权写入。",
       true
     );
     new import_obsidian.Setting(containerEl).setName("模型覆盖").setDesc("留空时沿用 CC Switch 当前模型；填写后仅覆盖 Dashboard 发起的 Claude Code 任务。").addText(
@@ -1590,7 +1592,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("用于 Claude Code 的只读知识库检索和批注解释。").addDropdown((dropdown) => {
+    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("用于 Claude Code 的检索、批注解释、代码分析和综合分析。").addDropdown((dropdown) => {
       REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
       dropdown.setValue(this.plugin.settings.claudeReasoningEffort).onChange(async (value) => {
         this.plugin.settings.claudeReasoningEffort = value;
@@ -2648,7 +2650,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     if (this.action.writes) {
       contentEl.createEl("p", {
         cls: "agent-dashboard-modal-warning",
-        text: "运行后，Codex 可在该 skill 拥有的范围内更新项目文件。提交此表单即确认本次写入授权。"
+        text: "运行后，所选执行后端可在该 skill 拥有的范围内更新项目文件。提交此表单即确认本次写入授权。"
       });
     }
     let input = null;
@@ -2699,7 +2701,17 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     window.setTimeout(() => (input || submit).focus(), 0);
   }
   renderExecutionControls(parent) {
-    const actionDefault = this.plugin.resolveActionExecutionConfig(this.action);
+    const supportsClaudeStageWrite = ["code-analysis", "synthesis"].includes(
+      this.action.id
+    );
+    let backendId = "codex-cli";
+    const resolveEffective = (overrides = {}) => {
+      return this.plugin.resolveCliActionExecutionConfig(
+        this.action,
+        backendId,
+        overrides
+      );
+    };
     const section = parent.createEl("section", {
       cls: "agent-dashboard-run-config",
       attr: { "aria-label": "本次运行配置" }
@@ -2707,27 +2719,23 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     const heading = section.createDiv({ cls: "agent-dashboard-run-config-heading" });
     heading.createSpan({ text: "运行配置" });
     const summary = heading.createSpan({ cls: "agent-dashboard-run-config-summary" });
-    const modelSelect = this.createSelectField(section, "模型", "运行模型");
-    modelSelect.createEl("option", {
-      text: `使用按钮默认 · ${this.plugin.getModelLabel(actionDefault.model)}`,
-      attr: { value: "" }
-    });
-    const modelOptions = [...MODEL_OPTIONS];
-    if (!modelOptions.some((option) => option.id === this.plugin.settings.codexModel)) {
-      modelOptions.unshift({
-        id: this.plugin.settings.codexModel,
-        label: this.plugin.settings.codexModel
+    let backendSelect = null;
+    if (supportsClaudeStageWrite) {
+      backendSelect = this.createSelectField(section, "执行后端", "运行执行后端");
+      backendSelect.createEl("option", {
+        text: "Codex CLI",
+        attr: { value: "codex-cli" }
       });
+      const claudeOption = backendSelect.createEl("option", {
+        text: this.plugin.isCliBackendAvailable("claude-code") ? "Claude Code · 阶段写入" : "Claude Code · 未配置",
+        attr: { value: "claude-code" }
+      });
+      claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
     }
-    modelOptions.forEach((option) => {
-      modelSelect.createEl("option", {
-        text: option.description ? `${option.label} · ${option.description}` : option.label,
-        attr: { value: option.id }
-      });
-    });
+    const modelSelect = this.createSelectField(section, "模型", "运行模型");
     const reasoningSelect = this.createSelectField(section, "推理强度", "运行推理强度");
-    reasoningSelect.createEl("option", {
-      text: `使用按钮默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`,
+    const reasoningDefaultOption = reasoningSelect.createEl("option", {
+      text: "",
       attr: { value: "" }
     });
     REASONING_OPTIONS.forEach((option) => {
@@ -2759,12 +2767,65 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       button.dataset.value = value;
       return button;
     });
+    const boundaryNotice = section.createDiv({
+      cls: "agent-dashboard-run-config-note"
+    });
     const getOverrides = () => ({
+      backend: backendId,
       model: modelSelect.value,
       reasoningEffort: reasoningSelect.value,
-      serviceTier
+      serviceTier: backendId === "codex-cli" ? serviceTier : "default"
     });
+    const populateModelOptions = () => {
+      const previous = modelSelect.value;
+      modelSelect.empty();
+      const actionDefault = resolveEffective();
+      modelSelect.createEl("option", {
+        text: backendId === "claude-code" ? `使用 Claude 默认 · ${actionDefault.model || "CC Switch 当前模型"}` : `使用按钮默认 · ${this.plugin.getModelLabel(actionDefault.model)}`,
+        attr: { value: "" }
+      });
+      const options = backendId === "claude-code" ? [
+        ...this.plugin.getCliModelDiscovery("claude-code")?.models || [],
+        ...this.plugin.settings.claudeModel ? [{
+          id: this.plugin.settings.claudeModel,
+          label: this.plugin.settings.claudeModel,
+          supportsFast: false
+        }] : []
+      ] : [
+        ...MODEL_OPTIONS,
+        ...MODEL_OPTIONS.some(
+          (option) => option.id === this.plugin.settings.codexModel
+        ) ? [] : [{
+          id: this.plugin.settings.codexModel,
+          label: this.plugin.settings.codexModel,
+          supportsFast: false
+        }]
+      ];
+      const seen = /* @__PURE__ */ new Set();
+      options.forEach((option) => {
+        if (!option.id || seen.has(option.id)) return;
+        seen.add(option.id);
+        const description = "description" in option ? option.description : "";
+        modelSelect.createEl("option", {
+          text: description ? `${option.label} · ${description}` : option.label,
+          attr: { value: option.id }
+        });
+      });
+      modelSelect.value = seen.has(previous) ? previous : "";
+    };
+    const syncReasoningDefault = () => {
+      const actionDefault = resolveEffective();
+      reasoningDefaultOption.setText(
+        backendId === "claude-code" ? `使用 Claude 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}` : `使用按钮默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
+      );
+    };
     const syncSpeedControl = () => {
+      speedField.style.display = backendId === "codex-cli" ? "" : "none";
+      if (backendId !== "codex-cli") {
+        serviceTier = "default";
+        return;
+      }
+      const actionDefault = resolveEffective();
       const selectedModel = modelSelect.value || actionDefault.model;
       const supportsFast = this.plugin.supportsFast(selectedModel);
       if (!supportsFast) serviceTier = "default";
@@ -2779,16 +2840,45 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         }
       });
     };
+    const syncBoundaryNotice = () => {
+      boundaryNotice.setText(
+        backendId === "claude-code" ? "Claude Code：仅允许当前阶段目录写入，Bash 已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。" : "Codex CLI：按当前项目沙箱和 skill 阶段边界执行。"
+      );
+    };
     const updateSummary = () => {
-      const effective = this.plugin.resolveActionExecutionConfig(this.action, getOverrides());
-      summary.setText(`${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`);
+      const effective = resolveEffective(getOverrides());
+      const backendLabel = backendId === "claude-code" ? "Claude Code" : "Codex CLI";
+      const modelLabel = effective.model ? this.plugin.getModelLabel(effective.model) : "CLI 默认模型";
+      summary.setText(
+        backendId === "claude-code" ? `${backendLabel} · ${modelLabel} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)}` : `${backendLabel} · ${modelLabel} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`
+      );
     };
     modelSelect.addEventListener("change", () => {
       syncSpeedControl();
       updateSummary();
     });
     reasoningSelect.addEventListener("change", updateSummary);
+    backendSelect?.addEventListener("change", () => {
+      backendId = backendSelect?.value === "claude-code" ? "claude-code" : "codex-cli";
+      serviceTier = "default";
+      modelSelect.value = "";
+      reasoningSelect.value = "";
+      populateModelOptions();
+      syncReasoningDefault();
+      syncSpeedControl();
+      syncBoundaryNotice();
+      updateSummary();
+      void this.plugin.discoverCliModels(backendId).then(() => {
+        if (backendSelect?.value !== backendId) return;
+        populateModelOptions();
+        syncSpeedControl();
+        updateSummary();
+      }).catch(() => void 0);
+    });
+    populateModelOptions();
+    syncReasoningDefault();
     syncSpeedControl();
+    syncBoundaryNotice();
     updateSummary();
     return { getOverrides };
   }
@@ -3996,7 +4086,12 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   async executeAction(action, input, executionOverrides = {}) {
     const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
-    const executionConfig = action.ai ? this.plugin.resolveActionExecutionConfig(action, executionOverrides) : null;
+    const backendId = executionOverrides.backend === "claude-code" ? "claude-code" : "codex-cli";
+    const executionConfig = action.ai ? this.plugin.resolveCliActionExecutionConfig(
+      action,
+      backendId,
+      executionOverrides
+    ) : null;
     const run = await this.plugin.startTaskRun(action, summary, executionConfig);
     await this.loadAndRender();
     let completedRun;
@@ -5736,7 +5831,12 @@ ${message.content}`).join("\n\n");
       new import_obsidian9.Notice("综合分析正在运行");
       return;
     }
-    const executionConfig = this.plugin.resolveActionExecutionConfig(action, overrides);
+    const backendId = overrides.backend === "claude-code" ? "claude-code" : "codex-cli";
+    const executionConfig = this.plugin.resolveCliActionExecutionConfig(
+      action,
+      backendId,
+      overrides
+    );
     const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || "整理查询对话";
     const run = await this.plugin.startTaskRun(action, summary, executionConfig);
     let completedRun;
@@ -9110,7 +9210,7 @@ ${result.stderr.trim()}` : ""
     if (!action || action.id === "okf-export") {
       checks.push(["OKF exporter", fs4.existsSync(exporter)]);
     }
-    if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id)) {
+    if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id) || backendId === "claude-code" && action.writes && ["code-analysis", "synthesis"].includes(action.id)) {
       checks.push(["Vault lint", fs4.existsSync(lintScript)]);
     }
     if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
@@ -9438,9 +9538,10 @@ ${result.stderr.trim()}` : ""
       serviceTier: executionConfig.serviceTier || "default"
     } : this.resolveActionExecutionConfig(action);
     const backendId = effectiveConfig.backend === "claude-code" ? "claude-code" : "codex-cli";
-    if (action.writes && backendId !== "codex-cli") {
+    const claudeStageWriteAllowed = backendId === "claude-code" && ["code-analysis", "synthesis"].includes(action.id);
+    if (action.writes && backendId !== "codex-cli" && !claudeStageWriteAllowed) {
       return Promise.reject(
-        new Error("Claude Code 第一阶段仅允许只读任务；写入型操作仍使用 Codex CLI")
+        new Error("Claude Code 当前仅开放“代码分析”和“综合分析”的阶段所有权写入")
       );
     }
     const runtime = this.checkRuntime(action, backendId);

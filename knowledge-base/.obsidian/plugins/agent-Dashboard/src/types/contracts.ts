@@ -23,6 +23,7 @@ import type { ProviderModel } from "../providers/shared";
 export type ServiceTier = "default" | "fast";
 
 export interface ExecutionOverrides {
+	backend?: CliBackendId;
 	model?: string;
 	reasoningEffort?: ReasoningEffort | string;
 	serviceTier?: ServiceTier;
@@ -372,6 +373,17 @@ export interface PluginHost {
 		action: DashboardAction,
 		overrides?: ExecutionOverrides,
 	): CodexExecutionConfig;
+	resolveCliActionExecutionConfig(
+		action: DashboardAction,
+		backendId: CliBackendId,
+		overrides?: ExecutionOverrides,
+	): CodexExecutionConfig;
+	isCliBackendAvailable(backendId: CliBackendId): boolean;
+	getCliModelDiscovery(backendId: CliBackendId): CliModelDiscoveryResult | null;
+	discoverCliModels(
+		backendId: CliBackendId,
+		force?: boolean,
+	): Promise<CliModelDiscoveryResult>;
 	startTaskRun(
 		action: DashboardAction,
 		summary: string,

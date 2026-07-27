@@ -11,6 +11,7 @@ from .base import (
     WriteScope,
 )
 from .access_policy import build_action_access_policy
+from .change_audit import WorkspaceChangeAudit
 from .registry import get_backend, list_backends
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "BackendCommandRequest",
     "ParsedBackendEvent",
     "WriteScope",
+    "WorkspaceChangeAudit",
     "build_action_access_policy",
     "get_backend",
     "list_backends",

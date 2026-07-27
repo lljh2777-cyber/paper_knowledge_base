@@ -118,11 +118,6 @@ interface QueryViewHost extends PluginHost {
 		files: TFile[],
 	): Map<string, Array<{ title: string; path: string; count: number }>>;
 	resolveDirectQueryExecutionConfig(profile: ProviderProfile): ExecutionConfig;
-	resolveCliActionExecutionConfig(
-		action: DashboardAction,
-		backendId: CliBackendId,
-		overrides?: ExecutionOverrides,
-	): ExecutionConfig;
 	getCliModelDiscovery(backendId: CliBackendId): CliModelDiscoveryResult | null;
 	discoverCliModels(
 		backendId: CliBackendId,
@@ -1638,7 +1633,14 @@ export class QueryWikiView extends ItemView {
 			new Notice("综合分析正在运行");
 			return;
 		}
-		const executionConfig = this.plugin.resolveActionExecutionConfig(action, overrides);
+		const backendId = overrides.backend === "claude-code"
+			? "claude-code"
+			: "codex-cli";
+		const executionConfig = this.plugin.resolveCliActionExecutionConfig(
+			action,
+			backendId,
+			overrides,
+		);
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || "整理查询对话";
 		const run = await this.plugin.startTaskRun(action, summary, executionConfig);
 		let completedRun;
