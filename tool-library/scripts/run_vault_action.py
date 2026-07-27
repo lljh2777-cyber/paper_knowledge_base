@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run one allow-listed Research Vault action for the Obsidian dashboard.
 
-User input is read from stdin and passed to Codex through stdin. Commands are
-always constructed as argument arrays; this runner never invokes a shell.
+User input is read from stdin and passed to the selected CLI backend through
+stdin. Commands are always constructed as argument arrays; this runner never
+invokes a shell.
 """
 
 from __future__ import annotations
@@ -21,12 +22,27 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
+SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+if str(SCRIPT_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIRECTORY))
+
+from agent_backends import (  # noqa: E402
+    BACKEND_PROTOCOL_VERSION,
+    AgentCliBackend,
+    BackendCommandRequest,
+    build_action_access_policy,
+    get_backend,
+    list_backends,
+)
+
+
 DEFAULT_CODEX = r"C:\Users\Thomas Wade\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe"
 DEFAULT_PYTHON = r"D:\python\python.exe"
 DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_SERVICE_TIER = "default"
-FAST_SERVICE_MODELS = {"gpt-5.6-terra", "gpt-5.6-sol"}
+DEFAULT_BACKEND = "codex-cli"
+CODEX_BACKEND = get_backend(DEFAULT_BACKEND)
 RETRIEVAL_SCHEMA_RELATIVE_PATH = (
     Path("tool-library")
     / "schemas"
@@ -214,6 +230,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--action", choices=sorted(ACTION_SPECS))
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    parser.add_argument("--backend", default=DEFAULT_BACKEND)
+    parser.add_argument("--backend-executable", default="")
+    parser.add_argument(
+        "--backend-model",
+        default="",
+        help=(
+            "Backend-specific model override. When omitted, non-Codex "
+            "backends use their CLI-configured default model."
+        ),
+    )
     parser.add_argument("--codex", default=DEFAULT_CODEX)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
@@ -231,9 +257,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-actions", action="store_true")
+    parser.add_argument("--list-backends", action="store_true")
     args = parser.parse_args()
-    if not args.list_actions and not args.action:
-        parser.error("--action is required unless --list-actions is used")
+    if not args.list_actions and not args.list_backends and not args.action:
+        parser.error(
+            "--action is required unless --list-actions or --list-backends is used"
+        )
     if args.timeout_seconds < 10:
         parser.error("--timeout-seconds must be at least 10")
     return args
@@ -703,18 +732,25 @@ def parse_keyword_payload(raw_output: str) -> list[str]:
     return keywords[:10]
 
 
-def generate_query_keywords_with_codex(
-    codex: str,
+def generate_query_keywords_with_backend(
+    backend: AgentCliBackend,
+    executable: str,
     project_root: Path,
     model: str,
     service_tier: str,
     question: str,
     stop_file: Path | None = None,
 ) -> tuple[list[str], str]:
-    command = build_codex_command(
-        codex,
+    command = build_backend_command(
+        backend,
+        executable,
         project_root,
-        ACTION_SPECS["vault-retrieval"],
+        "query-keyword-expansion",
+        {
+            "agent": "query-keyword-expansion",
+            "sandbox": "read-only",
+            "writes": False,
+        },
         model,
         "low",
         service_tier,
@@ -744,7 +780,64 @@ Question: {json.dumps(question[:2000], ensure_ascii=False)}
     if completed.returncode != 0:
         return [], completed.stderr.strip() or f"exit code {completed.returncode}"
     keywords = parse_keyword_payload(completed.stdout)
-    return keywords, "" if keywords else "Codex CLI returned no usable keywords"
+    return (
+        keywords,
+        "" if keywords else f"{backend.label} returned no usable keywords",
+    )
+
+
+def generate_query_keywords_with_codex(
+    codex: str,
+    project_root: Path,
+    model: str,
+    service_tier: str,
+    question: str,
+    stop_file: Path | None = None,
+) -> tuple[list[str], str]:
+    """Backward-compatible wrapper for the built-in Codex backend."""
+
+    return generate_query_keywords_with_backend(
+        CODEX_BACKEND,
+        codex,
+        project_root,
+        model,
+        service_tier,
+        question,
+        stop_file,
+    )
+
+
+def build_backend_command(
+    backend: AgentCliBackend,
+    executable: str,
+    project_root: Path,
+    action: str,
+    spec: dict[str, Any],
+    model: str,
+    reasoning_effort: str,
+    service_tier: str,
+    retrieval_mode: str = "vault",
+) -> list[str]:
+    output_schema = (
+        project_root / RETRIEVAL_SCHEMA_RELATIVE_PATH
+        if action == "vault-retrieval"
+        else None
+    )
+    access_policy = build_action_access_policy(action, spec, project_root)
+    request = BackendCommandRequest(
+        action=action,
+        agent=str(spec.get("agent") or ""),
+        project_root=project_root,
+        sandbox=str(spec.get("sandbox") or "read-only"),
+        writes=bool(spec.get("writes")),
+        model=model,
+        reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
+        retrieval_mode=retrieval_mode,
+        output_schema=output_schema,
+        access_policy=access_policy,
+    )
+    return backend.build_command(executable, request)
 
 
 def build_codex_command(
@@ -756,49 +849,35 @@ def build_codex_command(
     service_tier: str,
     retrieval_mode: str = "vault",
 ) -> list[str]:
-    effective_service_tier = (
-        "fast" if service_tier == "fast" and model in FAST_SERVICE_MODELS else "default"
+    """Backward-compatible command helper for existing callers and tests."""
+
+    action = (
+        "vault-retrieval"
+        if spec.get("agent") == "research-vault-retrieval"
+        else "dashboard-action"
     )
-    command = [
+    return build_backend_command(
+        CODEX_BACKEND,
         codex,
-        "exec",
-        "--ephemeral",
-        "--color",
-        "never",
-        "-C",
-        str(project_root),
-        "-s",
-        str(spec["sandbox"]),
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-        "-c",
-        f'service_tier="{effective_service_tier}"',
-    ]
-    if spec.get("agent") == "research-vault-retrieval":
-        retrieval_schema = project_root / RETRIEVAL_SCHEMA_RELATIVE_PATH
-        web_search_mode = "live" if retrieval_mode == "web" else "disabled"
-        command.extend(
-            [
-                "-c",
-                f'web_search="{web_search_mode}"',
-                "--json",
-                "--output-schema",
-                str(retrieval_schema),
-            ]
-        )
-    if model.strip():
-        command.extend(["-m", model.strip()])
-    command.append("-")
-    return command
+        project_root,
+        action,
+        spec,
+        model,
+        reasoning_effort,
+        service_tier,
+        retrieval_mode,
+    )
 
 
 def emit_dashboard_event(payload: dict[str, Any]) -> None:
+    event = {
+        "schema_version": BACKEND_PROTOCOL_VERSION,
+        **payload,
+    }
     print(
         "DASHBOARD_EVENT "
         + json.dumps(
-            payload,
+            event,
             ensure_ascii=False,
             separators=(",", ":"),
         ),
@@ -842,55 +921,6 @@ def canonicalize_external_url(value: Any) -> str:
             "",
         )
     )
-
-
-def _collect_type_markers(value: Any) -> set[str]:
-    markers: set[str] = set()
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in {"type", "name", "tool_name"} and isinstance(child, str):
-                markers.add(child.lower())
-            elif isinstance(child, (dict, list)):
-                markers.update(_collect_type_markers(child))
-    elif isinstance(value, list):
-        for child in value:
-            markers.update(_collect_type_markers(child))
-    return markers
-
-
-def is_web_search_event(event: dict[str, Any]) -> bool:
-    return any(
-        marker == "web_search"
-        or marker == "web_search_call"
-        or marker.startswith("web_search_")
-        for marker in _collect_type_markers(event)
-    )
-
-
-def collect_web_event_metadata(
-    value: Any,
-    urls: set[str],
-    queries: list[str],
-) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in {"url", "uri"} and isinstance(child, str):
-                canonical = canonicalize_external_url(child)
-                if canonical:
-                    urls.add(canonical)
-            elif key in {"query", "search_query"} and isinstance(child, str):
-                query = child.strip()
-                if query and query not in queries:
-                    queries.append(query[:500])
-            elif key == "queries" and isinstance(child, list):
-                for item in child:
-                    query = str(item or "").strip()
-                    if query and query not in queries:
-                        queries.append(query[:500])
-            collect_web_event_metadata(child, urls, queries)
-    elif isinstance(value, list):
-        for child in value:
-            collect_web_event_metadata(child, urls, queries)
 
 
 def parse_structured_retrieval_payload(value: str) -> dict[str, Any] | None:
@@ -1139,39 +1169,17 @@ def normalize_structured_retrieval_result(
 
 
 def _status_from_codex_event(event: dict[str, Any]) -> dict[str, Any] | None:
-    event_type = str(event.get("type") or "")
-    item = event.get("item") if isinstance(event.get("item"), dict) else {}
-    item_type = str(item.get("type") or "")
-    if is_web_search_event(event):
-        label = (
-            "正在核对联网来源"
-            if event_type.endswith("completed")
-            else "正在执行联网搜索"
-        )
-        return {
-            "type": "status",
-            "stage": "web-search",
-            "label": label,
-        }
-    if event_type == "turn.started":
-        return {
-            "type": "status",
-            "stage": "model-started",
-            "label": "正在调用模型并检查证据",
-        }
-    if item_type in {"command_execution", "mcp_tool_call"}:
-        return {
-            "type": "status",
-            "stage": "reading-evidence",
-            "label": "正在读取并核验候选证据",
-        }
-    if item_type == "agent_message" and event_type.endswith("completed"):
-        return {
-            "type": "status",
-            "stage": "structuring-answer",
-            "label": "正在整理回答与来源",
-        }
-    return None
+    """Backward-compatible Codex status helper."""
+
+    parsed = CODEX_BACKEND.parse_event(event)
+    return next(
+        (
+            dashboard_event
+            for dashboard_event in parsed.dashboard_events
+            if dashboard_event.get("type") == "status"
+        ),
+        None,
+    )
 
 
 def run_retrieval_process(
@@ -1181,6 +1189,7 @@ def run_retrieval_process(
     stdin_text: str,
     retrieval_mode: str,
     stop_file: Path | None = None,
+    backend: AgentCliBackend = CODEX_BACKEND,
 ) -> int:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
@@ -1219,30 +1228,21 @@ def run_retrieval_process(
             except json.JSONDecodeError:
                 with output_lock:
                     print(
-                        f"Codex JSONL parse warning: {line[:500]}",
+                        f"{backend.label} JSONL parse warning: {line[:500]}",
                         file=sys.stderr,
                         flush=True,
                     )
                 continue
             if not isinstance(event, dict):
                 continue
-            if is_web_search_event(event):
-                collect_web_event_metadata(
-                    event,
-                    observed_urls,
-                    observed_queries,
-                )
-            status_event = _status_from_codex_event(event)
-            if status_event:
-                emit(status_event)
-            item = event.get("item")
-            if (
-                str(event.get("type") or "").endswith("completed")
-                and isinstance(item, dict)
-                and item.get("type") == "agent_message"
-                and isinstance(item.get("text"), str)
-            ):
-                final_messages.append(item["text"])
+            parsed = backend.parse_event(event)
+            observed_urls.update(parsed.source_urls)
+            for query in parsed.search_queries:
+                if query not in observed_queries:
+                    observed_queries.append(query)
+            for dashboard_event in parsed.dashboard_events:
+                emit(dashboard_event)
+            final_messages.extend(parsed.final_messages)
 
     def read_stderr() -> None:
         assert process.stderr is not None
@@ -1400,13 +1400,24 @@ def dry_run_payload(
     user_input: str,
     conversation_context: str = "",
     retrieval_mode: str = "vault",
+    backend_id: str = DEFAULT_BACKEND,
+    backend_executable: str = "",
+    backend_model: str = "",
 ) -> dict[str, Any]:
     spec = ACTION_SPECS[action]
     kind = spec.get("kind", "codex")
-    effective_service_tier = (
-        "fast"
-        if service_tier == "fast" and model_value in FAST_SERVICE_MODELS
-        else "default"
+    backend = get_backend(backend_id)
+    executable = backend_executable or codex_value
+    selected_model = (
+        backend_model
+        if backend_model
+        else model_value
+        if backend_id == DEFAULT_BACKEND
+        else ""
+    )
+    effective_service_tier = backend.effective_service_tier(
+        selected_model,
+        service_tier,
     )
     if kind == "validator":
         command = [
@@ -1432,11 +1443,13 @@ def dry_run_payload(
             if action == "vault-retrieval"
             else None
         )
-        command = build_codex_command(
-            codex_value,
+        command = build_backend_command(
+            backend,
+            executable,
             project_root,
+            action,
             spec,
-            model_value,
+            selected_model,
             reasoning_effort,
             effective_service_tier,
             retrieval_mode,
@@ -1456,8 +1469,21 @@ def dry_run_payload(
         "kind": kind,
         "sandbox": spec.get("sandbox", "read-only"),
         "writes": spec["writes"],
+        "access_policy": build_action_access_policy(
+            action,
+            spec,
+            project_root,
+        ).to_payload(),
         "post_validate": bool(spec.get("post_validate")),
-        "model": model_value if kind == "codex" else None,
+        "backend": (
+            {
+                **backend.describe(),
+                "executable": executable,
+            }
+            if kind == "codex"
+            else None
+        ),
+        "model": selected_model if kind == "codex" else None,
         "reasoning_effort": reasoning_effort if kind == "codex" else None,
         "service_tier": effective_service_tier if kind == "codex" else None,
         "retrieval_mode": retrieval_mode if action == "vault-retrieval" else None,
@@ -1469,6 +1495,15 @@ def dry_run_payload(
 def main() -> int:
     configure_utf8_stdio()
     args = parse_args()
+    if args.list_backends:
+        print(
+            json.dumps(
+                list_backends(),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     if args.list_actions:
         print(
             json.dumps(
@@ -1511,6 +1546,9 @@ def main() -> int:
                     user_input,
                     conversation_context,
                     retrieval_mode,
+                    args.backend,
+                    args.backend_executable,
+                    args.backend_model,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -1541,7 +1579,39 @@ def main() -> int:
             stop_file=stop_file,
         )
 
-    codex = resolve_executable(args.codex, "Codex")
+    backend = get_backend(args.backend)
+    if spec.get("writes") and not backend.capabilities.file_write:
+        raise RuntimeError(
+            f"{backend.label} does not declare file-write capability for "
+            f"action {args.action!r}"
+        )
+    if (
+        args.action == "vault-retrieval"
+        and not backend.capabilities.structured_output
+    ):
+        raise RuntimeError(
+            f"{backend.label} does not declare structured-output capability"
+        )
+    if (
+        args.action == "vault-retrieval"
+        and retrieval_mode == "web"
+        and not backend.capabilities.web_search
+    ):
+        raise RuntimeError(
+            f"{backend.label} does not declare live web-search capability"
+        )
+    selected_model = (
+        args.backend_model
+        if args.backend_model
+        else args.model
+        if args.backend == DEFAULT_BACKEND
+        else ""
+    )
+    backend_executable_value = args.backend_executable or args.codex
+    backend_executable = resolve_executable(
+        backend_executable_value,
+        backend.label,
+    )
     retrieval_preflight = None
     if args.action == "vault-retrieval":
         python = resolve_executable(args.python, "Python")
@@ -1558,10 +1628,11 @@ def main() -> int:
                 "No reliable lexical seed; requesting query keyword expansion.",
                 file=sys.stderr,
             )
-            expanded_terms, expansion_error = generate_query_keywords_with_codex(
-                codex,
+            expanded_terms, expansion_error = generate_query_keywords_with_backend(
+                backend,
+                backend_executable,
                 project_root,
-                args.model,
+                selected_model,
                 args.service_tier,
                 user_input,
                 stop_file,
@@ -1579,16 +1650,16 @@ def main() -> int:
                 retrieval_preflight["keyword_expansion"] = {
                     **retrieval_preflight.get("keyword_expansion", {}),
                     "attempted": True,
-                    "provider": "Codex CLI",
-                    "model": args.model,
+                    "provider": backend.label,
+                    "model": selected_model or "CLI default",
                 }
             else:
                 retrieval_preflight["keyword_expansion"] = {
                     "used": False,
                     "attempted": True,
                     "terms": [],
-                    "provider": "Codex CLI",
-                    "model": args.model,
+                    "provider": backend.label,
+                    "model": selected_model or "CLI default",
                     "error": expansion_error,
                 }
         print(
@@ -1599,35 +1670,23 @@ def main() -> int:
             f"fallback={bool(retrieval_preflight.get('fallback', {}).get('used'))}",
             file=sys.stderr,
         )
-        print(
-            "DASHBOARD_EVENT "
-            + json.dumps(
-                {
-                    "type": "retrieval-preflight",
-                    "mode": retrieval_mode,
-                    "payload": retrieval_preflight,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            file=sys.stderr,
+        emit_dashboard_event(
+            {
+                "type": "retrieval-preflight",
+                "mode": retrieval_mode,
+                "payload": retrieval_preflight,
+            }
         )
-        print(
-            "DASHBOARD_EVENT "
-            + json.dumps(
-                {
-                    "type": "status",
-                    "stage": "reading-evidence",
-                    "label": (
-                        "正在读取知识库并检索联网来源"
-                        if retrieval_mode == "web"
-                        else "正在读取候选笔记并生成回答"
-                    ),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            file=sys.stderr,
+        emit_dashboard_event(
+            {
+                "type": "status",
+                "stage": "reading-evidence",
+                "label": (
+                    "正在读取知识库并检索联网来源"
+                    if retrieval_mode == "web"
+                    else "正在读取候选笔记并生成回答"
+                ),
+            }
         )
     prompt = build_prompt(
         args.action,
@@ -1637,11 +1696,13 @@ def main() -> int:
         conversation_context,
         retrieval_mode,
     )
-    command = build_codex_command(
-        codex,
+    command = build_backend_command(
+        backend,
+        backend_executable,
         project_root,
+        args.action,
         spec,
-        args.model,
+        selected_model,
         args.reasoning_effort,
         args.service_tier,
         retrieval_mode,
@@ -1659,6 +1720,7 @@ def main() -> int:
             prompt,
             retrieval_mode,
             stop_file,
+            backend,
         )
     else:
         result = run_process(

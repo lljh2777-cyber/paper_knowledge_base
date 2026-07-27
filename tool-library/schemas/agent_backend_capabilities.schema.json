@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-vault.local/schemas/agent_backend_capabilities.schema.json",
+  "title": "Research Vault CLI Backend Capabilities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "label",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "structured_output",
+        "streaming",
+        "sessions",
+        "model_selection",
+        "reasoning_effort",
+        "service_tier",
+        "file_write",
+        "web_search",
+        "citations",
+        "image_input"
+      ],
+      "properties": {
+        "structured_output": {
+          "type": "boolean"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "sessions": {
+          "type": "boolean"
+        },
+        "model_selection": {
+          "type": "boolean"
+        },
+        "reasoning_effort": {
+          "type": "boolean"
+        },
+        "service_tier": {
+          "type": "boolean"
+        },
+        "file_write": {
+          "type": "boolean"
+        },
+        "web_search": {
+          "type": "boolean"
+        },
+        "citations": {
+          "type": "boolean"
+        },
+        "image_input": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

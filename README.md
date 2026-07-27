@@ -28,7 +28,8 @@ Codex / 自定义智能体
         ▼
 Agent Dashboard（Obsidian 插件）
         │
-        ├── Codex CLI 执行后端
+        ├── CLI Backend Protocol
+        │   └── Codex CLI 参考适配器
         ├── Direct API Provider
         ├── Python/R 本地执行器
         └── 检索、体检和 OKF 确定性脚本
@@ -73,6 +74,8 @@ sources / methods / concepts / code / projects / synthesis
 2. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
+
+CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli` 与 `claude-code`；Claude Code 第一阶段仅支持只读知识库检索与批注解释，可沿用 CC Switch 配置的默认模型。写入任务会在变更清单、路径审计、后置验证和失败恢复完成前被拒绝；OpenCode 尚未接入。
 
 ## Skills 与智能体
 
@@ -266,3 +269,4 @@ Git 默认忽略：
 
 - [AGENTS.md](AGENTS.md)：AI 路由、证据来源、处理深度、目录所有权和安全规则。
 - [Agent Dashboard 源码说明](knowledge-base/.obsidian/plugins/agent-Dashboard/src/README.md)：插件模块结构与构建约束。
+- [CLI 后端适配规范](tool-library/docs/CLI后端适配规范.md)：通用任务、能力、事件和新命令行工具接入要求。

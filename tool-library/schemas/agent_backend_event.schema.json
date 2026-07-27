@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-vault.local/schemas/agent_backend_event.schema.json",
+  "title": "Research Vault CLI Backend Event",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "type"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "task_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "stage": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "mode": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "label": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "delta": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "path": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "exit_code": {
+      "type": "integer"
+    }
+  }
+}

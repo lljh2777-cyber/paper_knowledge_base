@@ -69,6 +69,7 @@ export type TaskRunUpdate = Partial<
 >;
 
 export interface DashboardProcessEvent {
+	schema_version?: string;
 	type: string;
 	stage?: string;
 	mode?: string;

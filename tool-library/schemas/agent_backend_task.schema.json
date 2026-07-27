@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-vault.local/schemas/agent_backend_task.schema.json",
+  "title": "Research Vault CLI Backend Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "action",
+    "prompt",
+    "cwd",
+    "model",
+    "permissions",
+    "timeout_seconds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string"
+    },
+    "reasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "type": "string"
+        },
+        "service_tier": {
+          "type": "string"
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "write_scope",
+        "allowed_roots"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "read-only",
+            "workspace-write"
+          ]
+        },
+        "write_scope": {
+          "enum": [
+            "none",
+            "restricted",
+            "stage-owned",
+            "full"
+          ]
+        },
+        "allowed_roots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "denied_roots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "denied_tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "post_validators": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "require_change_manifest": {
+          "type": "boolean"
+        },
+        "rollback_on_failure": {
+          "type": "boolean"
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "source_note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 14400
+    },
+    "backend_options": {
+      "type": "object"
+    }
+  }
+}
