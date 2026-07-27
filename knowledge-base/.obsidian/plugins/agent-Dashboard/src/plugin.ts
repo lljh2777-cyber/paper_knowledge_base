@@ -295,6 +295,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!this.annotationService) return;
 		this.annotationPopover?.close();
 		const popover = new AnnotationPopover({
+			app: this.app,
 			service: this.annotationService,
 			...options,
 			onArchive: (record) => this.archiveAnnotation(record),

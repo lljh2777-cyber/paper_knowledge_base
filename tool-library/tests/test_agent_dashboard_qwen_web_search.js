@@ -19,8 +19,9 @@ const source = fs.readFileSync(pluginPath, "utf8");
 class ObsidianBase {}
 
 const obsidianStub = {
+	Component: ObsidianBase,
 	ItemView: ObsidianBase,
-	MarkdownRenderer: {},
+	MarkdownRenderer: { render: async () => {} },
 	Modal: ObsidianBase,
 	Notice: class {},
 	Plugin: ObsidianBase,

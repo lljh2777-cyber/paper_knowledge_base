@@ -19,6 +19,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
 		TFileStub = TFile;
 		class FileSystemAdapter extends Base {}
 		return {
+			Component: Base,
 			FileSystemAdapter,
 			ItemView: Base,
 			MarkdownRenderer: { render: async () => {} },

@@ -17,6 +17,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
 		class FileSystemAdapter extends Base {}
 		class SecretComponentStub {}
 		return {
+			Component: Base,
 			FileSystemAdapter,
 			ItemView: Base,
 			MarkdownRenderer: { render: async () => {} },

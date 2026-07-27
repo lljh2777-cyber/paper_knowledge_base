@@ -3590,7 +3590,16 @@
 	font-family: var(--font-text);
 	font-size: var(--font-ui-small);
 	line-height: 1.65;
-	white-space: pre-wrap;
+}
+
+.agent-annotation-ai-result > :first-child,
+.agent-annotation-section-content > :first-child {
+	margin-top: 0;
+}
+
+.agent-annotation-ai-result > :last-child,
+.agent-annotation-section-content > :last-child {
+	margin-bottom: 0;
 }
 
 .agent-annotation-model {

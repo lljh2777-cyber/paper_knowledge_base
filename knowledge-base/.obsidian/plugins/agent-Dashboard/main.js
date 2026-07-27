@@ -5129,14 +5129,16 @@ function displayError(error) {
 function sectionLabel(value) {
   return value.trim() || "当前段落";
 }
-var AnnotationPopover = class {
+var AnnotationPopover = class extends import_obsidian10.Component {
   constructor(options) {
+    super();
     this.element = null;
     this.cancelGeneration = null;
     this.generationVersion = 0;
     this.closed = true;
     this.outsideListener = null;
     this.keyListener = null;
+    this.app = options.app;
     this.service = options.service;
     this.anchorRect = options.anchorRect;
     this.selection = options.selection;
@@ -5146,6 +5148,7 @@ var AnnotationPopover = class {
   }
   open() {
     this.close();
+    this.load();
     this.closed = false;
     this.element = document.body.createDiv({
       cls: "agent-annotation-popover",
@@ -5188,6 +5191,7 @@ var AnnotationPopover = class {
     }
     this.element?.remove();
     this.element = null;
+    this.unload();
     if (!this.closed) {
       this.closed = true;
       this.onClose?.();
@@ -5303,10 +5307,10 @@ var AnnotationPopover = class {
   renderExplanationResult(explanation) {
     const element = this.reset();
     this.renderHeader(element, this.selection?.selectedText || "", "AI 解释");
-    element.createDiv({
-      cls: "agent-annotation-ai-result markdown-rendered",
-      text: explanation.text
-    });
+    this.renderMarkdown(
+      element.createDiv({ cls: "agent-annotation-ai-result markdown-rendered" }),
+      explanation.text
+    );
     const model = element.createDiv({ cls: "agent-annotation-model" });
     model.createSpan({ text: explanation.provider });
     model.createSpan({ text: explanation.model });
@@ -5524,10 +5528,24 @@ var AnnotationPopover = class {
   renderTextSection(parent, title, content, emptyText) {
     const section = parent.createDiv({ cls: "agent-annotation-section" });
     section.createEl("h4", { text: title });
-    section.createDiv({
-      cls: content ? "agent-annotation-section-content" : "agent-annotation-empty",
-      text: content || emptyText
-    });
+    if (!content) {
+      section.createDiv({ cls: "agent-annotation-empty", text: emptyText });
+      return;
+    }
+    this.renderMarkdown(
+      section.createDiv({ cls: "agent-annotation-section-content markdown-rendered" }),
+      content
+    );
+  }
+  renderMarkdown(parent, markdown) {
+    const sourcePath = this.record?.sourcePath || this.selection?.sourcePath || "";
+    void import_obsidian10.MarkdownRenderer.render(
+      this.app,
+      markdown,
+      parent,
+      sourcePath,
+      this
+    );
   }
   renderFooter(parent) {
     return parent.createDiv({ cls: "agent-annotation-footer" });
@@ -7462,6 +7480,7 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
     if (!this.annotationService) return;
     this.annotationPopover?.close();
     const popover = new AnnotationPopover({
+      app: this.app,
       service: this.annotationService,
       ...options,
       onArchive: (record) => this.archiveAnnotation(record),

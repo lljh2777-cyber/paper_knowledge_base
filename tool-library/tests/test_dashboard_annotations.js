@@ -10,6 +10,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
 	if (request === "obsidian") {
 		class Base {}
 		return {
+			Component: Base,
 			FileSystemAdapter: Base,
 			ItemView: Base,
 			MarkdownRenderer: { render: async () => {} },
@@ -64,6 +65,7 @@ assert.match(pluginSource, /archiveStatus:\s*"pending"/);
 assert.match(popoverSource, /保留并存档/);
 assert.match(popoverSource, /手动批注/);
 assert.match(popoverSource, /AI 解释/);
+assert.match(popoverSource, /MarkdownRenderer\.render/);
 assert.match(popoverSource, /cancel\.addEventListener\("click", \(\) => this\.renderChooser\(\)\)/);
 assert.doesNotMatch(popoverSource, /text:\s*"关闭"/);
 assert.match(styles, /a\.internal-link\[data-href\^="wiki\/annotations\/"\]/);

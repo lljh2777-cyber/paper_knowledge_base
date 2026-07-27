@@ -1,4 +1,10 @@
-import { Notice, setIcon } from "obsidian";
+import {
+	App,
+	Component,
+	MarkdownRenderer,
+	Notice,
+	setIcon,
+} from "obsidian";
 
 import type { AnnotationService } from "./annotation-service";
 import type {
@@ -9,6 +15,7 @@ import type {
 } from "./types";
 
 interface AnnotationPopoverOptions {
+	app: App;
 	service: AnnotationService;
 	anchorRect: DOMRect;
 	selection?: AnnotationSelection;
@@ -25,7 +32,8 @@ function sectionLabel(value: string): string {
 	return value.trim() || "当前段落";
 }
 
-export class AnnotationPopover {
+export class AnnotationPopover extends Component {
+	private readonly app: App;
 	private readonly service: AnnotationService;
 	private readonly anchorRect: DOMRect;
 	private readonly selection?: AnnotationSelection;
@@ -40,6 +48,8 @@ export class AnnotationPopover {
 	private keyListener: ((event: KeyboardEvent) => void) | null = null;
 
 	constructor(options: AnnotationPopoverOptions) {
+		super();
+		this.app = options.app;
 		this.service = options.service;
 		this.anchorRect = options.anchorRect;
 		this.selection = options.selection;
@@ -50,6 +60,7 @@ export class AnnotationPopover {
 
 	open(): void {
 		this.close();
+		this.load();
 		this.closed = false;
 		this.element = document.body.createDiv({
 			cls: "agent-annotation-popover",
@@ -93,6 +104,7 @@ export class AnnotationPopover {
 		}
 		this.element?.remove();
 		this.element = null;
+		this.unload();
 		if (!this.closed) {
 			this.closed = true;
 			this.onClose?.();
@@ -216,10 +228,10 @@ export class AnnotationPopover {
 	private renderExplanationResult(explanation: AnnotationExplanation): void {
 		const element = this.reset();
 		this.renderHeader(element, this.selection?.selectedText || "", "AI 解释");
-		element.createDiv({
-			cls: "agent-annotation-ai-result markdown-rendered",
-			text: explanation.text,
-		});
+		this.renderMarkdown(
+			element.createDiv({ cls: "agent-annotation-ai-result markdown-rendered" }),
+			explanation.text,
+		);
 		const model = element.createDiv({ cls: "agent-annotation-model" });
 		model.createSpan({ text: explanation.provider });
 		model.createSpan({ text: explanation.model });
@@ -460,10 +472,25 @@ export class AnnotationPopover {
 	): void {
 		const section = parent.createDiv({ cls: "agent-annotation-section" });
 		section.createEl("h4", { text: title });
-		section.createDiv({
-			cls: content ? "agent-annotation-section-content" : "agent-annotation-empty",
-			text: content || emptyText,
-		});
+		if (!content) {
+			section.createDiv({ cls: "agent-annotation-empty", text: emptyText });
+			return;
+		}
+		this.renderMarkdown(
+			section.createDiv({ cls: "agent-annotation-section-content markdown-rendered" }),
+			content,
+		);
+	}
+
+	private renderMarkdown(parent: HTMLElement, markdown: string): void {
+		const sourcePath = this.record?.sourcePath || this.selection?.sourcePath || "";
+		void MarkdownRenderer.render(
+			this.app,
+			markdown,
+			parent,
+			sourcePath,
+			this,
+		);
 	}
 
 	private renderFooter(parent: HTMLElement): HTMLDivElement {
