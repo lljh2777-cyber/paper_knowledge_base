@@ -9,6 +9,7 @@ const commands = [
 	[process.execPath, ["tool-library/tests/test_dashboard_providers.js"]],
 	[process.execPath, ["tool-library/tests/test_agent_dashboard_qwen_web_search.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_query_view.js"]],
+	[process.execPath, ["tool-library/tests/test_dashboard_annotations.js"]],
 	[python, ["-m", "unittest", "discover", "-s", "tool-library/tests", "-p", "test_*.py"]],
 ];
 

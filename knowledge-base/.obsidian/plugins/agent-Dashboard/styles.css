@@ -3406,3 +3406,283 @@
 		transition-duration: 0.01ms;
 	}
 }
+.markdown-rendered a.internal-link[data-href^="wiki/annotations/"][data-href*="#^ann-"] {
+	border-bottom: 2px solid color-mix(in srgb, var(--interactive-accent), transparent 35%);
+	border-radius: 2px;
+	background: color-mix(in srgb, var(--interactive-accent), transparent 88%);
+	color: inherit;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.markdown-rendered a.internal-link[data-href^="wiki/annotations/"][data-href*="#^ann-"]:hover {
+	background: color-mix(in srgb, var(--interactive-accent), transparent 78%);
+	color: var(--text-normal);
+}
+
+.agent-annotation-popover {
+	position: fixed;
+	z-index: var(--layer-popover, 1000);
+	display: flex;
+	max-height: min(620px, calc(100vh - 24px));
+	flex-direction: column;
+	overflow: auto;
+	padding: 14px;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: 8px;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-l);
+	color: var(--text-normal);
+	font-family: var(--font-interface);
+	user-select: text;
+}
+
+.agent-annotation-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding-bottom: 11px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.agent-annotation-header > div {
+	display: grid;
+	min-width: 0;
+	gap: 3px;
+}
+
+.agent-annotation-header strong {
+	overflow: hidden;
+	font-family: var(--font-text);
+	font-size: 15px;
+	line-height: 1.45;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.agent-annotation-header span {
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.agent-annotation-header button {
+	flex: 0 0 auto;
+}
+
+.agent-annotation-choice-list {
+	display: grid;
+	gap: 9px;
+	padding: 12px 0 2px;
+}
+
+.agent-annotation-choice {
+	display: grid;
+	grid-template-columns: 36px minmax(0, 1fr);
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	min-height: 66px;
+	padding: 10px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	text-align: left;
+}
+
+.agent-annotation-choice:hover,
+.agent-annotation-choice:focus-visible {
+	border-color: var(--interactive-accent);
+	background: var(--background-modifier-hover);
+}
+
+.agent-annotation-choice-icon {
+	display: inline-grid;
+	width: 32px;
+	height: 32px;
+	place-items: center;
+	border-radius: 6px;
+	background: var(--background-modifier-hover);
+	color: var(--interactive-accent);
+}
+
+.agent-annotation-choice > div {
+	display: grid;
+	gap: 3px;
+}
+
+.agent-annotation-choice strong {
+	font-size: 14px;
+}
+
+.agent-annotation-choice div span {
+	color: var(--text-muted);
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.agent-annotation-editor,
+.agent-annotation-field textarea {
+	box-sizing: border-box;
+	width: 100%;
+	min-height: 130px;
+	margin-top: 12px;
+	padding: 10px 11px;
+	resize: vertical;
+	font-family: var(--font-text);
+	line-height: 1.55;
+}
+
+.agent-annotation-field {
+	display: grid;
+	gap: 5px;
+	margin-top: 12px;
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.agent-annotation-field textarea {
+	margin-top: 0;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+}
+
+.agent-annotation-field-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.agent-annotation-field-header button {
+	padding: 3px 8px;
+	font-size: 11px;
+}
+
+.agent-annotation-loading {
+	display: flex;
+	min-height: 120px;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	color: var(--text-muted);
+}
+
+.agent-annotation-spinner {
+	width: 16px;
+	height: 16px;
+	border: 2px solid var(--background-modifier-border);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	animation: agent-annotation-spin 0.8s linear infinite;
+}
+
+@keyframes agent-annotation-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.agent-annotation-ai-result,
+.agent-annotation-section-content {
+	padding: 12px 2px 4px;
+	font-family: var(--font-text);
+	font-size: var(--font-ui-small);
+	line-height: 1.65;
+	white-space: pre-wrap;
+}
+
+.agent-annotation-model {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding-top: 8px;
+}
+
+.agent-annotation-model span {
+	padding: 2px 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: 10px;
+}
+
+.agent-annotation-section {
+	padding: 12px 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.agent-annotation-section h4 {
+	margin: 0;
+	font-size: 13px;
+}
+
+.agent-annotation-empty {
+	padding-top: 8px;
+	color: var(--text-faint);
+	font-size: 12px;
+}
+
+.agent-annotation-archive-state {
+	display: grid;
+	gap: 6px;
+	padding: 11px 0 3px;
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.agent-annotation-targets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.agent-annotation-targets button {
+	padding: 3px 7px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-secondary);
+	color: var(--link-color);
+	font-size: 11px;
+}
+
+.agent-annotation-footer {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+	padding-top: 13px;
+}
+
+.agent-annotation-footer button {
+	min-width: 68px;
+}
+
+.agent-annotation-archive-button {
+	border-color: color-mix(in srgb, var(--color-green), transparent 45%);
+	color: var(--color-green);
+}
+
+.agent-annotation-error {
+	margin-top: 12px;
+	padding: 10px;
+	border-left: 3px solid var(--color-red);
+	background: color-mix(in srgb, var(--color-red), transparent 92%);
+	color: var(--text-error);
+	font-size: 12px;
+	line-height: 1.55;
+	white-space: pre-wrap;
+}
+
+@media (max-width: 520px) {
+	.agent-annotation-popover {
+		right: 8px !important;
+		bottom: 8px !important;
+		left: 8px !important;
+		top: auto !important;
+		width: auto !important;
+		max-height: min(70vh, 620px);
+	}
+}

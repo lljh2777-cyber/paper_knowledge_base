@@ -127,6 +127,24 @@ preserve processing-depth limits, and update the indexes/logs owned by this
 stage. Do not perform first-pass source intake or conversion.
 """,
     },
+    "annotation-explain": {
+        "label": "AI 批注解释",
+        "agent": "annotation-assistant",
+        "sandbox": "read-only",
+        "input_required": True,
+        "writes": False,
+        "instructions": """
+Explain the selected word, phrase, or sentence in the supplied paragraph and
+article context. The purpose is immediate reading comprehension, not a
+cross-paper synthesis. Do not modify files, search the vault, create knowledge
+nodes, or produce workflow reporting. Use concise Simplified Chinese and do
+not expose internal reasoning.
+""",
+        "completion_instruction": """
+Return only the user-facing explanation. Do not include a completion report,
+file list, evidence-depth report, or skipped-step summary.
+""",
+    },
     "vault-lint": {
         "label": "知识库体检",
         "agent": "research-vault-lint",
@@ -566,6 +584,16 @@ paper", or "explain further". Previous assistant answers are not vault
 evidence. Re-check the current question against directly inspected vault notes.
 """
 
+    completion_instruction = spec.get(
+        "completion_instruction",
+        """
+At completion, report files created or updated, indexes/logs updated or
+deliberately skipped, evidence source and processing depth, unresolved gaps,
+and skipped steps. Do not ask a follow-up question unless the task cannot
+proceed safely without information that is absent from the request.
+""",
+    )
+
     return f"""You are executing a Research Vault dashboard action in:
 {project_root}
 
@@ -584,10 +612,7 @@ User request:
 {request}
 {retrieval_block}
 
-At completion, report files created or updated, indexes/logs updated or
-deliberately skipped, evidence source and processing depth, unresolved gaps,
-and skipped steps. Do not ask a follow-up question unless the task cannot
-proceed safely without information that is absent from the request.
+{completion_instruction.strip()}
 """
 
 

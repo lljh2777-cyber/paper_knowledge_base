@@ -14,6 +14,7 @@
 - **透明检索**：使用“词法种子 → 图扩展 → 无匹配回退”的只读检索级联，展示实际检查过的 Vault 页面。
 - **质量控制**：检查 frontmatter、链接、孤立页、索引、证据深度、代码关系和 OKF 导出状态。
 - **本地代码练习**：在 Obsidian 中使用 Python/R 单元格，逐格运行、查看输出、停止任务并保存练习笔记。
+- **文中批注**：在阅读视图中选中文字后使用 `Shift+S` 添加手动批注或 AI 初步解释，并可继续归档为正式知识节点。
 - **开放导出**：将 `knowledge-base/wiki/` 导出为 Open Knowledge Format v0.1 bundle。
 
 ## 系统组成
@@ -46,7 +47,7 @@ sources / methods / concepts / code / projects / synthesis
 
 ## Agent Dashboard
 
-仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.22.0`。
+仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.23.0`。
 
 操作中心提供以下入口：
 
@@ -61,6 +62,8 @@ sources / methods / concepts / code / projects / synthesis
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
 | 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
+
+阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。
 
 ### 模型后端
 

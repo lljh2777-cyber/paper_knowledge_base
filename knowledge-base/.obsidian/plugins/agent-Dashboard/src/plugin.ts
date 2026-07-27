@@ -1,5 +1,7 @@
 import {
 	FileSystemAdapter,
+	Menu,
+	Notice,
 	Plugin,
 	TFile,
 	normalizePath,
@@ -27,6 +29,9 @@ import { AgentDashboardSettingTab } from "./settings/settings-tab";
 import { CodePracticeView } from "./views/code-practice";
 import { DashboardView } from "./views/dashboard";
 import { QueryWikiView } from "./views/query-wiki";
+import { AnnotationPopover } from "./annotations/annotation-popover";
+import { AnnotationService } from "./annotations/annotation-service";
+import type { AnnotationRecord, AnnotationSelection } from "./annotations/types";
 import {
 	CODE_PRACTICE_VIEW_TYPE,
 	MAX_QUERY_IMAGE_ATTACHMENTS,
@@ -164,6 +169,8 @@ export default class AgentDashboardPlugin extends Plugin {
 		readEvidencePacket: (trace) => this.readVaultEvidencePacket(trace),
 		readVaultImageData: (attachment) => this.readVaultImageData(attachment),
 	});
+	private annotationService?: AnnotationService;
+	private annotationPopover: AnnotationPopover | null = null;
 	private persistence?: DashboardPersistence;
 
 	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
@@ -195,6 +202,7 @@ export default class AgentDashboardPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		this.getPersistence();
+		this.annotationService = new AnnotationService(this.app, this);
 		this.lastContextFile = this.app.workspace.getActiveFile();
 		await this.loadSettings();
 		this.recoverInterruptedPracticeRuns();
@@ -204,6 +212,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("file-open", (file) => {
 			if (file?.extension === "md") this.lastContextFile = file;
 		}));
+		this.registerMarkdownPostProcessor((element, context) => {
+			this.annotationService?.decorateMarkdownSection(element, context);
+		});
+		this.registerDomEvent(document, "click", (event) => {
+			void this.handleAnnotationLinkClick(event);
+		}, { capture: true });
 		this.addRibbonIcon("layout-dashboard", "打开研究知识库控制台", () => {
 			this.activateDashboardView();
 		});
@@ -229,12 +243,238 @@ export default class AgentDashboardPlugin extends Plugin {
 				this.activateQueryWikiView();
 			},
 		});
+		this.addCommand({
+			id: "annotate-selected-text",
+			name: "批注所选文字",
+			hotkeys: [{ modifiers: ["Shift"], key: "S" }],
+			checkCallback: (checking) => {
+				if (!this.annotationService?.canCaptureSelection()) return false;
+				if (!checking) void this.openSelectionAnnotation();
+				return true;
+			},
+		});
 		this.addSettingTab(new AgentDashboardSettingTab(this.app, this));
 	}
 
 	onunload(): void {
+		this.annotationPopover?.close();
 		void this.flushScheduledSettingsSave();
 		this.processExecution.shutdown();
+	}
+
+	getDashboardAction(actionId: string): DashboardAction | null {
+		return ACTION_BY_ID.get(actionId) || null;
+	}
+
+	private async openSelectionAnnotation(): Promise<void> {
+		if (!this.annotationService) return;
+		try {
+			const selection = await this.annotationService.captureSelection();
+			this.openAnnotationPopover({
+				anchorRect: selection.anchorRect,
+				selection,
+			});
+		} catch (error) {
+			new Notice(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private openAnnotationPopover(options: {
+		anchorRect: DOMRect;
+		selection?: AnnotationSelection;
+		record?: AnnotationRecord;
+	}): void {
+		if (!this.annotationService) return;
+		this.annotationPopover?.close();
+		const popover = new AnnotationPopover({
+			service: this.annotationService,
+			...options,
+			onArchive: (record) => this.archiveAnnotation(record),
+			onClose: () => {
+				if (this.annotationPopover === popover) this.annotationPopover = null;
+			},
+		});
+		this.annotationPopover = popover;
+		popover.open();
+	}
+
+	private async handleAnnotationLinkClick(event: MouseEvent): Promise<void> {
+		if (!this.annotationService || event.button !== 0) return;
+		const target = event.target instanceof Element
+			? event.target.closest<HTMLAnchorElement>("a.internal-link")
+			: null;
+		if (!target) return;
+		const rawHref = String(target.dataset.href || target.getAttribute("href") || "");
+		let href = rawHref;
+		try {
+			href = decodeURIComponent(rawHref);
+		} catch {
+			href = rawHref;
+		}
+		href = href.replace(/^app:\/\/obsidian\.md\//, "").replace(/^\/+/, "");
+		const match = /^(wiki\/annotations\/[^#]+?)(?:\.md)?#\^(ann-[a-z0-9-]+)$/i.exec(href);
+		if (!match) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const record = await this.annotationService.loadAnnotation(match[1], match[2]);
+		if (!record) {
+			new Notice("未找到对应的批注记录");
+			return;
+		}
+		if (event.ctrlKey || event.metaKey) {
+			if (!record.archiveTargets.length) {
+				new Notice("该批注尚未关联正式知识节点");
+				return;
+			}
+			if (record.archiveTargets.length === 1) {
+				await this.annotationService.openArchiveTarget(record, record.archiveTargets[0]);
+				return;
+			}
+			const menu = new Menu();
+			record.archiveTargets.forEach((archiveTarget) => {
+				menu.addItem((item) => {
+					item
+						.setTitle(archiveTarget.split("/").pop() || archiveTarget)
+						.setIcon("file-text")
+						.onClick(() => {
+							void this.annotationService?.openArchiveTarget(record, archiveTarget);
+						});
+				});
+			});
+			menu.showAtMouseEvent(event);
+			return;
+		}
+		if (event.shiftKey) {
+			await this.annotationService.openAnnotationDocument(record);
+			return;
+		}
+		this.openAnnotationPopover({
+			anchorRect: target.getBoundingClientRect(),
+			record,
+		});
+	}
+
+	private async archiveAnnotation(record: AnnotationRecord): Promise<void> {
+		if (!this.annotationService) return;
+		const action = ACTION_BY_ID.get("synthesis");
+		if (!action) {
+			new Notice("综合分析操作未注册");
+			return;
+		}
+		if (this.isActionRunning(action.id)) {
+			await this.annotationService.updateArchiveState(record, {
+				archiveStatus: "failed",
+				archiveError: "综合分析正在运行，请稍后重试",
+			});
+			new Notice("综合分析正在运行，批注已保留但尚未归档");
+			return;
+		}
+		const executionConfig = this.resolveActionExecutionConfig(action);
+		const run = await this.startTaskRun(
+			action,
+			`归档批注：${record.selectedText.slice(0, 80)}`,
+			executionConfig,
+		);
+		record = await this.annotationService.updateArchiveState(record, {
+			archiveStatus: "pending",
+			archiveRunId: run.id,
+			archiveError: "",
+		});
+		new Notice("批注已保留，正在交给综合分析归档");
+		const request = [
+			"处理一条由 Agent Dashboard 批注功能提交的正式知识归档请求。",
+			`批注文档：${record.annotationPath}#^${record.id}`,
+			`来源文档：${record.sourcePath}`,
+			record.section ? `所在章节：${record.section}` : "",
+			`选中文字：${record.selectedText}`,
+			"",
+			"初步解释：",
+			record.aiText,
+			"",
+			"请检查来源文档、现有 source note、method、concept、dataset、entity、代码笔记和索引。",
+			"判断该内容适合归入哪类正式知识节点；优先更新已有规范节点，只有不存在合适节点时才创建新节点。",
+			"区分来源文档证据、一般背景和未解决问题，并按 research-vault-synthesis 的规则更新拥有的索引与日志。",
+			"不要修改批注文档，Dashboard 会在任务完成后写回关联。",
+			"",
+			"最终回答最后一行必须严格使用以下格式，列出本次创建或更新的知识节点路径（相对 Obsidian vault 根目录、不带 .md）：",
+			'ANNOTATION_ARCHIVE_TARGETS: ["wiki/methods/example"]',
+		].filter(Boolean).join("\n");
+		try {
+			const result = await this.runVaultAction(
+				run.id,
+				action,
+				request,
+				executionConfig,
+			);
+			const output = [
+				result.stdout.trim(),
+				result.stderr.trim() ? `运行日志\n${result.stderr.trim()}` : "",
+			].filter(Boolean).join("\n\n").slice(0, 120000);
+			const processSucceeded = result.exitCode === 0;
+			const archiveTargets = processSucceeded
+				? this.parseAnnotationArchiveTargets(result.stdout)
+				: [];
+			const integrationError = processSucceeded && !archiveTargets.length
+				? "综合分析已完成，但没有返回可关联的知识节点路径"
+				: "";
+			const success = processSucceeded && !integrationError;
+			await this.finishTaskRun(run.id, {
+				status: success ? "done" : result.exitCode === 130 ? "interrupted" : "failed",
+				exitCode: result.exitCode,
+				output,
+				error: success
+					? ""
+					: integrationError || `进程退出码：${result.exitCode}`,
+			});
+			if (!processSucceeded) {
+				throw new Error(result.stderr.trim() || `综合分析退出码：${result.exitCode}`);
+			}
+			if (integrationError) throw new Error(integrationError);
+			await this.annotationService.updateArchiveState(record, {
+				archiveStatus: "completed",
+				archiveTargets,
+				archiveError: "",
+			});
+			new Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const task = this.getTaskRun(run.id);
+			if (task?.status === "running") {
+				await this.finishTaskRun(run.id, {
+					status: "failed",
+					exitCode: null,
+					output: "",
+					error: message,
+				});
+			}
+			await this.annotationService.updateArchiveState(record, {
+				archiveStatus: "failed",
+				archiveError: message.slice(0, 500),
+			});
+			new Notice(`批注已保留，但归档失败：${message}`);
+		}
+	}
+
+	private parseAnnotationArchiveTargets(output: string): string[] {
+		const match = /ANNOTATION_ARCHIVE_TARGETS:\s*(\[[^\r\n]*\])/i.exec(output);
+		if (!match) return [];
+		try {
+			const values = JSON.parse(match[1]) as unknown;
+			if (!Array.isArray(values)) return [];
+			return [...new Set(values
+				.map((value) => String(value || "")
+					.trim()
+					.replace(/^\[\[/, "")
+					.replace(/\]\]$/, "")
+					.split("|", 1)[0]
+					.replace(/^knowledge-base\//, "")
+					.replace(/\.md$/i, "")
+					.replace(/^\/+/, ""))
+				.filter((value) => /^wiki\/(methods|concepts|datasets|entities|projects|mocs|synthesis)\//.test(value))
+			)];
+		} catch {
+			return [];
+		}
 	}
 
 	createPracticeRunId(): string {

@@ -219,6 +219,7 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
     code/               # static code project and script notes
       projects/         # one page per code project
       scripts/          # script pages grouped by project slug
+    annotations/        # per-document reading annotations and AI explanations
     r/                  # reusable R learning and practice notes
       packages/         # one hub page per R package
       functions/        # important functions or function families

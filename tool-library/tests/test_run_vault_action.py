@@ -162,6 +162,22 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
 
+    def test_annotation_explanation_is_read_only_and_returns_only_explanation(
+        self,
+    ) -> None:
+        prompt = run_vault_action.build_prompt(
+            "annotation-explain",
+            "选中文字：spatial proximity\n上下文：chromosome territories",
+            Path("D:/vault"),
+        )
+        spec = run_vault_action.ACTION_SPECS["annotation-explain"]
+
+        self.assertEqual(spec["sandbox"], "read-only")
+        self.assertFalse(spec["writes"])
+        self.assertIn("immediate reading comprehension", prompt)
+        self.assertIn("Return only the user-facing explanation", prompt)
+        self.assertNotIn("files created or updated", prompt)
+
     def test_keyword_payload_parser_accepts_json_and_deduplicates(self) -> None:
         keywords = run_vault_action.parse_keyword_payload(
             '```json\n{"keywords":["SingleR","细胞注释","singler",""]}\n```'

@@ -10,6 +10,7 @@ src/main.ts                  Strict, minimal plugin entry point
 src/plugin.ts                Strict composition root and Obsidian lifecycle shell
 src/actions.ts               Dashboard action registry and action-level model defaults
 src/config.ts                Stable view IDs, limits, model options, provider definitions
+src/annotations/             Reading-view selection, annotation Markdown, popover, and archive handoff
 src/modals/                  Action input, task result, practice-note, and image-picker dialogs
 src/providers/adapters.ts    Direct API and Codex CLI provider implementations
 src/providers/http-transport.ts
@@ -36,6 +37,11 @@ All source modules, including `src/plugin.ts`, use strict TypeScript. The plugin
 class is the Obsidian composition root; provider transport, Direct API query
 orchestration, runtime process handles, and save queues are owned by focused
 services.
+
+Reading-view annotations are stored as ordinary Markdown under
+`wiki/annotations/`. Source text links to a stable annotation block ID, while
+the plugin intercepts normal, Ctrl/Cmd, and Shift clicks for the popover,
+archived knowledge targets, and the underlying annotation document.
 
 Build constraints:
 

@@ -113,6 +113,19 @@ var ACTIONS = [
     reasoningEffort: "high"
   },
   {
+    id: "annotation-explain",
+    label: "AI 批注解释",
+    agent: "annotation-assistant",
+    description: "结合选中文字、当前段落和文章语境生成简短的初步解释；只读且不创建知识节点。",
+    placeholder: "",
+    requiresInput: true,
+    writes: false,
+    enabled: true,
+    showInRail: false,
+    ai: true,
+    reasoningEffort: "medium"
+  },
+  {
     id: "vault-lint",
     label: "知识库体检",
     agent: "research-vault-lint",
@@ -5108,6 +5121,1016 @@ ${result.stderr.trim()}` : ""
   }
 };
 
+// src/annotations/annotation-popover.ts
+var import_obsidian10 = require("obsidian");
+function displayError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function sectionLabel(value) {
+  return value.trim() || "当前段落";
+}
+var AnnotationPopover = class {
+  constructor(options) {
+    this.element = null;
+    this.cancelGeneration = null;
+    this.closed = true;
+    this.outsideListener = null;
+    this.keyListener = null;
+    this.service = options.service;
+    this.anchorRect = options.anchorRect;
+    this.selection = options.selection;
+    this.record = options.record;
+    this.onArchive = options.onArchive;
+    this.onClose = options.onClose;
+  }
+  open() {
+    this.close();
+    this.closed = false;
+    this.element = document.body.createDiv({
+      cls: "agent-annotation-popover",
+      attr: {
+        role: "dialog",
+        "aria-label": "文字批注"
+      }
+    });
+    this.outsideListener = (event) => {
+      if (!this.element?.contains(event.target)) this.requestClose();
+    };
+    this.keyListener = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.requestClose();
+      }
+    };
+    window.setTimeout(() => {
+      if (this.closed) return;
+      document.addEventListener("pointerdown", this.outsideListener, true);
+      document.addEventListener("keydown", this.keyListener, true);
+    }, 0);
+    if (this.record) this.renderExisting();
+    else this.renderChooser();
+  }
+  close() {
+    if (this.cancelGeneration) {
+      this.cancelGeneration();
+      this.cancelGeneration = null;
+    }
+    if (this.outsideListener) {
+      document.removeEventListener("pointerdown", this.outsideListener, true);
+      this.outsideListener = null;
+    }
+    if (this.keyListener) {
+      document.removeEventListener("keydown", this.keyListener, true);
+      this.keyListener = null;
+    }
+    this.element?.remove();
+    this.element = null;
+    if (!this.closed) {
+      this.closed = true;
+      this.onClose?.();
+    }
+  }
+  requestClose() {
+    if (this.element?.querySelector("textarea[data-dirty='true']") && !window.confirm("存在尚未保存的批注，确定取消吗？")) {
+      return;
+    }
+    this.close();
+  }
+  renderChooser() {
+    const element = this.reset();
+    this.renderHeader(element, this.selection?.selectedText || "", "选择批注方式");
+    const actions = element.createDiv({ cls: "agent-annotation-choice-list" });
+    const manual = actions.createEl("button", {
+      cls: "agent-annotation-choice",
+      attr: { type: "button" }
+    });
+    const manualIcon = manual.createSpan({ cls: "agent-annotation-choice-icon" });
+    (0, import_obsidian10.setIcon)(manualIcon, "square-pen");
+    const manualText = manual.createDiv();
+    manualText.createEl("strong", { text: "手动批注" });
+    manualText.createSpan({ text: "记录自己的理解、疑问或提醒" });
+    const ai = actions.createEl("button", {
+      cls: "agent-annotation-choice",
+      attr: { type: "button" }
+    });
+    const aiIcon = ai.createSpan({ cls: "agent-annotation-choice-icon" });
+    (0, import_obsidian10.setIcon)(aiIcon, "sparkles");
+    const aiText = ai.createDiv();
+    aiText.createEl("strong", { text: "AI 解释" });
+    aiText.createSpan({ text: "结合当前段落和文章语境生成初步解释" });
+    manual.addEventListener("click", () => this.renderManual());
+    ai.addEventListener("click", () => void this.renderExplanation());
+    this.position();
+    window.setTimeout(() => manual.focus(), 0);
+  }
+  renderManual() {
+    const element = this.reset();
+    this.renderHeader(element, this.selection?.selectedText || "", "手动批注");
+    const textarea = element.createEl("textarea", {
+      cls: "agent-annotation-editor",
+      attr: {
+        rows: "7",
+        placeholder: "输入你的批注……"
+      }
+    });
+    textarea.addEventListener("input", () => {
+      textarea.dataset.dirty = textarea.value.trim() ? "true" : "false";
+    });
+    const footer = this.renderFooter(element);
+    const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
+    const save = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "保留",
+      attr: { type: "button" }
+    });
+    cancel.addEventListener("click", () => this.close());
+    const submit = async () => {
+      const manualText = textarea.value.trim();
+      if (!manualText) {
+        new import_obsidian10.Notice("请输入批注内容");
+        textarea.focus();
+        return;
+      }
+      await this.saveNew({ manualText }, save);
+    };
+    save.addEventListener("click", () => void submit());
+    textarea.addEventListener("keydown", (event) => {
+      if (event.ctrlKey && event.key === "Enter") {
+        event.preventDefault();
+        void submit();
+      }
+    });
+    this.position();
+    window.setTimeout(() => textarea.focus(), 0);
+  }
+  async renderExplanation() {
+    if (!this.selection) return;
+    const element = this.reset();
+    this.renderHeader(element, this.selection.selectedText, "AI 解释");
+    const status = element.createDiv({ cls: "agent-annotation-loading" });
+    const spinner = status.createSpan({ cls: "agent-annotation-spinner" });
+    spinner.setAttribute("aria-hidden", "true");
+    status.createSpan({ text: "正在结合当前段落生成解释……" });
+    const footer = this.renderFooter(element);
+    const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
+    cancel.addEventListener("click", () => this.close());
+    this.position();
+    try {
+      const explanation = await this.service.generateExplanation(
+        this.selection,
+        (cancelRequest) => {
+          this.cancelGeneration = cancelRequest;
+        }
+      );
+      this.cancelGeneration = null;
+      if (this.closed) return;
+      this.renderExplanationResult(explanation);
+    } catch (error) {
+      this.cancelGeneration = null;
+      if (this.closed) return;
+      this.renderFailure("AI 解释失败", displayError(error), () => void this.renderExplanation());
+    }
+  }
+  renderExplanationResult(explanation) {
+    const element = this.reset();
+    this.renderHeader(element, this.selection?.selectedText || "", "AI 解释");
+    element.createDiv({
+      cls: "agent-annotation-ai-result markdown-rendered",
+      text: explanation.text
+    });
+    const model = element.createDiv({ cls: "agent-annotation-model" });
+    model.createSpan({ text: explanation.provider });
+    model.createSpan({ text: explanation.model });
+    const footer = this.renderFooter(element);
+    const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
+    const save = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "保留",
+      attr: { type: "button" }
+    });
+    const archive = footer.createEl("button", {
+      cls: "agent-annotation-archive-button",
+      text: "保留并存档",
+      attr: { type: "button" }
+    });
+    cancel.addEventListener("click", () => this.close());
+    const draft = {
+      aiText: explanation.text,
+      aiProvider: explanation.provider,
+      aiModel: explanation.model
+    };
+    save.addEventListener("click", () => void this.saveNew(draft, save));
+    archive.addEventListener("click", async () => {
+      const record = await this.saveNew(draft, archive, false);
+      if (!record) return;
+      this.close();
+      void this.onArchive(record);
+    });
+    this.position();
+    window.setTimeout(() => save.focus(), 0);
+  }
+  renderExisting() {
+    if (!this.record) return;
+    const element = this.reset();
+    this.renderHeader(element, this.record.selectedText, sectionLabel(this.record.section));
+    this.renderTextSection(element, "手动批注", this.record.manualText, "暂无手动批注");
+    this.renderTextSection(element, "AI 解释", this.record.aiText, "暂无 AI 解释");
+    if (this.record.archiveStatus !== "none" || this.record.archiveTargets.length) {
+      const archive = element.createDiv({ cls: "agent-annotation-archive-state" });
+      archive.createEl("strong", {
+        text: {
+          pending: "正在归档",
+          completed: "已关联知识节点",
+          failed: "归档失败",
+          none: "未归档"
+        }[this.record.archiveStatus]
+      });
+      if (this.record.archiveTargets.length) {
+        const links = archive.createDiv({ cls: "agent-annotation-targets" });
+        this.record.archiveTargets.forEach((target) => {
+          const button = links.createEl("button", {
+            text: target.split("/").pop() || target,
+            attr: { type: "button" }
+          });
+          button.addEventListener("click", () => {
+            void this.service.openArchiveTarget(this.record, target);
+          });
+        });
+      }
+      if (this.record.archiveError) archive.createSpan({ text: this.record.archiveError });
+    }
+    const footer = this.renderFooter(element);
+    const close = footer.createEl("button", { text: "关闭", attr: { type: "button" } });
+    if (this.record.aiText && this.record.archiveStatus !== "pending" && this.record.archiveStatus !== "completed") {
+      const archiveButton = footer.createEl("button", {
+        cls: "agent-annotation-archive-button",
+        text: this.record.archiveStatus === "failed" ? "重新归档" : "归档",
+        attr: { type: "button" }
+      });
+      archiveButton.addEventListener("click", () => {
+        const record = this.record;
+        this.close();
+        void this.onArchive(record);
+      });
+    }
+    const edit = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "修改",
+      attr: { type: "button" }
+    });
+    close.addEventListener("click", () => this.close());
+    edit.addEventListener("click", () => this.renderEditor());
+    this.position();
+  }
+  renderEditor() {
+    if (!this.record) return;
+    const element = this.reset();
+    this.renderHeader(element, this.record.selectedText, "修改批注");
+    const manualLabel = element.createEl("label", { cls: "agent-annotation-field" });
+    manualLabel.createSpan({ text: "手动批注" });
+    const manual = manualLabel.createEl("textarea", { attr: { rows: "5" } });
+    manual.value = this.record.manualText;
+    const aiLabel = element.createEl("label", { cls: "agent-annotation-field" });
+    const aiHeader = aiLabel.createDiv({ cls: "agent-annotation-field-header" });
+    aiHeader.createSpan({ text: "AI 解释" });
+    const regenerate = aiHeader.createEl("button", {
+      text: "重新解释",
+      attr: { type: "button" }
+    });
+    const ai = aiLabel.createEl("textarea", { attr: { rows: "8" } });
+    ai.value = this.record.aiText;
+    const markDirty = (textarea) => {
+      textarea.dataset.dirty = "true";
+    };
+    manual.addEventListener("input", () => markDirty(manual));
+    ai.addEventListener("input", () => markDirty(ai));
+    regenerate.addEventListener("click", () => void this.regenerateExisting(ai, regenerate));
+    const footer = this.renderFooter(element);
+    const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
+    const save = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "保存",
+      attr: { type: "button" }
+    });
+    cancel.addEventListener("click", () => this.renderExisting());
+    const submit = async () => {
+      save.disabled = true;
+      try {
+        this.record = await this.service.updateAnnotation(this.record, {
+          manualText: manual.value,
+          aiText: ai.value,
+          aiProvider: this.record?.aiProvider,
+          aiModel: this.record?.aiModel
+        });
+        new import_obsidian10.Notice("批注已保存");
+        this.renderExisting();
+      } catch (error) {
+        new import_obsidian10.Notice(`保存失败：${displayError(error)}`);
+        save.disabled = false;
+      }
+    };
+    save.addEventListener("click", () => void submit());
+    element.addEventListener("keydown", (event) => {
+      if (event.ctrlKey && event.key === "Enter") {
+        event.preventDefault();
+        void submit();
+      }
+    });
+    this.position();
+    window.setTimeout(() => manual.focus(), 0);
+  }
+  async regenerateExisting(target, button) {
+    if (!this.record) return;
+    if (target.value.trim() && !window.confirm("重新解释会替换当前 AI 解释，是否继续？")) return;
+    button.disabled = true;
+    button.setText("生成中");
+    try {
+      const context = await this.service.getRecordExplanationContext(this.record);
+      const explanation = await this.service.generateExplanation(context, (cancel) => {
+        this.cancelGeneration = cancel;
+      });
+      this.cancelGeneration = null;
+      target.value = explanation.text;
+      target.dataset.dirty = "true";
+      this.record = {
+        ...this.record,
+        aiProvider: explanation.provider,
+        aiModel: explanation.model
+      };
+      button.setText("已生成");
+    } catch (error) {
+      this.cancelGeneration = null;
+      new import_obsidian10.Notice(`重新解释失败：${displayError(error)}`);
+      button.setText("重新解释");
+    } finally {
+      button.disabled = false;
+    }
+  }
+  async saveNew(draft, button, closeAfterSave = true) {
+    if (!this.selection) return null;
+    button.disabled = true;
+    try {
+      const record = await this.service.createAnnotation(this.selection, draft);
+      this.record = record;
+      new import_obsidian10.Notice("批注已保留");
+      if (closeAfterSave) this.close();
+      return record;
+    } catch (error) {
+      new import_obsidian10.Notice(`保存批注失败：${displayError(error)}`);
+      button.disabled = false;
+      return null;
+    }
+  }
+  renderFailure(title, message, retry) {
+    const element = this.reset();
+    this.renderHeader(element, this.selection?.selectedText || this.record?.selectedText || "", title);
+    element.createDiv({ cls: "agent-annotation-error", text: message });
+    const footer = this.renderFooter(element);
+    const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
+    const retryButton = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "重试",
+      attr: { type: "button" }
+    });
+    cancel.addEventListener("click", () => this.close());
+    retryButton.addEventListener("click", retry);
+    this.position();
+  }
+  renderHeader(parent, selectedText, subtitle) {
+    const header = parent.createDiv({ cls: "agent-annotation-header" });
+    const title = header.createDiv();
+    title.createEl("strong", { text: selectedText.slice(0, 120) });
+    title.createSpan({ text: subtitle });
+    const close = header.createEl("button", {
+      cls: "clickable-icon",
+      attr: {
+        type: "button",
+        "aria-label": "关闭"
+      }
+    });
+    (0, import_obsidian10.setIcon)(close, "x");
+    close.addEventListener("click", () => this.requestClose());
+  }
+  renderTextSection(parent, title, content, emptyText) {
+    const section = parent.createDiv({ cls: "agent-annotation-section" });
+    section.createEl("h4", { text: title });
+    section.createDiv({
+      cls: content ? "agent-annotation-section-content" : "agent-annotation-empty",
+      text: content || emptyText
+    });
+  }
+  renderFooter(parent) {
+    return parent.createDiv({ cls: "agent-annotation-footer" });
+  }
+  reset() {
+    if (!this.element) throw new Error("批注小窗尚未打开");
+    this.element.empty();
+    return this.element;
+  }
+  position() {
+    if (!this.element) return;
+    window.requestAnimationFrame(() => {
+      if (!this.element) return;
+      const margin = 12;
+      const gap = 10;
+      const width = Math.min(520, window.innerWidth - margin * 2);
+      this.element.style.width = `${Math.max(300, width)}px`;
+      const box = this.element.getBoundingClientRect();
+      const left = Math.min(
+        Math.max(margin, this.anchorRect.left),
+        Math.max(margin, window.innerWidth - box.width - margin)
+      );
+      let top = this.anchorRect.bottom + gap;
+      if (top + box.height > window.innerHeight - margin) {
+        top = this.anchorRect.top - box.height - gap;
+      }
+      top = Math.max(margin, Math.min(top, window.innerHeight - box.height - margin));
+      this.element.style.left = `${left}px`;
+      this.element.style.top = `${top}px`;
+    });
+  }
+};
+
+// src/annotations/annotation-service.ts
+var import_obsidian11 = require("obsidian");
+var ANNOTATION_FOLDER = "wiki/annotations";
+var BLOCK_START = "<!-- agent-dashboard:annotation-start ";
+var BLOCK_END = "<!-- agent-dashboard:annotation-end ";
+var META_PREFIX = "<!-- agent-dashboard:annotation-meta ";
+var MANUAL_START = "<!-- agent-dashboard:manual-start -->";
+var MANUAL_END = "<!-- agent-dashboard:manual-end -->";
+var AI_START = "<!-- agent-dashboard:ai-start -->";
+var AI_END = "<!-- agent-dashboard:ai-end -->";
+var CONTEXT_LIMIT = 2600;
+var MAX_SELECTION_LENGTH = 600;
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function sanitizeEmbeddedText(value) {
+  return String(value || "").split(BLOCK_START).join("").split(BLOCK_END).join("").split(META_PREFIX).join("").split(MANUAL_START).join("").split(MANUAL_END).join("").split(AI_START).join("").split(AI_END).join("").trim();
+}
+function yamlString(value) {
+  return JSON.stringify(value);
+}
+function normalizeArchiveTarget(value) {
+  return String(value || "").trim().replace(/^\[\[/, "").replace(/\]\]$/, "").split("|", 1)[0].replace(/\.md$/i, "").replace(/^\/+/, "");
+}
+function countOccurrences(content, value) {
+  const offsets = [];
+  let cursor = 0;
+  while (cursor <= content.length - value.length) {
+    const index = content.indexOf(value, cursor);
+    if (index === -1) break;
+    offsets.push(index);
+    cursor = index + Math.max(1, value.length);
+  }
+  return offsets;
+}
+function commonSuffixLength(left, right) {
+  const limit = Math.min(left.length, right.length);
+  let count = 0;
+  while (count < limit && left.charCodeAt(left.length - count - 1) === right.charCodeAt(right.length - count - 1)) {
+    count += 1;
+  }
+  return count;
+}
+function commonPrefixLength(left, right) {
+  const limit = Math.min(left.length, right.length);
+  let count = 0;
+  while (count < limit && left.charCodeAt(count) === right.charCodeAt(count)) count += 1;
+  return count;
+}
+function lineOffset(content, line) {
+  if (line <= 0) return 0;
+  let cursor = 0;
+  let currentLine = 0;
+  while (currentLine < line && cursor < content.length) {
+    const next = content.indexOf("\n", cursor);
+    if (next === -1) return content.length;
+    cursor = next + 1;
+    currentLine += 1;
+  }
+  return cursor;
+}
+function currentHeading(content, offset) {
+  const lines = content.slice(0, offset).split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[index]);
+    if (match) return match[2].replace(/\s+#+\s*$/, "").trim();
+  }
+  return "";
+}
+function isInsideProtectedMarkdown(content, start, end) {
+  const lineStart = content.lastIndexOf("\n", start - 1) + 1;
+  const nextBreak = content.indexOf("\n", end);
+  const lineEnd = nextBreak === -1 ? content.length : nextBreak;
+  const line = content.slice(lineStart, lineEnd);
+  const relativeStart = start - lineStart;
+  const relativeEnd = end - lineStart;
+  const protectedPatterns = [
+    /\[\[[^\]]+\]\]/g,
+    /\[[^\]]+\]\([^)]+\)/g,
+    /`[^`]+`/g
+  ];
+  return protectedPatterns.some((pattern) => {
+    for (const match of line.matchAll(pattern)) {
+      const matchStart = match.index || 0;
+      const matchEnd = matchStart + match[0].length;
+      if (relativeStart < matchEnd && relativeEnd > matchStart) return true;
+    }
+    return false;
+  });
+}
+function parseMeta(raw) {
+  const match = new RegExp(`${escapeRegExp(META_PREFIX)}(\\{[^\\r\\n]*\\}) -->`).exec(raw);
+  if (!match) return null;
+  try {
+    const value = JSON.parse(match[1]);
+    const status = String(value.archiveStatus || "none");
+    return {
+      id: String(value.id || ""),
+      sourcePath: String(value.sourcePath || ""),
+      selectedText: String(value.selectedText || ""),
+      section: String(value.section || ""),
+      aiProvider: String(value.aiProvider || ""),
+      aiModel: String(value.aiModel || ""),
+      createdAt: String(value.createdAt || ""),
+      updatedAt: String(value.updatedAt || ""),
+      archiveStatus: status === "pending" || status === "completed" || status === "failed" ? status : "none",
+      archiveTargets: Array.isArray(value.archiveTargets) ? value.archiveTargets.map(normalizeArchiveTarget).filter(Boolean) : [],
+      archiveRunId: String(value.archiveRunId || ""),
+      archiveError: String(value.archiveError || "")
+    };
+  } catch {
+    return null;
+  }
+}
+function readMarkedSection(raw, start, end) {
+  const startIndex = raw.indexOf(start);
+  if (startIndex === -1) return "";
+  const contentStart = startIndex + start.length;
+  const endIndex = raw.indexOf(end, contentStart);
+  if (endIndex === -1) return "";
+  return raw.slice(contentStart, endIndex).trim();
+}
+var AnnotationService = class {
+  constructor(app, plugin) {
+    this.app = app;
+    this.plugin = plugin;
+  }
+  decorateMarkdownSection(element, context) {
+    if (!context.sourcePath || context.sourcePath.startsWith(`${ANNOTATION_FOLDER}/`)) return;
+    const info = context.getSectionInfo(element);
+    element.dataset.agentAnnotationSource = context.sourcePath;
+    if (info) {
+      element.dataset.agentAnnotationLineStart = String(info.lineStart);
+      element.dataset.agentAnnotationLineEnd = String(info.lineEnd);
+    }
+  }
+  canCaptureSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return false;
+    const range = selection.getRangeAt(0);
+    const element = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+    if (!element) return false;
+    if (!element.closest(".markdown-reading-view, .markdown-preview-view")) return false;
+    if (element.closest("input, textarea, button, pre, code, .agent-annotation-popover")) return false;
+    const source = element.closest("[data-agent-annotation-source]");
+    return Boolean(source?.dataset.agentAnnotationSource);
+  }
+  async captureSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
+      throw new Error("请先在阅读视图中选择需要批注的文字");
+    }
+    const range = selection.getRangeAt(0);
+    const selectedText = selection.toString().trim();
+    if (!selectedText) throw new Error("选区中没有可批注的文字");
+    if (selectedText.length > MAX_SELECTION_LENGTH) {
+      throw new Error(`第一版单次最多批注 ${MAX_SELECTION_LENGTH} 个字符`);
+    }
+    if (/[\r\n|\[\]]/.test(selectedText) || selectedText.includes("-->")) {
+      throw new Error("第一版只支持同一段落内、不含链接控制字符的纯文本选区");
+    }
+    const element = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+    if (!element || !element.closest(".markdown-reading-view, .markdown-preview-view")) {
+      throw new Error("第一版只支持 Markdown 阅读视图中的文字选区");
+    }
+    const block = element.closest("p, li, blockquote, td, th, h1, h2, h3, h4, h5, h6");
+    if (!block || !block.contains(range.startContainer) || !block.contains(range.endContainer)) {
+      throw new Error("第一版只支持同一段落或标题内的选区");
+    }
+    const sectionElement = element.closest("[data-agent-annotation-source]");
+    const sourcePath = String(sectionElement?.dataset.agentAnnotationSource || "");
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof import_obsidian11.TFile) || file.extension !== "md") {
+      throw new Error("无法确定选区对应的 Markdown 文件");
+    }
+    const content = await this.app.vault.read(file);
+    const lineStart = Number.parseInt(
+      String(sectionElement?.dataset.agentAnnotationLineStart || "0"),
+      10
+    );
+    const lineEnd = Number.parseInt(
+      String(sectionElement?.dataset.agentAnnotationLineEnd || ""),
+      10
+    );
+    const segmentStart = lineOffset(content, Number.isFinite(lineStart) ? lineStart : 0);
+    const segmentEnd = Number.isFinite(lineEnd) ? lineOffset(content, lineEnd + 1) : content.length;
+    const segment = content.slice(segmentStart, segmentEnd);
+    let offsets = countOccurrences(segment, selectedText).map((offset) => offset + segmentStart);
+    if (!offsets.length) offsets = countOccurrences(content, selectedText);
+    if (!offsets.length) {
+      throw new Error("选中文字包含 Markdown 渲染差异，第一版无法安全写回原文");
+    }
+    const blockRange = document.createRange();
+    blockRange.selectNodeContents(block);
+    blockRange.setEnd(range.startContainer, range.startOffset);
+    const visiblePrefix = blockRange.toString().replace(/\s+/g, " ").slice(-80);
+    blockRange.selectNodeContents(block);
+    blockRange.setStart(range.endContainer, range.endOffset);
+    const visibleSuffix = blockRange.toString().replace(/\s+/g, " ").slice(0, 80);
+    const ranked = offsets.map((offset) => ({
+      offset,
+      score: commonSuffixLength(
+        content.slice(Math.max(0, offset - 80), offset).replace(/\s+/g, " "),
+        visiblePrefix
+      ) + commonPrefixLength(
+        content.slice(offset + selectedText.length, offset + selectedText.length + 80).replace(/\s+/g, " "),
+        visibleSuffix
+      )
+    })).sort((left, right) => right.score - left.score);
+    if (ranked.length > 1 && ranked[0].score === ranked[1].score) {
+      throw new Error("原文中存在多个相同选区，暂时无法唯一定位，请扩大选区后重试");
+    }
+    const sourceStart = ranked[0].offset;
+    const sourceEnd = sourceStart + selectedText.length;
+    if (isInsideProtectedMarkdown(content, sourceStart, sourceEnd)) {
+      throw new Error("选区位于已有链接或行内代码中，第一版不会改写这类 Markdown");
+    }
+    const contextStart = Math.max(0, sourceStart - Math.floor(CONTEXT_LIMIT / 2));
+    const contextEnd = Math.min(content.length, sourceEnd + Math.floor(CONTEXT_LIMIT / 2));
+    return {
+      sourcePath,
+      selectedText,
+      section: currentHeading(content, sourceStart),
+      context: content.slice(contextStart, contextEnd).trim(),
+      sourceStart,
+      sourceEnd,
+      prefix: content.slice(Math.max(0, sourceStart - 80), sourceStart),
+      suffix: content.slice(sourceEnd, sourceEnd + 80),
+      anchorRect: range.getBoundingClientRect()
+    };
+  }
+  async createAnnotation(selection, draft) {
+    const sourceFile = this.app.vault.getAbstractFileByPath(selection.sourcePath);
+    if (!(sourceFile instanceof import_obsidian11.TFile)) throw new Error("原始 Markdown 文件不存在");
+    await this.ensureFolder(ANNOTATION_FOLDER);
+    const annotationPath = await this.resolveAnnotationPath(sourceFile);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const record = {
+      id: this.createAnnotationId(),
+      annotationPath,
+      sourcePath: selection.sourcePath,
+      selectedText: selection.selectedText,
+      section: selection.section,
+      manualText: sanitizeEmbeddedText(draft.manualText),
+      aiText: sanitizeEmbeddedText(draft.aiText),
+      aiProvider: String(draft.aiProvider || ""),
+      aiModel: String(draft.aiModel || ""),
+      createdAt: now,
+      updatedAt: now,
+      archiveStatus: "none",
+      archiveTargets: [],
+      archiveRunId: "",
+      archiveError: ""
+    };
+    await this.writeRecord(record);
+    try {
+      await this.app.vault.process(sourceFile, (content) => {
+        const location = this.relocateSelection(content, selection);
+        const linkTarget = annotationPath.replace(/\.md$/i, "");
+        const link = `[[${linkTarget}#^${record.id}|${selection.selectedText}]]`;
+        return `${content.slice(0, location.start)}${link}${content.slice(location.end)}`;
+      });
+    } catch (error) {
+      record.archiveError = "批注内容已保存，但原文链接写入失败";
+      await this.writeRecord(record);
+      throw error;
+    }
+    return record;
+  }
+  async updateAnnotation(record, draft) {
+    const latest = await this.loadAnnotation(record.annotationPath, record.id);
+    if (!latest) throw new Error("批注记录不存在或已被修改");
+    const updated = {
+      ...latest,
+      manualText: draft.manualText === void 0 ? latest.manualText : sanitizeEmbeddedText(draft.manualText),
+      aiText: draft.aiText === void 0 ? latest.aiText : sanitizeEmbeddedText(draft.aiText),
+      aiProvider: draft.aiProvider === void 0 ? latest.aiProvider : String(draft.aiProvider || ""),
+      aiModel: draft.aiModel === void 0 ? latest.aiModel : String(draft.aiModel || ""),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await this.writeRecord(updated);
+    return updated;
+  }
+  async updateArchiveState(record, updates) {
+    const latest = await this.loadAnnotation(record.annotationPath, record.id);
+    if (!latest) throw new Error("批注记录不存在");
+    const updated = {
+      ...latest,
+      ...updates,
+      archiveTargets: updates.archiveTargets ? updates.archiveTargets.map(normalizeArchiveTarget).filter(Boolean) : latest.archiveTargets,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await this.writeRecord(updated);
+    return updated;
+  }
+  async loadAnnotation(annotationPath, annotationId) {
+    const normalizedPath = (0, import_obsidian11.normalizePath)(
+      annotationPath.endsWith(".md") ? annotationPath : `${annotationPath}.md`
+    );
+    const file = this.app.vault.getAbstractFileByPath(normalizedPath);
+    if (!(file instanceof import_obsidian11.TFile)) return null;
+    const content = await this.app.vault.read(file);
+    const block = this.findRecordBlock(content, annotationId);
+    if (!block) return null;
+    const meta = parseMeta(block);
+    if (!meta?.id) return null;
+    return {
+      ...meta,
+      annotationPath: normalizedPath,
+      manualText: readMarkedSection(block, MANUAL_START, MANUAL_END),
+      aiText: readMarkedSection(block, AI_START, AI_END)
+    };
+  }
+  async generateExplanation(selection, registerCancel) {
+    const system = [
+      "你是论文阅读批注助手。",
+      "请用简体中文解释选中的词句在当前段落和文章语境中具体指什么。",
+      "目标是帮助读者理解，不做跨文献综述，不创建知识节点，不修改文件。",
+      "直接给出清晰的初步解释，通常 2 至 4 个短段落；不要使用 Markdown 标题或列表，不要输出流程报告、证据分类或客套话。"
+    ].join("\n");
+    const user = [
+      `文档：${selection.sourcePath}`,
+      selection.section ? `章节：${selection.section}` : "",
+      `选中文字：${selection.selectedText}`,
+      "",
+      "上下文：",
+      selection.context
+    ].filter(Boolean).join("\n");
+    const activeProfile = this.plugin.getProviderProfile(this.plugin.settings.activeProviderId);
+    if (activeProfile?.lastTest?.ok) {
+      const provider = this.plugin.createLLMProvider(activeProfile);
+      const result2 = await provider.complete(
+        {
+          model: activeProfile.model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user }
+          ],
+          maxTokens: 900
+        },
+        { registerCancel }
+      );
+      const text2 = String(result2.text || "").trim();
+      if (!text2) throw new Error("模型返回了空解释");
+      return {
+        text: text2,
+        provider: activeProfile.name,
+        model: activeProfile.model
+      };
+    }
+    const action = this.plugin.getDashboardAction("annotation-explain");
+    if (!action) throw new Error("批注解释操作未注册");
+    const runId = `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    registerCancel(() => {
+      this.plugin.requestVaultActionStop(runId);
+    });
+    const executionConfig = this.plugin.resolveActionExecutionConfig(action);
+    const result = await this.plugin.runVaultAction(
+      runId,
+      action,
+      `${system}
+
+${user}`,
+      executionConfig
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr.trim() || `模型进程退出码：${result.exitCode}`);
+    }
+    const text = result.stdout.trim();
+    if (!text) throw new Error("模型返回了空解释");
+    return {
+      text,
+      provider: "Codex CLI",
+      model: executionConfig.model
+    };
+  }
+  async getRecordExplanationContext(record) {
+    const file = this.app.vault.getAbstractFileByPath(record.sourcePath);
+    let context = record.selectedText;
+    if (file instanceof import_obsidian11.TFile) {
+      const content = await this.app.vault.read(file);
+      const offsets = countOccurrences(content, record.selectedText);
+      const offset = offsets[0] ?? -1;
+      if (offset >= 0) {
+        context = content.slice(
+          Math.max(0, offset - Math.floor(CONTEXT_LIMIT / 2)),
+          Math.min(content.length, offset + record.selectedText.length + Math.floor(CONTEXT_LIMIT / 2))
+        ).trim();
+      }
+    }
+    return {
+      selectedText: record.selectedText,
+      section: record.section,
+      context,
+      sourcePath: record.sourcePath
+    };
+  }
+  async openAnnotationDocument(record, newLeaf = false) {
+    const link = `${record.annotationPath.replace(/\.md$/i, "")}#^${record.id}`;
+    await this.app.workspace.openLinkText(link, record.sourcePath, newLeaf);
+  }
+  async openArchiveTarget(record, target) {
+    const normalized = normalizeArchiveTarget(target);
+    if (!normalized) {
+      new import_obsidian11.Notice("该批注尚未关联正式知识节点");
+      return;
+    }
+    await this.app.workspace.openLinkText(normalized, record.sourcePath, true);
+  }
+  async ensureFolder(folderPath) {
+    const parts = (0, import_obsidian11.normalizePath)(folderPath).split("/");
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!this.app.vault.getAbstractFileByPath(current)) {
+        await this.app.vault.createFolder(current);
+      }
+    }
+  }
+  async resolveAnnotationPath(sourceFile) {
+    const safeBase = sourceFile.basename.replace(/[\\/:*?"<>|#[\]^]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 90) || "note";
+    const candidate = (0, import_obsidian11.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}.md`);
+    const existing = this.app.vault.getAbstractFileByPath(candidate);
+    if (!(existing instanceof import_obsidian11.TFile)) return candidate;
+    const content = await this.app.vault.read(existing);
+    if (content.includes(`source: ${yamlString(sourceFile.path.replace(/\.md$/i, ""))}`)) {
+      return candidate;
+    }
+    const suffix = this.hashPath(sourceFile.path);
+    return (0, import_obsidian11.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}-${suffix}.md`);
+  }
+  createAnnotationId() {
+    const random = typeof crypto.randomUUID === "function" ? crypto.randomUUID().split("-").join("").slice(0, 10) : Math.random().toString(36).slice(2, 12);
+    return `ann-${random}`;
+  }
+  hashPath(value) {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36).slice(0, 7);
+  }
+  relocateSelection(content, selection) {
+    if (content.slice(selection.sourceStart, selection.sourceEnd) === selection.selectedText && content.slice(Math.max(0, selection.sourceStart - selection.prefix.length), selection.sourceStart) === selection.prefix && content.slice(selection.sourceEnd, selection.sourceEnd + selection.suffix.length) === selection.suffix) {
+      return { start: selection.sourceStart, end: selection.sourceEnd };
+    }
+    const offsets = countOccurrences(content, selection.selectedText);
+    const ranked = offsets.map((offset) => ({
+      offset,
+      score: commonSuffixLength(
+        content.slice(Math.max(0, offset - selection.prefix.length), offset),
+        selection.prefix
+      ) + commonPrefixLength(
+        content.slice(
+          offset + selection.selectedText.length,
+          offset + selection.selectedText.length + selection.suffix.length
+        ),
+        selection.suffix
+      )
+    })).sort((left, right) => right.score - left.score);
+    if (!ranked.length || ranked.length > 1 && ranked[0].score === ranked[1].score) {
+      throw new Error("原文在批注期间发生变化，无法唯一定位选区");
+    }
+    const start = ranked[0].offset;
+    const end = start + selection.selectedText.length;
+    if (isInsideProtectedMarkdown(content, start, end)) {
+      throw new Error("选区已位于链接或代码中，未重复写入批注链接");
+    }
+    return { start, end };
+  }
+  renderRecord(record) {
+    const meta = {
+      id: record.id,
+      sourcePath: record.sourcePath,
+      selectedText: record.selectedText,
+      section: record.section,
+      aiProvider: record.aiProvider,
+      aiModel: record.aiModel,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      archiveStatus: record.archiveStatus,
+      archiveTargets: record.archiveTargets,
+      archiveRunId: record.archiveRunId,
+      archiveError: record.archiveError
+    };
+    const title = record.selectedText.replace(/\s+/g, " ").slice(0, 90).replace(/[#\r\n]/g, "");
+    const sourceTarget = record.sourcePath.replace(/\.md$/i, "");
+    const targets = record.archiveTargets.length ? record.archiveTargets.map((target) => `[[${normalizeArchiveTarget(target)}]]`).join("、") : "无";
+    const statusLabel = {
+      none: "未归档",
+      pending: "归档中",
+      completed: "已归档",
+      failed: "归档失败"
+    }[record.archiveStatus];
+    return [
+      `${BLOCK_START}${record.id} -->`,
+      `## ${title || "批注"}`,
+      `${META_PREFIX}${JSON.stringify(meta)} -->`,
+      "",
+      `- 原文：${record.selectedText}`,
+      `- 来源：[[${sourceTarget}]]`,
+      record.section ? `- 章节：${record.section}` : "",
+      `- 创建：${record.createdAt}`,
+      `- 更新：${record.updatedAt}`,
+      "",
+      "### 手动批注",
+      MANUAL_START,
+      record.manualText || "",
+      MANUAL_END,
+      "",
+      "### AI 解释",
+      AI_START,
+      record.aiText || "",
+      AI_END,
+      "",
+      "### 归档",
+      `- 状态：${statusLabel}`,
+      `- 知识节点：${targets}`,
+      record.archiveError ? `- 说明：${record.archiveError}` : "",
+      "",
+      `^${record.id}`,
+      `${BLOCK_END}${record.id} -->`
+    ].join("\n");
+  }
+  renderNewDocument(record) {
+    const sourceTarget = record.sourcePath.replace(/\.md$/i, "");
+    return [
+      "---",
+      "type: annotations",
+      `source: ${yamlString(sourceTarget)}`,
+      `created: ${yamlString(record.createdAt)}`,
+      `updated: ${yamlString(record.updatedAt)}`,
+      "tags:",
+      "  - annotation",
+      "---",
+      "",
+      `# ${this.sourceTitle(record.sourcePath)}批注`,
+      "",
+      `来源：[[${sourceTarget}]]`,
+      "",
+      this.renderRecord(record),
+      ""
+    ].join("\n");
+  }
+  sourceTitle(sourcePath) {
+    const name = sourcePath.split("/").pop()?.replace(/\.md$/i, "") || "文档";
+    return `${name} `;
+  }
+  findRecordBlock(content, annotationId) {
+    const start = `${BLOCK_START}${annotationId} -->`;
+    const end = `${BLOCK_END}${annotationId} -->`;
+    const startIndex = content.indexOf(start);
+    if (startIndex === -1) return "";
+    const endIndex = content.indexOf(end, startIndex + start.length);
+    if (endIndex === -1) return "";
+    return content.slice(startIndex, endIndex + end.length);
+  }
+  async writeRecord(record) {
+    const file = this.app.vault.getAbstractFileByPath(record.annotationPath);
+    if (!(file instanceof import_obsidian11.TFile)) {
+      await this.app.vault.create(record.annotationPath, this.renderNewDocument(record));
+      return;
+    }
+    await this.app.vault.process(file, (content) => {
+      const oldBlock = this.findRecordBlock(content, record.id);
+      const nextBlock = this.renderRecord(record);
+      let updated = oldBlock ? content.replace(oldBlock, nextBlock) : `${content.trimEnd()}
+
+${nextBlock}
+`;
+      updated = updated.replace(
+        /^updated:\s*.*$/m,
+        `updated: ${yamlString(record.updatedAt)}`
+      );
+      return updated;
+    });
+  }
+};
+
 // src/providers/adapters.ts
 function contentAsText(content) {
   if (typeof content === "string") return content;
@@ -6285,7 +7308,7 @@ var DirectQueryService = class {
 };
 
 // src/plugin.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var fs4 = __toESM(require("node:fs"));
 var path7 = __toESM(require("node:path"));
 function asRecord5(value) {
@@ -6295,7 +7318,7 @@ function normalizeQueryMessageStatus(value) {
   const status = String(value || "");
   return status === "pending" || status === "stopping" || status === "done" || status === "failed" || status === "interrupted" ? status : "done";
 }
-var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
+var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -6319,6 +7342,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
       readEvidencePacket: (trace) => this.readVaultEvidencePacket(trace),
       readVaultImageData: (attachment) => this.readVaultImageData(attachment)
     });
+    this.annotationPopover = null;
   }
   get providerRuntimeState() {
     return this.lifecycleState.providerRuntimeState;
@@ -6345,6 +7369,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
   }
   async onload() {
     this.getPersistence();
+    this.annotationService = new AnnotationService(this.app, this);
     this.lastContextFile = this.app.workspace.getActiveFile();
     await this.loadSettings();
     this.recoverInterruptedPracticeRuns();
@@ -6354,6 +7379,12 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file?.extension === "md") this.lastContextFile = file;
     }));
+    this.registerMarkdownPostProcessor((element, context) => {
+      this.annotationService?.decorateMarkdownSection(element, context);
+    });
+    this.registerDomEvent(document, "click", (event) => {
+      void this.handleAnnotationLinkClick(event);
+    }, { capture: true });
     this.addRibbonIcon("layout-dashboard", "打开研究知识库控制台", () => {
       this.activateDashboardView();
     });
@@ -6379,11 +7410,209 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
         this.activateQueryWikiView();
       }
     });
+    this.addCommand({
+      id: "annotate-selected-text",
+      name: "批注所选文字",
+      hotkeys: [{ modifiers: ["Shift"], key: "S" }],
+      checkCallback: (checking) => {
+        if (!this.annotationService?.canCaptureSelection()) return false;
+        if (!checking) void this.openSelectionAnnotation();
+        return true;
+      }
+    });
     this.addSettingTab(new AgentDashboardSettingTab(this.app, this));
   }
   onunload() {
+    this.annotationPopover?.close();
     void this.flushScheduledSettingsSave();
     this.processExecution.shutdown();
+  }
+  getDashboardAction(actionId) {
+    return ACTION_BY_ID.get(actionId) || null;
+  }
+  async openSelectionAnnotation() {
+    if (!this.annotationService) return;
+    try {
+      const selection = await this.annotationService.captureSelection();
+      this.openAnnotationPopover({
+        anchorRect: selection.anchorRect,
+        selection
+      });
+    } catch (error) {
+      new import_obsidian12.Notice(error instanceof Error ? error.message : String(error));
+    }
+  }
+  openAnnotationPopover(options) {
+    if (!this.annotationService) return;
+    this.annotationPopover?.close();
+    const popover = new AnnotationPopover({
+      service: this.annotationService,
+      ...options,
+      onArchive: (record) => this.archiveAnnotation(record),
+      onClose: () => {
+        if (this.annotationPopover === popover) this.annotationPopover = null;
+      }
+    });
+    this.annotationPopover = popover;
+    popover.open();
+  }
+  async handleAnnotationLinkClick(event) {
+    if (!this.annotationService || event.button !== 0) return;
+    const target = event.target instanceof Element ? event.target.closest("a.internal-link") : null;
+    if (!target) return;
+    const rawHref = String(target.dataset.href || target.getAttribute("href") || "");
+    let href = rawHref;
+    try {
+      href = decodeURIComponent(rawHref);
+    } catch {
+      href = rawHref;
+    }
+    href = href.replace(/^app:\/\/obsidian\.md\//, "").replace(/^\/+/, "");
+    const match = /^(wiki\/annotations\/[^#]+?)(?:\.md)?#\^(ann-[a-z0-9-]+)$/i.exec(href);
+    if (!match) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const record = await this.annotationService.loadAnnotation(match[1], match[2]);
+    if (!record) {
+      new import_obsidian12.Notice("未找到对应的批注记录");
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      if (!record.archiveTargets.length) {
+        new import_obsidian12.Notice("该批注尚未关联正式知识节点");
+        return;
+      }
+      if (record.archiveTargets.length === 1) {
+        await this.annotationService.openArchiveTarget(record, record.archiveTargets[0]);
+        return;
+      }
+      const menu = new import_obsidian12.Menu();
+      record.archiveTargets.forEach((archiveTarget) => {
+        menu.addItem((item) => {
+          item.setTitle(archiveTarget.split("/").pop() || archiveTarget).setIcon("file-text").onClick(() => {
+            void this.annotationService?.openArchiveTarget(record, archiveTarget);
+          });
+        });
+      });
+      menu.showAtMouseEvent(event);
+      return;
+    }
+    if (event.shiftKey) {
+      await this.annotationService.openAnnotationDocument(record);
+      return;
+    }
+    this.openAnnotationPopover({
+      anchorRect: target.getBoundingClientRect(),
+      record
+    });
+  }
+  async archiveAnnotation(record) {
+    if (!this.annotationService) return;
+    const action = ACTION_BY_ID.get("synthesis");
+    if (!action) {
+      new import_obsidian12.Notice("综合分析操作未注册");
+      return;
+    }
+    if (this.isActionRunning(action.id)) {
+      await this.annotationService.updateArchiveState(record, {
+        archiveStatus: "failed",
+        archiveError: "综合分析正在运行，请稍后重试"
+      });
+      new import_obsidian12.Notice("综合分析正在运行，批注已保留但尚未归档");
+      return;
+    }
+    const executionConfig = this.resolveActionExecutionConfig(action);
+    const run = await this.startTaskRun(
+      action,
+      `归档批注：${record.selectedText.slice(0, 80)}`,
+      executionConfig
+    );
+    record = await this.annotationService.updateArchiveState(record, {
+      archiveStatus: "pending",
+      archiveRunId: run.id,
+      archiveError: ""
+    });
+    new import_obsidian12.Notice("批注已保留，正在交给综合分析归档");
+    const request = [
+      "处理一条由 Agent Dashboard 批注功能提交的正式知识归档请求。",
+      `批注文档：${record.annotationPath}#^${record.id}`,
+      `来源文档：${record.sourcePath}`,
+      record.section ? `所在章节：${record.section}` : "",
+      `选中文字：${record.selectedText}`,
+      "",
+      "初步解释：",
+      record.aiText,
+      "",
+      "请检查来源文档、现有 source note、method、concept、dataset、entity、代码笔记和索引。",
+      "判断该内容适合归入哪类正式知识节点；优先更新已有规范节点，只有不存在合适节点时才创建新节点。",
+      "区分来源文档证据、一般背景和未解决问题，并按 research-vault-synthesis 的规则更新拥有的索引与日志。",
+      "不要修改批注文档，Dashboard 会在任务完成后写回关联。",
+      "",
+      "最终回答最后一行必须严格使用以下格式，列出本次创建或更新的知识节点路径（相对 Obsidian vault 根目录、不带 .md）：",
+      'ANNOTATION_ARCHIVE_TARGETS: ["wiki/methods/example"]'
+    ].filter(Boolean).join("\n");
+    try {
+      const result = await this.runVaultAction(
+        run.id,
+        action,
+        request,
+        executionConfig
+      );
+      const output = [
+        result.stdout.trim(),
+        result.stderr.trim() ? `运行日志
+${result.stderr.trim()}` : ""
+      ].filter(Boolean).join("\n\n").slice(0, 12e4);
+      const processSucceeded = result.exitCode === 0;
+      const archiveTargets = processSucceeded ? this.parseAnnotationArchiveTargets(result.stdout) : [];
+      const integrationError = processSucceeded && !archiveTargets.length ? "综合分析已完成，但没有返回可关联的知识节点路径" : "";
+      const success = processSucceeded && !integrationError;
+      await this.finishTaskRun(run.id, {
+        status: success ? "done" : result.exitCode === 130 ? "interrupted" : "failed",
+        exitCode: result.exitCode,
+        output,
+        error: success ? "" : integrationError || `进程退出码：${result.exitCode}`
+      });
+      if (!processSucceeded) {
+        throw new Error(result.stderr.trim() || `综合分析退出码：${result.exitCode}`);
+      }
+      if (integrationError) throw new Error(integrationError);
+      await this.annotationService.updateArchiveState(record, {
+        archiveStatus: "completed",
+        archiveTargets,
+        archiveError: ""
+      });
+      new import_obsidian12.Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const task = this.getTaskRun(run.id);
+      if (task?.status === "running") {
+        await this.finishTaskRun(run.id, {
+          status: "failed",
+          exitCode: null,
+          output: "",
+          error: message
+        });
+      }
+      await this.annotationService.updateArchiveState(record, {
+        archiveStatus: "failed",
+        archiveError: message.slice(0, 500)
+      });
+      new import_obsidian12.Notice(`批注已保留，但归档失败：${message}`);
+    }
+  }
+  parseAnnotationArchiveTargets(output) {
+    const match = /ANNOTATION_ARCHIVE_TARGETS:\s*(\[[^\r\n]*\])/i.exec(output);
+    if (!match) return [];
+    try {
+      const values = JSON.parse(match[1]);
+      if (!Array.isArray(values)) return [];
+      return [...new Set(
+        values.map((value) => String(value || "").trim().replace(/^\[\[/, "").replace(/\]\]$/, "").split("|", 1)[0].replace(/^knowledge-base\//, "").replace(/\.md$/i, "").replace(/^\/+/, "")).filter((value) => /^wiki\/(methods|concepts|datasets|entities|projects|mocs|synthesis)\//.test(value))
+      )];
+    } catch {
+      return [];
+    }
   }
   createPracticeRunId() {
     const now = /* @__PURE__ */ new Date();
@@ -6413,7 +7642,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     return `data:${mime};base64,${fs4.readFileSync(candidate).toString("base64")}`;
   }
   async savePracticeNote(payload) {
-    const folder = (0, import_obsidian10.normalizePath)("wiki/code/practice");
+    const folder = (0, import_obsidian12.normalizePath)("wiki/code/practice");
     await this.ensureVaultFolder(folder);
     const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
     if (!cells.length) throw new Error("没有可保存的练习单元格");
@@ -6422,9 +7651,9 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
     const fallback = `practice-${date.split("-").join("")}-${lastResult?.run_id.slice(-6) || Date.now()}`;
-    let notePath = (0, import_obsidian10.normalizePath)(`${folder}/${slugBase || fallback}.md`);
+    let notePath = (0, import_obsidian12.normalizePath)(`${folder}/${slugBase || fallback}.md`);
     if (this.app.vault.getAbstractFileByPath(notePath)) {
-      notePath = (0, import_obsidian10.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
+      notePath = (0, import_obsidian12.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
     }
     if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
     const languageLabel = payload.language === "r" ? "R" : "Python";
@@ -6505,7 +7734,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
   }
   async ensureVaultFolder(folderPath) {
     let current = "";
-    for (const segment of (0, import_obsidian10.normalizePath)(folderPath).split("/")) {
+    for (const segment of (0, import_obsidian12.normalizePath)(folderPath).split("/")) {
       current = current ? `${current}/${segment}` : segment;
       if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
     }
@@ -6917,7 +8146,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
   }
   inferProjectRoot() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian10.FileSystemAdapter)) return "";
+    if (!(adapter instanceof import_obsidian12.FileSystemAdapter)) return "";
     const vaultRoot = adapter.getBasePath();
     const parent = path7.dirname(vaultRoot);
     if (fs4.existsSync(path7.join(parent, "AGENTS.md"))) return parent;
@@ -7140,21 +8369,21 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
       link = decodeURIComponent(link);
     } catch {
     }
-    link = (0, import_obsidian10.normalizePath)(link.replace(/^knowledge-base\//i, ""));
+    link = (0, import_obsidian12.normalizePath)(link.replace(/^knowledge-base\//i, ""));
     if (!link) return null;
     const metadataCache = this.app?.metadataCache;
     if (typeof metadataCache?.getFirstLinkpathDest === "function") {
       const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
-      if (resolved instanceof import_obsidian10.TFile) return resolved;
+      if (resolved instanceof import_obsidian12.TFile) return resolved;
     }
     const direct = this.app.vault.getAbstractFileByPath(link);
-    if (direct instanceof import_obsidian10.TFile) return direct;
+    if (direct instanceof import_obsidian12.TFile) return direct;
     if (sourcePath) {
-      const relative2 = (0, import_obsidian10.normalizePath)(
+      const relative2 = (0, import_obsidian12.normalizePath)(
         path7.posix.normalize(path7.posix.join(path7.posix.dirname(sourcePath), link))
       );
       const relativeFile = this.app.vault.getAbstractFileByPath(relative2);
-      if (relativeFile instanceof import_obsidian10.TFile) return relativeFile;
+      if (relativeFile instanceof import_obsidian12.TFile) return relativeFile;
     }
     return null;
   }
@@ -7167,7 +8396,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
       candidate = decodeURIComponent(candidate);
     } catch {
     }
-    candidate = (0, import_obsidian10.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
+    candidate = (0, import_obsidian12.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
     const attempts = [candidate];
     if (!candidate.toLowerCase().endsWith(".md")) attempts.push(`${candidate}.md`);
     for (const attempt of attempts) {
@@ -7246,7 +8475,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
     let totalBytes = existing.reduce((sum, attachment) => {
       const file = this.app.vault.getAbstractFileByPath(attachment.path);
-      return sum + Number(file instanceof import_obsidian10.TFile ? file.stat.size : attachment.size || 0);
+      return sum + Number(file instanceof import_obsidian12.TFile ? file.stat.size : attachment.size || 0);
     }, 0);
     const attachments = [];
     let discoveredCount = 0;
@@ -7280,7 +8509,7 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
     };
   }
   buildVaultImageReferenceIndex(imageFiles = []) {
-    const normalizeVaultPath = (value) => (0, import_obsidian10.normalizePath)(
+    const normalizeVaultPath = (value) => (0, import_obsidian12.normalizePath)(
       String(value || "").trim().replace(/\\/g, "/").replace(/^\/+/, "")
     );
     const imagePaths = new Set(
@@ -7298,9 +8527,9 @@ var AgentDashboardPlugin = class extends import_obsidian10.Plugin {
       const notePath = normalizeVaultPath(notePathValue);
       if (!imagePaths.has(imagePath) || !notePath.toLowerCase().endsWith(".md")) return;
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-      const frontmatter = noteFile instanceof import_obsidian10.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
+      const frontmatter = noteFile instanceof import_obsidian12.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
       const title = String(
-        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian10.TFile ? noteFile.basename : "") || path7.posix.basename(notePath, ".md")
+        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian12.TFile ? noteFile.basename : "") || path7.posix.basename(notePath, ".md")
       ).trim();
       const count = Math.max(1, Number(countValue) || 1);
       const references = referenceMaps.get(imagePath);
