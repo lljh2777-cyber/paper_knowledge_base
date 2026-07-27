@@ -5133,6 +5133,7 @@ var AnnotationPopover = class {
   constructor(options) {
     this.element = null;
     this.cancelGeneration = null;
+    this.generationVersion = 0;
     this.closed = true;
     this.outsideListener = null;
     this.keyListener = null;
@@ -5150,7 +5151,8 @@ var AnnotationPopover = class {
       cls: "agent-annotation-popover",
       attr: {
         role: "dialog",
-        "aria-label": "文字批注"
+        "aria-label": "文字批注",
+        tabindex: "-1"
       }
     });
     this.outsideListener = (event) => {
@@ -5171,6 +5173,7 @@ var AnnotationPopover = class {
     else this.renderChooser();
   }
   close() {
+    this.generationVersion += 1;
     if (this.cancelGeneration) {
       this.cancelGeneration();
       this.cancelGeneration = null;
@@ -5221,7 +5224,7 @@ var AnnotationPopover = class {
     manual.addEventListener("click", () => this.renderManual());
     ai.addEventListener("click", () => void this.renderExplanation());
     this.position();
-    window.setTimeout(() => manual.focus(), 0);
+    window.setTimeout(() => this.element?.focus({ preventScroll: true }), 0);
   }
   renderManual() {
     const element = this.reset();
@@ -5243,7 +5246,7 @@ var AnnotationPopover = class {
       text: "保留",
       attr: { type: "button" }
     });
-    cancel.addEventListener("click", () => this.close());
+    cancel.addEventListener("click", () => this.renderChooser());
     const submit = async () => {
       const manualText = textarea.value.trim();
       if (!manualText) {
@@ -5265,6 +5268,7 @@ var AnnotationPopover = class {
   }
   async renderExplanation() {
     if (!this.selection) return;
+    const generationVersion = ++this.generationVersion;
     const element = this.reset();
     this.renderHeader(element, this.selection.selectedText, "AI 解释");
     const status = element.createDiv({ cls: "agent-annotation-loading" });
@@ -5273,7 +5277,12 @@ var AnnotationPopover = class {
     status.createSpan({ text: "正在结合当前段落生成解释……" });
     const footer = this.renderFooter(element);
     const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
-    cancel.addEventListener("click", () => this.close());
+    cancel.addEventListener("click", () => {
+      this.cancelGeneration?.();
+      this.cancelGeneration = null;
+      this.generationVersion += 1;
+      this.renderChooser();
+    });
     this.position();
     try {
       const explanation = await this.service.generateExplanation(
@@ -5283,11 +5292,11 @@ var AnnotationPopover = class {
         }
       );
       this.cancelGeneration = null;
-      if (this.closed) return;
+      if (this.closed || generationVersion !== this.generationVersion) return;
       this.renderExplanationResult(explanation);
     } catch (error) {
       this.cancelGeneration = null;
-      if (this.closed) return;
+      if (this.closed || generationVersion !== this.generationVersion) return;
       this.renderFailure("AI 解释失败", displayError(error), () => void this.renderExplanation());
     }
   }
@@ -5313,7 +5322,7 @@ var AnnotationPopover = class {
       text: "保留并存档",
       attr: { type: "button" }
     });
-    cancel.addEventListener("click", () => this.close());
+    cancel.addEventListener("click", () => this.renderChooser());
     const draft = {
       aiText: explanation.text,
       aiProvider: explanation.provider,
@@ -5360,7 +5369,6 @@ var AnnotationPopover = class {
       if (this.record.archiveError) archive.createSpan({ text: this.record.archiveError });
     }
     const footer = this.renderFooter(element);
-    const close = footer.createEl("button", { text: "关闭", attr: { type: "button" } });
     if (this.record.aiText && this.record.archiveStatus !== "pending" && this.record.archiveStatus !== "completed") {
       const archiveButton = footer.createEl("button", {
         cls: "agent-annotation-archive-button",
@@ -5378,7 +5386,6 @@ var AnnotationPopover = class {
       text: "修改",
       attr: { type: "button" }
     });
-    close.addEventListener("click", () => this.close());
     edit.addEventListener("click", () => this.renderEditor());
     this.position();
   }
@@ -5492,7 +5499,10 @@ var AnnotationPopover = class {
       text: "重试",
       attr: { type: "button" }
     });
-    cancel.addEventListener("click", () => this.close());
+    cancel.addEventListener("click", () => {
+      if (this.record) this.renderExisting();
+      else this.renderChooser();
+    });
     retryButton.addEventListener("click", retry);
     this.position();
   }
@@ -7384,6 +7394,12 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
     });
     this.registerDomEvent(document, "click", (event) => {
       void this.handleAnnotationLinkClick(event);
+    }, { capture: true });
+    this.registerDomEvent(document, "mouseover", (event) => {
+      const link = event.target instanceof Element ? event.target.closest(
+        'a.internal-link[data-href^="wiki/annotations/"][data-href*="#^ann-"]'
+      ) : null;
+      if (link) event.stopPropagation();
     }, { capture: true });
     this.addRibbonIcon("layout-dashboard", "打开研究知识库控制台", () => {
       this.activateDashboardView();

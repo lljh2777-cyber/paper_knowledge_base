@@ -218,6 +218,14 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.registerDomEvent(document, "click", (event) => {
 			void this.handleAnnotationLinkClick(event);
 		}, { capture: true });
+		this.registerDomEvent(document, "mouseover", (event) => {
+			const link = event.target instanceof Element
+				? event.target.closest<HTMLAnchorElement>(
+					'a.internal-link[data-href^="wiki/annotations/"][data-href*="#^ann-"]',
+				)
+				: null;
+			if (link) event.stopPropagation();
+		}, { capture: true });
 		this.addRibbonIcon("layout-dashboard", "打开研究知识库控制台", () => {
 			this.activateDashboardView();
 		});

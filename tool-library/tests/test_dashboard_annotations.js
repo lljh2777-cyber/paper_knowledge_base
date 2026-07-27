@@ -53,12 +53,19 @@ assert.match(pluginSource, /id:\s*"annotate-selected-text"/);
 assert.match(pluginSource, /modifiers:\s*\["Shift"\],\s*key:\s*"S"/);
 assert.match(pluginSource, /event\.ctrlKey\s*\|\|\s*event\.metaKey/);
 assert.match(pluginSource, /event\.shiftKey/);
+assert.match(pluginSource, /"mouseover"/);
+assert.match(
+	pluginSource,
+	/a\.internal-link\[data-href\^="wiki\/annotations\/"\]\[data-href\*="#\^ann-"\]/,
+);
 assert.match(serviceSource, /wiki\/annotations/);
 assert.match(serviceSource, /#\^\$\{record\.id\}/);
 assert.match(pluginSource, /archiveStatus:\s*"pending"/);
 assert.match(popoverSource, /保留并存档/);
 assert.match(popoverSource, /手动批注/);
 assert.match(popoverSource, /AI 解释/);
+assert.match(popoverSource, /cancel\.addEventListener\("click", \(\) => this\.renderChooser\(\)\)/);
+assert.doesNotMatch(popoverSource, /text:\s*"关闭"/);
 assert.match(styles, /a\.internal-link\[data-href\^="wiki\/annotations\/"\]/);
 
 const plugin = new AgentDashboardPlugin();

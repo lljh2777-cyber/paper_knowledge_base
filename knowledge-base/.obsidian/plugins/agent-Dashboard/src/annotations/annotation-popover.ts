@@ -34,6 +34,7 @@ export class AnnotationPopover {
 	private readonly onClose?: () => void;
 	private element: HTMLDivElement | null = null;
 	private cancelGeneration: (() => void) | null = null;
+	private generationVersion = 0;
 	private closed = true;
 	private outsideListener: ((event: PointerEvent) => void) | null = null;
 	private keyListener: ((event: KeyboardEvent) => void) | null = null;
@@ -55,6 +56,7 @@ export class AnnotationPopover {
 			attr: {
 				role: "dialog",
 				"aria-label": "文字批注",
+				tabindex: "-1",
 			},
 		});
 		this.outsideListener = (event) => {
@@ -76,6 +78,7 @@ export class AnnotationPopover {
 	}
 
 	close(): void {
+		this.generationVersion += 1;
 		if (this.cancelGeneration) {
 			this.cancelGeneration();
 			this.cancelGeneration = null;
@@ -131,7 +134,7 @@ export class AnnotationPopover {
 		manual.addEventListener("click", () => this.renderManual());
 		ai.addEventListener("click", () => void this.renderExplanation());
 		this.position();
-		window.setTimeout(() => manual.focus(), 0);
+		window.setTimeout(() => this.element?.focus({ preventScroll: true }), 0);
 	}
 
 	private renderManual(): void {
@@ -154,7 +157,7 @@ export class AnnotationPopover {
 			text: "保留",
 			attr: { type: "button" },
 		});
-		cancel.addEventListener("click", () => this.close());
+		cancel.addEventListener("click", () => this.renderChooser());
 		const submit = async () => {
 			const manualText = textarea.value.trim();
 			if (!manualText) {
@@ -177,6 +180,7 @@ export class AnnotationPopover {
 
 	private async renderExplanation(): Promise<void> {
 		if (!this.selection) return;
+		const generationVersion = ++this.generationVersion;
 		const element = this.reset();
 		this.renderHeader(element, this.selection.selectedText, "AI 解释");
 		const status = element.createDiv({ cls: "agent-annotation-loading" });
@@ -185,7 +189,12 @@ export class AnnotationPopover {
 		status.createSpan({ text: "正在结合当前段落生成解释……" });
 		const footer = this.renderFooter(element);
 		const cancel = footer.createEl("button", { text: "取消", attr: { type: "button" } });
-		cancel.addEventListener("click", () => this.close());
+		cancel.addEventListener("click", () => {
+			this.cancelGeneration?.();
+			this.cancelGeneration = null;
+			this.generationVersion += 1;
+			this.renderChooser();
+		});
 		this.position();
 		try {
 			const explanation = await this.service.generateExplanation(
@@ -195,11 +204,11 @@ export class AnnotationPopover {
 				},
 			);
 			this.cancelGeneration = null;
-			if (this.closed) return;
+			if (this.closed || generationVersion !== this.generationVersion) return;
 			this.renderExplanationResult(explanation);
 		} catch (error) {
 			this.cancelGeneration = null;
-			if (this.closed) return;
+			if (this.closed || generationVersion !== this.generationVersion) return;
 			this.renderFailure("AI 解释失败", displayError(error), () => void this.renderExplanation());
 		}
 	}
@@ -226,7 +235,7 @@ export class AnnotationPopover {
 			text: "保留并存档",
 			attr: { type: "button" },
 		});
-		cancel.addEventListener("click", () => this.close());
+		cancel.addEventListener("click", () => this.renderChooser());
 		const draft: AnnotationDraft = {
 			aiText: explanation.text,
 			aiProvider: explanation.provider,
@@ -274,7 +283,6 @@ export class AnnotationPopover {
 			if (this.record.archiveError) archive.createSpan({ text: this.record.archiveError });
 		}
 		const footer = this.renderFooter(element);
-		const close = footer.createEl("button", { text: "关闭", attr: { type: "button" } });
 		if (
 			this.record.aiText
 			&& this.record.archiveStatus !== "pending"
@@ -296,7 +304,6 @@ export class AnnotationPopover {
 			text: "修改",
 			attr: { type: "button" },
 		});
-		close.addEventListener("click", () => this.close());
 		edit.addEventListener("click", () => this.renderEditor());
 		this.position();
 	}
@@ -421,7 +428,10 @@ export class AnnotationPopover {
 			text: "重试",
 			attr: { type: "button" },
 		});
-		cancel.addEventListener("click", () => this.close());
+		cancel.addEventListener("click", () => {
+			if (this.record) this.renderExisting();
+			else this.renderChooser();
+		});
 		retryButton.addEventListener("click", retry);
 		this.position();
 	}
