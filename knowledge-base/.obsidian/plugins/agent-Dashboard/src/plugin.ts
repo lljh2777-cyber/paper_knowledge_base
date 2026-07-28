@@ -1191,6 +1191,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		question: string,
 		priorMessages: QueryMessage[],
 		mode: QueryRetrievalMode = "web",
+		attachments: VaultImageAttachment[] = [],
 	): string {
 		const completed = Array.isArray(priorMessages)
 			? priorMessages.filter((message) => message.status === "done" && message.content)
@@ -1215,6 +1216,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			question,
 			conversation_summary: summaryParts.join("\n"),
 			recent_turns: recent,
+			attachments: normalizeVaultImageAttachments(attachments),
 		});
 	}
 

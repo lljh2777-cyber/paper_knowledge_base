@@ -46,6 +46,9 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertTrue(
             by_id["claude-code"]["capabilities"]["file_write"]
         )
+        self.assertTrue(
+            by_id["claude-code"]["capabilities"]["image_input"]
+        )
 
     def test_unknown_backend_fails_with_available_ids(self) -> None:
         with self.assertRaisesRegex(

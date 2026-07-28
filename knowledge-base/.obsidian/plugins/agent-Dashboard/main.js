@@ -1338,7 +1338,11 @@ Execution interrupted before the plugin restarted.`.trim();
             modelExists: null,
             streaming: { supported: true, verified: true },
             pdf: { supported: false, verified: false },
-            vision: { supported: false, verified: false },
+            vision: {
+              supported: true,
+              verified: false,
+              note: "Claude Code Read 工具支持图片；当前 CC Switch 模型的视觉兼容性将在首次图片查询时验证"
+            },
             webSearch: {
               supported: false,
               verified: false,
@@ -1599,6 +1603,9 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
+    new import_obsidian.Setting(containerEl).setName("查询图片").setDesc(
+      `知识库查询可发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片。插件只传递经过校验的本地路径，Claude Code 使用只读 Read 工具打开图片；实际视觉能力取决于 CC Switch 当前模型。`
+    );
     new import_obsidian.Setting(containerEl).setName("批注解释后端").setDesc("自动模式优先使用已启用的 Direct API，否则使用 Codex。也可固定为某个本地 CLI。").addDropdown((dropdown) => {
       dropdown.addOption("auto", "自动").addOption("codex-cli", "Codex CLI").addOption("claude-code", "Claude Code").setValue(this.plugin.settings.annotationBackendId).onChange(async (value) => {
         this.plugin.settings.annotationBackendId = value === "claude-code" ? "claude-code" : value === "codex-cli" ? "codex-cli" : "auto";
@@ -5205,8 +5212,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const controls = footer.createDiv({ cls: "query-wiki-composer-actions" });
     this.renderRetrievalModeSwitch(controls);
     const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-    const directProfile = backendId === "codex-cli" ? null : this.plugin.getProviderProfile(backendId);
-    const canAttachImage = profileSupportsQueryImage(directProfile);
+    const directProfile = isCliBackendId(backendId) ? null : this.plugin.getProviderProfile(backendId);
+    const canAttachImage = backendId === "claude-code" || profileSupportsQueryImage(directProfile);
     const attach = this.createIconButton(
       controls,
       "image-plus",
@@ -5214,7 +5221,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     );
     attach.addClass("query-wiki-attach");
     attach.disabled = Boolean(this.activeRunId) || !canAttachImage || this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS;
-    attach.title = canAttachImage ? this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS ? `最多附加 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张图片` : `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS}）` : directProfile ? "当前 Direct API 配置或适配器未启用视觉输入" : "图片附件目前仅支持 Direct API";
+    attach.title = canAttachImage ? this.pendingImages.length >= MAX_QUERY_IMAGE_ATTACHMENTS ? `最多附加 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张图片` : `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS}）` : directProfile ? "当前 Direct API 配置或适配器未启用视觉输入" : "当前 CLI 后端未启用视觉输入";
     attach.addEventListener("click", () => {
       if (attach.disabled) return;
       const draft = this.inputEl?.value || "";
@@ -5435,7 +5442,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
           profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
           profileSupportsDirectWebSearch(selectedProfile) ? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。" : "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
           "Direct API 不执行 Codex skill 或文件写入。"
-        ].join("") : usingClaude ? "Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。当前仅支持知识库检索，不执行联网搜索或文件写入。模型由 CC Switch 或插件中的模型覆盖决定。" : ""
+        ].join("") : usingClaude ? `Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；不执行联网搜索或文件写入。视觉结果取决于 CC Switch 当前模型。` : ""
       );
       if (selectedProfile) {
         summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
@@ -5474,7 +5481,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       if (isCliBackendId(backend.value)) {
         this.plugin.invalidateCliModelDiscovery(backend.value);
       }
-      if (this.pendingImages.length && !profileSupportsQueryImage(selectedProfile)) {
+      const selectedSupportsImages = backend.value === "claude-code" || profileSupportsQueryImage(selectedProfile);
+      if (this.pendingImages.length && !selectedSupportsImages) {
         this.pendingImages = [];
         new import_obsidian9.Notice("所选后端未启用视觉输入，已移除待发送图片");
       }
@@ -5539,7 +5547,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       return;
     }
     const selectedImages = normalizeVaultImageAttachments(this.pendingImages);
-    if (selectedImages.length && !profileSupportsQueryImage(directProfile)) {
+    const backendSupportsImages = backendId === "claude-code" || profileSupportsQueryImage(directProfile);
+    if (selectedImages.length && !backendSupportsImages) {
       new import_obsidian9.Notice("当前执行后端未启用视觉输入，无法发送图片");
       return;
     }
@@ -5549,7 +5558,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       discoveredCount: 0,
       totalBytes: 0
     };
-    if (profileSupportsQueryImage(directProfile)) {
+    if (backendSupportsImages) {
       try {
         linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
       } catch (error) {
@@ -5619,7 +5628,12 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       )
     };
     assistantMessage.model = executionConfig.model;
-    const input = this.plugin.buildQueryActionInput(question, priorMessages, retrievalMode);
+    const input = this.plugin.buildQueryActionInput(
+      question,
+      priorMessages,
+      retrievalMode,
+      attachments
+    );
     let run = null;
     let completedRun = null;
     try {
@@ -8988,7 +9002,7 @@ ${result.stderr.trim()}` : ""
     }
     return session.messages[index];
   }
-  buildQueryActionInput(question, priorMessages, mode = "web") {
+  buildQueryActionInput(question, priorMessages, mode = "web", attachments = []) {
     const completed = Array.isArray(priorMessages) ? priorMessages.filter((message) => message.status === "done" && message.content) : [];
     const recent = completed.slice(-8).map((message) => ({
       role: message.role,
@@ -9005,7 +9019,8 @@ ${result.stderr.trim()}` : ""
       mode: mode === "vault" ? "vault" : "web",
       question,
       conversation_summary: summaryParts.join("\n"),
-      recent_turns: recent
+      recent_turns: recent,
+      attachments: normalizeVaultImageAttachments(attachments)
     });
   }
   inferProjectRoot() {

@@ -66,7 +66,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
           ]
         }"""
 
-        question, context, retrieval_mode = run_vault_action.normalize_action_input(
+        question, context, retrieval_mode, attachments = run_vault_action.normalize_action_input(
             "vault-retrieval",
             raw_input,
         )
@@ -77,6 +77,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertIn("user: 什么是细胞注释？", context)
         self.assertIn("assistant: 上一轮回答", context)
         self.assertNotIn("query-session", question)
+        self.assertEqual(attachments, [])
 
     def test_query_session_accepts_explicit_vault_mode(self) -> None:
         raw_input = """{
@@ -86,7 +87,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
           "question": "只使用知识库回答"
         }"""
 
-        question, context, retrieval_mode = (
+        question, context, retrieval_mode, attachments = (
             run_vault_action.normalize_action_input(
                 "vault-retrieval",
                 raw_input,
@@ -96,9 +97,84 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(question, "只使用知识库回答")
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
+        self.assertEqual(attachments, [])
+
+    def test_query_session_validates_vault_image_attachments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = (
+                root
+                / "knowledge-base"
+                / "wiki"
+                / "assets"
+                / "figures"
+                / "example.png"
+            )
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            raw_input = json.dumps(
+                {
+                    "kind": "query-session",
+                    "schema_version": 1,
+                    "mode": "vault",
+                    "question": "解释这张图",
+                    "attachments": [
+                        {
+                            "path": "wiki/assets/figures/example.png",
+                            "name": "example.png",
+                            "sourceNotePath": "wiki/sources/example.md",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+            question, context, retrieval_mode, attachments = (
+                run_vault_action.normalize_action_input(
+                    "vault-retrieval",
+                    raw_input,
+                    root,
+                )
+            )
+            prompt = run_vault_action.build_prompt(
+                "vault-retrieval",
+                question,
+                root,
+                conversation_context=context,
+                retrieval_mode=retrieval_mode,
+                image_attachments=attachments,
+            )
+
+            self.assertEqual(len(attachments), 1)
+            self.assertEqual(
+                attachments[0]["vault_path"],
+                "wiki/assets/figures/example.png",
+            )
+            self.assertEqual(attachments[0]["size"], image.stat().st_size)
+            self.assertIn(str(image.resolve()), prompt)
+            self.assertIn("Claude Code `Read` tool", prompt)
+            self.assertIn("do not invent its contents", prompt)
+
+    def test_query_session_rejects_image_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw_input = json.dumps(
+                {
+                    "kind": "query-session",
+                    "question": "解释图片",
+                    "attachments": [{"path": "../outside.png"}],
+                }
+            )
+
+            with self.assertRaisesRegex(ValueError, "Invalid Vault image path"):
+                run_vault_action.normalize_action_input(
+                    "vault-retrieval",
+                    raw_input,
+                    root,
+                )
 
     def test_plain_retrieval_request_remains_compatible(self) -> None:
-        question, context, retrieval_mode = (
+        question, context, retrieval_mode, attachments = (
             run_vault_action.normalize_action_input(
                 "vault-retrieval",
                 "知识库中有哪些单细胞分析方法？",
@@ -108,6 +184,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(question, "知识库中有哪些单细胞分析方法？")
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
+        self.assertEqual(attachments, [])
 
     def test_retrieval_mode_controls_prompt_and_web_search_config(self) -> None:
         root = Path("D:/example-vault")
@@ -153,7 +230,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
 
     def test_non_retrieval_action_does_not_parse_session_json(self) -> None:
         raw_input = '{"kind":"query-session","question":"example"}'
-        request, context, retrieval_mode = run_vault_action.normalize_action_input(
+        request, context, retrieval_mode, attachments = run_vault_action.normalize_action_input(
             "synthesis",
             raw_input,
         )
@@ -161,6 +238,7 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(request, raw_input)
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
+        self.assertEqual(attachments, [])
 
     def test_annotation_explanation_is_read_only_and_returns_only_explanation(
         self,

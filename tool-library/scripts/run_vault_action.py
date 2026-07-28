@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -54,6 +54,15 @@ MARKDOWN_EXTERNAL_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 OBSIDIAN_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+QUERY_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+MAX_QUERY_IMAGE_ATTACHMENTS = 6
+MAX_QUERY_IMAGE_BYTES = 7 * 1024 * 1024
+MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -520,15 +529,91 @@ def validate_project_root(project_root: Path) -> Path:
     return root
 
 
-def normalize_action_input(action: str, raw_input: str) -> tuple[str, str, str]:
+def normalize_query_image_attachments(
+    values: Any,
+    project_root: Path,
+) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    vault_root = (project_root / "knowledge-base").resolve()
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("Query image attachment must be an object")
+        raw_path = str(value.get("path") or "").strip().replace("\\", "/")
+        raw_path = re.sub(r"^knowledge-base/", "", raw_path, flags=re.I)
+        relative = PurePosixPath(raw_path)
+        if (
+            not raw_path
+            or relative.is_absolute()
+            or ":" in raw_path
+            or any(ord(character) < 32 for character in raw_path)
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError(f"Invalid Vault image path: {raw_path or '<empty>'}")
+        extension = relative.suffix.lower()
+        mime_type = QUERY_IMAGE_MIME_TYPES.get(extension)
+        if not mime_type:
+            raise ValueError(f"Unsupported Vault image type: {raw_path}")
+        candidate = (vault_root / Path(*relative.parts)).resolve()
+        try:
+            candidate.relative_to(vault_root)
+        except ValueError as error:
+            raise ValueError(
+                f"Vault image path escapes knowledge-base/: {raw_path}"
+            ) from error
+        if not candidate.is_file():
+            raise ValueError(f"Vault image not found: {raw_path}")
+        key = str(candidate).casefold()
+        if key in seen:
+            continue
+        size = candidate.stat().st_size
+        if size <= 0 or size > MAX_QUERY_IMAGE_BYTES:
+            raise ValueError(
+                f"Vault image exceeds the per-file limit: {raw_path}"
+            )
+        if len(normalized) >= MAX_QUERY_IMAGE_ATTACHMENTS:
+            raise ValueError(
+                f"Query accepts at most {MAX_QUERY_IMAGE_ATTACHMENTS} images"
+            )
+        total_bytes += size
+        if total_bytes > MAX_QUERY_IMAGE_TOTAL_BYTES:
+            raise ValueError("Query image attachments exceed the total size limit")
+        source_note_path = str(
+            value.get("sourceNotePath")
+            or value.get("source_note_path")
+            or ""
+        ).strip().replace("\\", "/")
+        source_note_path = re.sub(r"[\r\n|]+", " ", source_note_path)
+        normalized.append(
+            {
+                "vault_path": relative.as_posix(),
+                "absolute_path": str(candidate),
+                "name": str(value.get("name") or relative.name)[:240],
+                "mime_type": mime_type,
+                "size": size,
+                "source_note_path": source_note_path[:1000],
+            }
+        )
+        seen.add(key)
+    return normalized
+
+
+def normalize_action_input(
+    action: str,
+    raw_input: str,
+    project_root: Path | None = None,
+) -> tuple[str, str, str, list[dict[str, Any]]]:
     if action != "vault-retrieval":
-        return raw_input, "", "vault"
+        return raw_input, "", "vault", []
     try:
         payload = json.loads(raw_input)
     except json.JSONDecodeError:
-        return raw_input, "", "vault"
+        return raw_input, "", "vault", []
     if not isinstance(payload, dict) or payload.get("kind") != "query-session":
-        return raw_input, "", "vault"
+        return raw_input, "", "vault", []
 
     question = str(payload.get("question") or "").strip()
     if not question:
@@ -558,7 +643,19 @@ def normalize_action_input(action: str, raw_input: str) -> tuple[str, str, str]:
         context_lines.append("Recent turns:")
         for role, content in normalized_turns:
             context_lines.append(f"{role}: {content}")
-    return question, "\n".join(context_lines), retrieval_mode
+    raw_attachments = payload.get("attachments")
+    if raw_attachments and project_root is None:
+        raise ValueError("Project root is required for query image validation")
+    image_attachments = normalize_query_image_attachments(
+        raw_attachments,
+        project_root,
+    ) if project_root is not None else []
+    return (
+        question,
+        "\n".join(context_lines),
+        retrieval_mode,
+        image_attachments,
+    )
 
 
 def build_prompt(
@@ -568,6 +665,7 @@ def build_prompt(
     retrieval_preflight: dict[str, Any] | None = None,
     conversation_context: str = "",
     retrieval_mode: str = "vault",
+    image_attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     spec = ACTION_SPECS[action]
     request = user_input.strip()
@@ -575,6 +673,7 @@ def build_prompt(
         raise ValueError(f"{spec['label']} requires a non-empty request")
 
     retrieval_block = ""
+    image_block = ""
     if action == "vault-retrieval":
         if retrieval_mode == "web":
             mode_block = """
@@ -618,6 +717,30 @@ Use this context only to resolve follow-up references such as "it", "this
 paper", or "explain further". Previous assistant answers are not vault
 evidence. Re-check the current question against directly inspected vault notes.
 """
+        if image_attachments:
+            image_lines = []
+            for attachment in image_attachments:
+                source_note = attachment.get("source_note_path")
+                source_note_suffix = (
+                    f" | cited by: {source_note}"
+                    if source_note
+                    else ""
+                )
+                image_lines.append(
+                    f"- {attachment['absolute_path']} "
+                    f"| vault path: {attachment['vault_path']}"
+                    f"{source_note_suffix}"
+                )
+            image_block = f"""
+Verified Vault image attachments:
+{chr(10).join(image_lines)}
+
+Use the Claude Code `Read` tool to open every listed image before answering.
+Treat visual content you directly inspect as image evidence. Distinguish direct
+visual observations from source-note claims and inference. If any image cannot
+be read or the active model cannot process image tool results, state that
+explicitly and do not invent its contents. Do not edit, move, or delete images.
+"""
 
     completion_instruction = spec.get(
         "completion_instruction",
@@ -646,6 +769,7 @@ Action-specific instructions:
 User request:
 {request}
 {retrieval_block}
+{image_block}
 
 {completion_instruction.strip()}
 """
@@ -1579,6 +1703,7 @@ def dry_run_payload(
     user_input: str,
     conversation_context: str = "",
     retrieval_mode: str = "vault",
+    image_attachments: list[dict[str, Any]] | None = None,
     backend_id: str = DEFAULT_BACKEND,
     backend_executable: str = "",
     backend_model: str = "",
@@ -1586,6 +1711,10 @@ def dry_run_payload(
     spec = ACTION_SPECS[action]
     kind = spec.get("kind", "codex")
     backend = get_backend(backend_id)
+    if image_attachments and not backend.capabilities.image_input:
+        raise ValueError(
+            f"{backend.label} does not declare image-input capability"
+        )
     executable = backend_executable or codex_value
     selected_model = (
         backend_model
@@ -1640,6 +1769,7 @@ def dry_run_payload(
             retrieval_preflight,
             conversation_context,
             retrieval_mode,
+            image_attachments,
         )
     return {
         "action": action,
@@ -1706,9 +1836,15 @@ def main() -> int:
         stop_file.unlink()
     raw_user_input = sys.stdin.read()
     spec = ACTION_SPECS[args.action]
-    user_input, conversation_context, retrieval_mode = normalize_action_input(
+    (
+        user_input,
+        conversation_context,
+        retrieval_mode,
+        image_attachments,
+    ) = normalize_action_input(
         args.action,
         raw_user_input,
+        project_root,
     )
 
     if args.dry_run:
@@ -1725,6 +1861,7 @@ def main() -> int:
                     user_input,
                     conversation_context,
                     retrieval_mode,
+                    image_attachments,
                     args.backend,
                     args.backend_executable,
                     args.backend_model,
@@ -1759,6 +1896,10 @@ def main() -> int:
         )
 
     backend = get_backend(args.backend)
+    if image_attachments and not backend.capabilities.image_input:
+        raise RuntimeError(
+            f"{backend.label} does not declare image-input capability"
+        )
     if spec.get("writes") and not backend.capabilities.file_write:
         raise RuntimeError(
             f"{backend.label} does not declare file-write capability for "
@@ -1874,6 +2015,7 @@ def main() -> int:
         retrieval_preflight,
         conversation_context,
         retrieval_mode,
+        image_attachments,
     )
     command = build_backend_command(
         backend,

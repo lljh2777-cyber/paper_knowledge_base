@@ -57,7 +57,7 @@ class ClaudeCodeBackend:
         file_write=True,
         web_search=False,
         citations=False,
-        image_input=False,
+        image_input=True,
     )
 
     def effective_service_tier(self, model: str, requested: str) -> str:

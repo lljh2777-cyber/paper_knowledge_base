@@ -743,7 +743,11 @@ export class ProcessExecutionService {
 						modelExists: null,
 						streaming: { supported: true, verified: true },
 						pdf: { supported: false, verified: false },
-						vision: { supported: false, verified: false },
+						vision: {
+							supported: true,
+							verified: false,
+							note: "Claude Code Read 工具支持图片；当前 CC Switch 模型的视觉兼容性将在首次图片查询时验证",
+						},
 						webSearch: {
 							supported: false,
 							verified: false,

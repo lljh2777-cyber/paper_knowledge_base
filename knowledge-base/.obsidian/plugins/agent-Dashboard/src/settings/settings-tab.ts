@@ -320,6 +320,11 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					});
 			});
 		new Setting(containerEl)
+			.setName("查询图片")
+			.setDesc(
+				`知识库查询可发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片。插件只传递经过校验的本地路径，Claude Code 使用只读 Read 工具打开图片；实际视觉能力取决于 CC Switch 当前模型。`,
+			);
+		new Setting(containerEl)
 			.setName("批注解释后端")
 			.setDesc("自动模式优先使用已启用的 Direct API，否则使用 Codex。也可固定为某个本地 CLI。")
 			.addDropdown((dropdown) => {

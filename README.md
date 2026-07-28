@@ -57,7 +57,7 @@ sources / methods / concepts / code / projects / synthesis
 | 文献入库 | Codex CLI | 更新入库元数据、索引和日志，不生成论文结论 |
 | PDF 深读 | `paper_xray` 智能体 | 完成全文证据检查后才允许标记为 `x-ray` |
 | 代码分析 | `code_reader` 智能体 | 默认只做静态阅读，不运行或修改项目代码 |
-| 知识库检索 | Codex CLI 或 Direct API | 只读检索，支持连续对话、来源面板和图片输入 |
+| 知识库检索 | Codex CLI、Claude Code 或 Direct API | 只读检索，支持连续对话、来源面板；Claude Code 与已启用视觉的 Direct API 可分析 Vault 图片 |
 | 综合分析 | Codex CLI | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面 |
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
@@ -71,7 +71,7 @@ sources / methods / concepts / code / projects / synthesis
 插件支持三类查询后端：
 
 1. **Codex CLI**：默认模式，复用本机 Codex 的认证、模型和沙箱配置。
-2. **Claude Code**：查询与批注为只读模式；代码分析和综合分析支持受审计的阶段所有权写入，可沿用 CC Switch 管理的模型。
+2. **Claude Code**：查询与批注为只读模式，查询可通过 `Read` 分析经过路径校验的 Vault 图片；代码分析和综合分析支持受审计的阶段所有权写入，可沿用 CC Switch 管理的模型。
 3. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。

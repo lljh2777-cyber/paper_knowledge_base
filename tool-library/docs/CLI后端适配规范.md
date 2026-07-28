@@ -38,6 +38,13 @@ tool-library/schemas/
 CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
 `--backend-model` 时，runner 才覆盖该模型。
 
+知识库查询可携带 Vault 图片。插件只在会话中保存 Vault 相对路径；runner
+重新检查路径穿越、符号链接逃逸、扩展名、实际大小、单轮数量和总大小，再将
+验证后的绝对路径交给 Claude Code。Claude 必须通过只读 `Read` 工具打开图片，
+不得把文件名、source note 文本或历史回答当作视觉观察。`image_input=true`
+表示适配器能够传递本地图片，不代表 CC Switch 当前模型一定支持视觉；界面和
+连接状态必须将模型兼容性标记为运行时依赖。
+
 Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。当前只
 开放 `code-analysis` 和 `synthesis` 的 `stage-owned` 写入。CLI 仅获得阶段
 目录对应的 `Edit(path/**)` 白名单，`Bash` 和 `tool-library/raw/` 始终禁用。

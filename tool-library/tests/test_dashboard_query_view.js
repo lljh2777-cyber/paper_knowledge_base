@@ -212,6 +212,33 @@ const vaultPayload = JSON.parse(
 	plugin.buildQueryActionInput("仅检查已有证据", priorMessages, "vault"),
 );
 assert.strictEqual(vaultPayload.mode, "vault");
+const imagePayload = JSON.parse(
+	plugin.buildQueryActionInput(
+		"解释这张图",
+		priorMessages,
+		"vault",
+		[{
+			path: "wiki/assets/figures/example.png",
+			name: "example.png",
+			mimeType: "image/png",
+			size: 128,
+			sourceNotePath: "wiki/sources/example.md",
+		}],
+	),
+);
+assert.strictEqual(imagePayload.attachments.length, 1);
+assert.strictEqual(
+	imagePayload.attachments[0].path,
+	"wiki/assets/figures/example.png",
+);
+assert.ok(
+	queryViewSource.includes('backendId === "claude-code"')
+		&& (
+			queryViewSource.includes("Claude Code `Read`")
+			|| queryViewSource.includes("图片由 Read 工具按本地路径读取")
+		),
+	"Claude Code query mode should expose validated Vault image attachments",
+);
 
 const session = plugin.makeQuerySession();
 assert.strictEqual(session.retrievalMode, "web");

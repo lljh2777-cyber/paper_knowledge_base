@@ -132,6 +132,7 @@ interface QueryViewHost extends PluginHost {
 		question: string,
 		priorMessages: PersistedQueryMessage[],
 		mode?: QueryRetrievalMode,
+		attachments?: VaultImageAttachment[],
 	): string;
 	runDirectVaultQuery(
 		runId: string,
@@ -889,10 +890,11 @@ export class QueryWikiView extends ItemView {
 		const controls = footer.createDiv({ cls: "query-wiki-composer-actions" });
 		this.renderRetrievalModeSwitch(controls);
 		const backendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-		const directProfile = backendId === "codex-cli"
+		const directProfile = isCliBackendId(backendId)
 			? null
 			: this.plugin.getProviderProfile(backendId);
-		const canAttachImage = profileSupportsQueryImage(directProfile);
+		const canAttachImage = backendId === "claude-code"
+			|| profileSupportsQueryImage(directProfile);
 		const attach = this.createIconButton(
 			controls,
 			"image-plus",
@@ -908,7 +910,7 @@ export class QueryWikiView extends ItemView {
 				: `附加 Vault 图片（${this.pendingImages.length}/${MAX_QUERY_IMAGE_ATTACHMENTS}）`
 			: directProfile
 				? "当前 Direct API 配置或适配器未启用视觉输入"
-				: "图片附件目前仅支持 Direct API";
+				: "当前 CLI 后端未启用视觉输入";
 		attach.addEventListener("click", () => {
 			if (attach.disabled) return;
 			const draft = this.inputEl?.value || "";
@@ -1172,8 +1174,8 @@ export class QueryWikiView extends ItemView {
 						"Direct API 不执行 Codex skill 或文件写入。",
 					].join("")
 					: usingClaude
-						? "Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。当前仅支持知识库检索，不执行联网搜索或文件写入。模型由 CC Switch 或插件中的模型覆盖决定。"
-					: "",
+						? `Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；不执行联网搜索或文件写入。视觉结果取决于 CC Switch 当前模型。`
+						: "",
 			);
 			if (selectedProfile) {
 				summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
@@ -1212,7 +1214,9 @@ export class QueryWikiView extends ItemView {
 			if (isCliBackendId(backend.value)) {
 				this.plugin.invalidateCliModelDiscovery(backend.value);
 			}
-			if (this.pendingImages.length && !profileSupportsQueryImage(selectedProfile)) {
+			const selectedSupportsImages = backend.value === "claude-code"
+				|| profileSupportsQueryImage(selectedProfile);
+			if (this.pendingImages.length && !selectedSupportsImages) {
 				this.pendingImages = [];
 				new Notice("所选后端未启用视觉输入，已移除待发送图片");
 			}
@@ -1294,7 +1298,9 @@ export class QueryWikiView extends ItemView {
 			return;
 		}
 		const selectedImages = normalizeVaultImageAttachments(this.pendingImages);
-		if (selectedImages.length && !profileSupportsQueryImage(directProfile)) {
+		const backendSupportsImages = backendId === "claude-code"
+			|| profileSupportsQueryImage(directProfile);
+		if (selectedImages.length && !backendSupportsImages) {
 			new Notice("当前执行后端未启用视觉输入，无法发送图片");
 			return;
 		}
@@ -1304,7 +1310,7 @@ export class QueryWikiView extends ItemView {
 			discoveredCount: 0,
 			totalBytes: 0,
 		};
-		if (profileSupportsQueryImage(directProfile)) {
+		if (backendSupportsImages) {
 			try {
 				linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
 			} catch (error) {
@@ -1389,7 +1395,12 @@ export class QueryWikiView extends ItemView {
 				),
 			};
 		assistantMessage.model = executionConfig.model;
-		const input = this.plugin.buildQueryActionInput(question, priorMessages, retrievalMode);
+		const input = this.plugin.buildQueryActionInput(
+			question,
+			priorMessages,
+			retrievalMode,
+			attachments,
+		);
 		let run = null;
 		let completedRun = null;
 		try {
