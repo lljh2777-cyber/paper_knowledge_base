@@ -702,6 +702,7 @@ export default class AgentDashboardPlugin extends Plugin {
 				: this.getProviderProfile(queryBackendId);
 			const retrievalMode = (
 				queryBackendId === "codex-cli"
+				|| queryBackendId === "claude-code"
 				|| profileSupportsDirectWebSearch(queryProfile)
 			)
 				? session.retrievalMode

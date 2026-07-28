@@ -749,9 +749,9 @@ export class ProcessExecutionService {
 							note: "Claude Code Read 工具支持图片；当前 CC Switch 模型的视觉兼容性将在首次图片查询时验证",
 						},
 						webSearch: {
-							supported: false,
+							supported: true,
 							verified: false,
-							note: "Claude Code 后端当前不开放联网搜索",
+							note: "仅在查询侧边栏的“联网搜索”模式开放 WebSearch/WebFetch；实际可用性取决于当前 Claude Code/CC Switch 模型与账号",
 						},
 						responsePreview: responsePreview || "Claude Code 可用",
 					});

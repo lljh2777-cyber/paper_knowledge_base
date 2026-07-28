@@ -1344,9 +1344,9 @@ Execution interrupted before the plugin restarted.`.trim();
               note: "Claude Code Read 工具支持图片；当前 CC Switch 模型的视觉兼容性将在首次图片查询时验证"
             },
             webSearch: {
-              supported: false,
+              supported: true,
               verified: false,
-              note: "Claude Code 后端当前不开放联网搜索"
+              note: "仅在查询侧边栏的“联网搜索”模式开放 WebSearch/WebFetch；实际可用性取决于当前 Claude Code/CC Switch 模型与账号"
             },
             responsePreview: responsePreview || "Claude Code 可用"
           });
@@ -5294,11 +5294,11 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         this.initialQuestion = this.inputEl?.value || "";
         const activeBackendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
         const activeProfile = isCliBackendId(activeBackendId) ? null : this.plugin.getProviderProfile(activeBackendId);
-        if (value === "web" && activeBackendId !== "codex-cli" && !profileSupportsDirectWebSearch(activeProfile)) {
+        if (value === "web" && !isCliBackendId(activeBackendId) && !profileSupportsDirectWebSearch(activeProfile)) {
           if (this.pendingImages.length) this.pendingImages = [];
           await this.plugin.setActiveQueryBackend("codex-cli");
           new import_obsidian9.Notice(
-            activeBackendId === "claude-code" ? "Claude Code 第一阶段不支持联网搜索；已切换到 Codex CLI" : "当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI"
+            "当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI"
           );
         }
         await this.plugin.setActiveQueryMode(value);
@@ -5442,7 +5442,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
           profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
           profileSupportsDirectWebSearch(selectedProfile) ? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。" : "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
           "Direct API 不执行 Codex skill 或文件写入。"
-        ].join("") : usingClaude ? `Claude Code 使用 plan 权限模式，只开放 Read、Glob 和 Grep。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；不执行联网搜索或文件写入。视觉结果取决于 CC Switch 当前模型。` : ""
+        ].join("") : usingClaude ? `Claude Code 使用 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于 CC Switch 当前模型及账号能力。` : ""
       );
       if (selectedProfile) {
         summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
@@ -5487,10 +5487,10 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         new import_obsidian9.Notice("所选后端未启用视觉输入，已移除待发送图片");
       }
       await this.plugin.setActiveQueryBackend(backend.value);
-      if (backend.value !== "codex-cli" && this.session.retrievalMode === "web" && !profileSupportsDirectWebSearch(selectedProfile)) {
+      if (!isCliBackendId(backend.value) && this.session.retrievalMode === "web" && !profileSupportsDirectWebSearch(selectedProfile)) {
         await this.plugin.setActiveQueryMode("vault");
         new import_obsidian9.Notice(
-          backend.value === "claude-code" ? "Claude Code 第一阶段仅支持知识库模式" : "所选 Direct API 未通过联网搜索测试；已切换为知识库模式"
+          "所选 Direct API 未通过联网搜索测试；已切换为知识库模式"
         );
       }
       await this.render();
@@ -5578,7 +5578,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         linkedImageResult.discoveredCount > addedCount ? `从链接笔记发现 ${linkedImageResult.discoveredCount} 张图片，本轮按限制附加 ${addedCount} 张` : `已从链接笔记附加 ${addedCount} 张图片`
       );
     }
-    const retrievalMode = session.retrievalMode === "web" && (backendId === "codex-cli" || profileSupportsDirectWebSearch(directProfile)) ? "web" : "vault";
+    const retrievalMode = session.retrievalMode === "web" && (backendId === "codex-cli" || backendId === "claude-code" || profileSupportsDirectWebSearch(directProfile)) ? "web" : "vault";
     const priorMessages = session.messages.filter((message) => message.status === "done");
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const userMessage = {
@@ -8609,7 +8609,7 @@ ${result.stderr.trim()}` : ""
     this.querySessions = this.querySessions.map((session) => {
       const queryBackendId = this.resolveQueryBackendId(session.queryBackendId);
       const queryProfile = isCliBackendId(queryBackendId) ? null : this.getProviderProfile(queryBackendId);
-      const retrievalMode = queryBackendId === "codex-cli" || profileSupportsDirectWebSearch(queryProfile) ? session.retrievalMode : "vault";
+      const retrievalMode = queryBackendId === "codex-cli" || queryBackendId === "claude-code" || profileSupportsDirectWebSearch(queryProfile) ? session.retrievalMode : "vault";
       if (queryBackendId !== session.queryBackendId || retrievalMode !== session.retrievalMode) {
         changed = true;
       }

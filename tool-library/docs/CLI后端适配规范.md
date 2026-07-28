@@ -32,9 +32,11 @@ tool-library/schemas/
 
 ## Claude Code 当前边界
 
-`claude-code` 的知识库检索使用 `plan` 权限模式，仅开放
-`Read`、`Glob`、`Grep`；批注解释和关键词扩展使用 `dontAsk` 且不开放任何
-工具。两类任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`。
+`claude-code` 的知识库检索使用 `plan` 权限模式。知识库模式仅开放
+`Read`、`Glob`、`Grep`；联网搜索模式在相同只读边界上额外开放
+`WebSearch`、`WebFetch`。批注解释和关键词扩展使用 `dontAsk` 且不开放任何
+工具。所有只读任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`；
+非联网模式还显式禁用 `WebSearch`、`WebFetch`。
 CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
 `--backend-model` 时，runner 才覆盖该模型。
 
@@ -58,11 +60,12 @@ Claude Code。
 
 插件设置为 Claude Code 提供独立二级页面，可配置可执行文件、可选模型覆盖、
 默认推理强度和批注解释后端。查询侧边栏可在 Codex CLI、Claude Code 和
-已验证的 Direct API 配置之间选择。选择 Claude Code 时必须自动限制为
-知识库模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
+已验证的 Direct API 配置之间选择。选择 Claude Code 时可使用知识库或联网
+搜索模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
 模型选择只显示从 CC Switch/Claude 设置或初始化事件中识别出的候选。
 代码分析和综合分析的运行弹窗可切换 Codex CLI 或 Claude Code；Claude 模式
-必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。
+必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。`WebSearch` 和
+`WebFetch` 不得出现在批注、代码分析、综合分析或其他非检索任务中。
 
 ## CLI 模型发现
 

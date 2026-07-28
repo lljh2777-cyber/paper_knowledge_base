@@ -49,6 +49,9 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertTrue(
             by_id["claude-code"]["capabilities"]["image_input"]
         )
+        self.assertTrue(
+            by_id["claude-code"]["capabilities"]["web_search"]
+        )
 
     def test_unknown_backend_fails_with_available_ids(self) -> None:
         with self.assertRaisesRegex(
@@ -156,10 +159,57 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("--safe-mode", command)
         self.assertIn("plan", command)
         self.assertIn("Read,Glob,Grep", command)
-        self.assertIn("Edit,Write,NotebookEdit,Bash", command)
+        denied = command[command.index("--disallowedTools") + 1]
+        self.assertIn("Edit", denied)
+        self.assertIn("Write", denied)
+        self.assertIn("NotebookEdit", denied)
+        self.assertIn("Bash", denied)
+        self.assertIn("WebSearch", denied)
+        self.assertIn("WebFetch", denied)
         self.assertIn("stream-json", command)
         self.assertIn("--json-schema", command)
         self.assertNotIn("--model", command)
+
+    def test_claude_adapter_enables_web_tools_only_for_web_retrieval(
+        self,
+    ) -> None:
+        backend = get_backend("claude-code")
+        schema_path = (
+            PROJECT_ROOT
+            / "tool-library"
+            / "schemas"
+            / "dashboard_retrieval_response.schema.json"
+        )
+        request = BackendCommandRequest(
+            action="vault-retrieval",
+            agent="research-vault-retrieval",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            retrieval_mode="web",
+            output_schema=schema_path,
+            access_policy=BackendAccessPolicy(
+                mode="read-only",
+                write_scope="none",
+                allowed_roots=(PROJECT_ROOT,),
+            ),
+        )
+
+        command = backend.build_command("claude.exe", request)
+        tools_value = command[command.index("--tools") + 1]
+        denied_value = command[command.index("--disallowedTools") + 1]
+
+        self.assertEqual(
+            tools_value,
+            "Read,Glob,Grep,WebSearch,WebFetch",
+        )
+        self.assertNotIn("WebSearch", denied_value)
+        self.assertNotIn("WebFetch", denied_value)
+        self.assertIn("Edit", denied_value)
+        self.assertIn("Bash", denied_value)
 
     def test_claude_adapter_builds_stage_owned_write_command(
         self,
@@ -191,6 +241,8 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("Edit(knowledge-base/wiki/methods/**)", allowed)
         self.assertNotIn(",Edit,", f",{allowed},")
         self.assertIn("Bash", denied)
+        self.assertIn("WebSearch", denied)
+        self.assertIn("WebFetch", denied)
         self.assertIn("Edit(tool-library/raw/**)", denied)
 
     def test_claude_adapter_rejects_full_write_scope(self) -> None:
@@ -237,6 +289,9 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("dontAsk", command)
         self.assertIn("--tools=", command)
         self.assertNotIn("Read,Glob,Grep", command)
+        denied = command[command.index("--disallowedTools") + 1]
+        self.assertIn("WebSearch", denied)
+        self.assertIn("WebFetch", denied)
         self.assertEqual(command[-2:], ["--output-format", "text"])
 
     def test_claude_adapter_normalizes_init_tool_and_result_events(
@@ -268,10 +323,30 @@ class AgentBackendProtocolTests(unittest.TestCase):
                 "vault_sources": [],
             },
         }
+        search_event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "WebSearch",
+                        "input": {"query": "official Claude Code docs"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "WebFetch",
+                        "input": {
+                            "url": "HTTPS://Example.COM:443/docs#section",
+                        },
+                    },
+                ]
+            },
+        }
 
         parsed_init = backend.parse_event(init_event)
         parsed_tool = backend.parse_event(tool_event)
         parsed_result = backend.parse_event(result_event)
+        parsed_search = backend.parse_event(search_event)
 
         self.assertIn(
             "qwen3.7-flash[1m]",
@@ -284,6 +359,20 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertEqual(
             json.loads(parsed_result.final_messages[0])["answer_markdown"],
             "answer",
+        )
+        self.assertEqual(
+            parsed_search.search_queries,
+            ["official Claude Code docs"],
+        )
+        self.assertEqual(
+            parsed_search.source_urls,
+            {"https://example.com/docs"},
+        )
+        self.assertTrue(
+            all(
+                event["stage"] == "web-search"
+                for event in parsed_search.dashboard_events
+            )
         )
 
     def test_codex_adapter_normalizes_status_sources_and_final_text(self) -> None:

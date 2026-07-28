@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .base import (
     BACKEND_PROTOCOL_VERSION,
@@ -15,6 +16,7 @@ from .base import (
 
 
 _READ_TOOLS = "Read,Glob,Grep"
+_WEB_TOOLS = ("WebSearch", "WebFetch")
 _WRITE_TOOL_NAMES = ("Edit", "Write", "NotebookEdit", "Bash")
 _STAGE_WRITE_ACTIONS = {"code-analysis", "synthesis"}
 
@@ -44,6 +46,57 @@ def _message_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [block for block in content if isinstance(block, dict)]
 
 
+def _canonicalize_external_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if not parsed.hostname or parsed.username or parsed.password:
+        return ""
+    host = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    netloc = host
+    if port and not (
+        (parsed.scheme.lower() == "http" and port == 80)
+        or (parsed.scheme.lower() == "https" and port == 443)
+    ):
+        netloc = f"{host}:{port}"
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            netloc,
+            parsed.path or "/",
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _collect_web_tool_metadata(
+    tool_name: str,
+    tool_input: Any,
+    parsed: ParsedBackendEvent,
+) -> None:
+    if not isinstance(tool_input, dict):
+        return
+    if tool_name == "WebSearch":
+        query = str(tool_input.get("query") or "").strip()
+        if query:
+            parsed.search_queries.append(query[:500])
+    if tool_name == "WebFetch":
+        url = _canonicalize_external_url(tool_input.get("url"))
+        if url:
+            parsed.source_urls.add(url)
+
+
 class ClaudeCodeBackend:
     backend_id = "claude-code"
     label = "Claude Code"
@@ -55,7 +108,7 @@ class ClaudeCodeBackend:
         reasoning_effort=True,
         service_tier=False,
         file_write=True,
-        web_search=False,
+        web_search=True,
         citations=False,
         image_input=True,
     )
@@ -84,6 +137,10 @@ class ClaudeCodeBackend:
             )
 
         needs_vault_read = request.action == "vault-retrieval"
+        allows_web = (
+            needs_vault_read
+            and request.retrieval_mode == "web"
+        )
         command = [
             executable,
             "-p",
@@ -112,6 +169,7 @@ class ClaudeCodeBackend:
                     ",".join(
                         [
                             "Bash",
+                            *_WEB_TOOLS,
                             *[
                                 f"Edit({_permission_path(request.project_root, root)})"
                                 for root in policy.denied_roots
@@ -121,11 +179,22 @@ class ClaudeCodeBackend:
                 ]
             )
         elif needs_vault_read:
-            command.extend(["--tools", _READ_TOOLS])
+            retrieval_tools = ",".join(
+                [
+                    _READ_TOOLS,
+                    *(_WEB_TOOLS if allows_web else ()),
+                ]
+            )
+            command.extend(["--tools", retrieval_tools])
             command.extend(
                 [
                     "--disallowedTools",
-                    ",".join(_WRITE_TOOL_NAMES),
+                    ",".join(
+                        [
+                            *_WRITE_TOOL_NAMES,
+                            *(() if allows_web else _WEB_TOOLS),
+                        ]
+                    ),
                 ]
             )
         else:
@@ -133,7 +202,7 @@ class ClaudeCodeBackend:
             command.extend(
                 [
                     "--disallowedTools",
-                    ",".join(_WRITE_TOOL_NAMES),
+                    ",".join([*_WRITE_TOOL_NAMES, *_WEB_TOOLS]),
                 ]
             )
         command.append("--no-session-persistence")
@@ -186,6 +255,24 @@ class ClaudeCodeBackend:
                 if block.get("type") != "tool_use":
                     continue
                 tool_name = str(block.get("name") or "")
+                if tool_name in _WEB_TOOLS:
+                    _collect_web_tool_metadata(
+                        tool_name,
+                        block.get("input"),
+                        parsed,
+                    )
+                    parsed.dashboard_events.append(
+                        {
+                            "type": "status",
+                            "stage": "web-search",
+                            "label": (
+                                "正在读取联网来源"
+                                if tool_name == "WebFetch"
+                                else "正在执行联网搜索"
+                            ),
+                        }
+                    )
+                    continue
                 if tool_name in {"Read", "Glob", "Grep"}:
                     parsed.dashboard_events.append(
                         {
