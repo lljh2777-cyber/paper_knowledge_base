@@ -58,8 +58,9 @@ Claude Code。
 若原生安装目录未加入 `PATH`，插件或 runner 应保存并传入 `claude.exe`
 绝对路径，不应依赖交互式终端的临时环境。
 
-插件设置为 Claude Code 提供独立二级页面，可配置可执行文件、可选模型覆盖、
-默认推理强度和批注解释后端。查询侧边栏可在 Codex CLI、Claude Code 和
+插件设置为 Claude Code 提供独立二级页面，可配置可执行文件、可选模型覆盖和
+默认推理强度；批注 AI 使用独立二级页面选择自动、Codex CLI、Claude Code
+或已验证 Direct API，并保存批注专用模型和参数。查询侧边栏可在 Codex CLI、Claude Code 和
 已验证的 Direct API 配置之间选择。选择 Claude Code 时可使用知识库或联网
 搜索模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
 模型选择只显示从 CC Switch/Claude 设置或初始化事件中识别出的候选。

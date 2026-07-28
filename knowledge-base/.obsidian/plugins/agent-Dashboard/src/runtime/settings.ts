@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { ProviderProfile } from "../providers/profile";
-import type { CliBackendId } from "../config";
 
 const LEGACY_CODEX_EXECUTABLE =
 	"C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
@@ -27,7 +26,13 @@ export interface DashboardSettings {
 	claudeExecutable: string;
 	claudeModel: string;
 	claudeReasoningEffort: string;
-	annotationBackendId: "auto" | CliBackendId;
+	annotationBackendId: string;
+	annotationCodexModel: string;
+	annotationCodexReasoningEffort: string;
+	annotationCodexServiceTier: "default" | "fast";
+	annotationClaudeModel: string;
+	annotationClaudeReasoningEffort: string;
+	annotationMaxTokens: number;
 	pythonExecutable: string;
 	rscriptExecutable: string;
 	codePracticeTimeoutSeconds: number;
@@ -95,6 +100,12 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	claudeModel: "",
 	claudeReasoningEffort: "medium",
 	annotationBackendId: "auto",
+	annotationCodexModel: "",
+	annotationCodexReasoningEffort: "medium",
+	annotationCodexServiceTier: "default",
+	annotationClaudeModel: "",
+	annotationClaudeReasoningEffort: "medium",
+	annotationMaxTokens: 900,
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
 	codePracticeTimeoutSeconds: 30,

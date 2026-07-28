@@ -752,10 +752,35 @@ export default class AgentDashboardPlugin extends Plugin {
 			this.settings.claudeReasoningEffort = DEFAULT_SETTINGS.claudeReasoningEffort;
 			changed = true;
 		}
-		if (!["auto", "codex-cli", "claude-code"].includes(this.settings.annotationBackendId)) {
+		const annotationBackendId = String(this.settings.annotationBackendId || "auto");
+		if (
+			!["auto", "codex-cli", "claude-code"].includes(annotationBackendId)
+			&& !normalizedProfiles.some(
+				(profile) => profile.id === annotationBackendId && profile.lastTest?.ok,
+			)
+		) {
 			this.settings.annotationBackendId = "auto";
 			changed = true;
 		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationCodexReasoningEffort)) {
+			this.settings.annotationCodexReasoningEffort = DEFAULT_SETTINGS.annotationCodexReasoningEffort;
+			changed = true;
+		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationClaudeReasoningEffort)) {
+			this.settings.annotationClaudeReasoningEffort = DEFAULT_SETTINGS.annotationClaudeReasoningEffort;
+			changed = true;
+		}
+		if (!["default", "fast"].includes(this.settings.annotationCodexServiceTier)) {
+			this.settings.annotationCodexServiceTier = "default";
+			changed = true;
+		}
+		const annotationMaxTokens = Number.parseInt(
+			String(this.settings.annotationMaxTokens || ""),
+			10,
+		);
+		this.settings.annotationMaxTokens = Number.isFinite(annotationMaxTokens)
+			? Math.max(128, Math.min(4096, annotationMaxTokens))
+			: DEFAULT_SETTINGS.annotationMaxTokens;
 		this.taskRuns = this.taskRuns.map((run) => {
 			if (
 				run.actionId === "vault-lint"

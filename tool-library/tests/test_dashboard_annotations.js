@@ -45,6 +45,8 @@ const source = (relativePath) => fs.readFileSync(path.join(pluginRoot, relativeP
 const pluginSource = source("src/plugin.ts");
 const serviceSource = source("src/annotations/annotation-service.ts");
 const popoverSource = source("src/annotations/annotation-popover.ts");
+const settingsSource = source("src/settings/settings-tab.ts");
+const runtimeSettingsSource = source("src/runtime/settings.ts");
 const actionsSource = source("src/actions.ts");
 const styles = source("styles.css");
 
@@ -62,8 +64,19 @@ assert.match(
 assert.match(serviceSource, /wiki\/annotations/);
 assert.match(serviceSource, /#\^\$\{record\.id\}/);
 assert.match(serviceSource, /settings\.annotationBackendId/);
+assert.match(serviceSource, /settings\.annotationMaxTokens/);
+assert.match(serviceSource, /settings\.annotationCodexModel/);
+assert.match(serviceSource, /settings\.annotationCodexReasoningEffort/);
+assert.match(serviceSource, /settings\.annotationCodexServiceTier/);
+assert.match(serviceSource, /settings\.annotationClaudeModel/);
+assert.match(serviceSource, /settings\.annotationClaudeReasoningEffort/);
 assert.match(serviceSource, /resolveCliActionExecutionConfig/);
 assert.match(serviceSource, /getCliBackendLabel/);
+assert.match(settingsSource, /title:\s*"批注 AI"/);
+assert.match(settingsSource, /renderAnnotationSettings/);
+assert.match(settingsSource, /Direct API · \$\{profile\.name\}/);
+assert.match(settingsSource, /最大输出 Token/);
+assert.match(runtimeSettingsSource, /annotationMaxTokens:\s*900/);
 assert.match(pluginSource, /archiveStatus:\s*"pending"/);
 assert.match(popoverSource, /保留并存档/);
 assert.match(popoverSource, /手动批注/);

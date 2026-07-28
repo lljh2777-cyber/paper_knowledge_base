@@ -64,7 +64,7 @@ sources / methods / concepts / code / projects / synthesis
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
 | 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
 
-阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。
+阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code 或已验证 Direct API，并配置批注专用模型、推理强度、速度和输出长度。
 
 ### 模型后端
 

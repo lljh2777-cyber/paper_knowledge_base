@@ -111,6 +111,7 @@ for (const settingsPage of [
 	'renderRuntimeSettings(containerEl)',
 	'renderCodexSettings(containerEl)',
 	'renderClaudeSettings(containerEl)',
+	'renderAnnotationSettings(containerEl)',
 	'renderDirectApiSettings(containerEl)',
 ]) {
 	assert.ok(
@@ -119,7 +120,7 @@ for (const settingsPage of [
 	);
 }
 assert.ok(
-	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "claude" | "direct-api"'),
+	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "claude" | "annotations" | "direct-api"'),
 	"settings should retain a dedicated page state for each configuration module",
 );
 assert.ok(

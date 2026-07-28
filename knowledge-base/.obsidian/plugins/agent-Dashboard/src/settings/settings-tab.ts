@@ -9,10 +9,13 @@ import {
 } from "obsidian";
 
 import {
+	getCliBackendLabel,
 	MAX_QUERY_IMAGE_ATTACHMENTS,
+	MODEL_OPTIONS,
 	PROVIDER_TYPES,
 	PROVIDER_TYPE_BY_ID,
 	REASONING_OPTIONS,
+	type CliBackendId,
 	type ProviderTypeId,
 } from "../config";
 import {
@@ -38,9 +41,10 @@ interface SettingsPluginHost extends PluginHost {
 	listProviderModels(profileId: string): Promise<ProviderModel[]>;
 	testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult>;
 	getProviderErrorLabel(type: string): string;
+	supportsFast(model: string): boolean;
 }
 
-type SettingsPage = "home" | "runtime" | "codex" | "claude" | "direct-api";
+type SettingsPage = "home" | "runtime" | "codex" | "claude" | "annotations" | "direct-api";
 
 export class AgentDashboardSettingTab extends PluginSettingTab {
 	declare plugin: Plugin & SettingsPluginHost;
@@ -64,6 +68,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				break;
 			case "claude":
 				this.renderClaudeSettings(containerEl);
+				break;
+			case "annotations":
+				this.renderAnnotationSettings(containerEl);
 				break;
 			case "direct-api":
 				this.renderDirectApiSettings(containerEl);
@@ -106,6 +113,26 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			title: "Claude Code",
 			description: "只读检索与批注解释、CC Switch 模型覆盖和连接测试。",
 			status: `${this.plugin.settings.claudeModel || "CC Switch 默认"} · ${claudeReasoningLabel}`,
+		});
+		const annotationBackendId = this.plugin.settings.annotationBackendId || "auto";
+		const annotationProfile = this.plugin.settings.providerProfiles.find(
+			(profile) => profile.id === annotationBackendId,
+		);
+		const annotationStatus = annotationBackendId === "auto"
+			? "自动选择"
+			: annotationBackendId === "codex-cli"
+				? `Codex · ${this.plugin.settings.annotationCodexModel || "默认模型"}`
+				: annotationBackendId === "claude-code"
+					? `Claude · ${this.plugin.settings.annotationClaudeModel || "CC Switch 默认"}`
+					: annotationProfile
+						? `${annotationProfile.name} · ${annotationProfile.model}`
+						: "自动选择";
+		this.createSettingsNavigationItem(navigation, {
+			page: "annotations",
+			icon: "message-square-text",
+			title: "批注 AI",
+			description: "选择批注解释后端、模型、推理强度、速度和输出长度。",
+			status: annotationStatus,
 		});
 		const profiles = this.plugin.settings.providerProfiles;
 		const activeProfile = profiles.find(
@@ -324,24 +351,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			.setDesc(
 				`知识库查询可发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片。插件只传递经过校验的本地路径，Claude Code 使用只读 Read 工具打开图片；实际视觉能力取决于 CC Switch 当前模型。`,
 			);
-		new Setting(containerEl)
-			.setName("批注解释后端")
-			.setDesc("自动模式优先使用已启用的 Direct API，否则使用 Codex。也可固定为某个本地 CLI。")
-			.addDropdown((dropdown) => {
-				dropdown
-					.addOption("auto", "自动")
-					.addOption("codex-cli", "Codex CLI")
-					.addOption("claude-code", "Claude Code")
-					.setValue(this.plugin.settings.annotationBackendId)
-					.onChange(async (value) => {
-						this.plugin.settings.annotationBackendId = value === "claude-code"
-							? "claude-code"
-							: value === "codex-cli"
-								? "codex-cli"
-								: "auto";
-						await this.plugin.saveSettings();
-					});
-			});
 		this.createProviderSectionHeader(
 			containerEl,
 			"只读执行边界",
@@ -367,6 +376,254 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		if (resultState?.result) {
 			this.renderConnectionResult(containerEl, resultState.result);
 		}
+	}
+
+	private renderAnnotationSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"批注 AI",
+			"单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读，不开放文件或联网工具。",
+			true,
+		);
+		const verifiedProfiles = this.plugin.settings.providerProfiles.filter(
+			(profile) => profile.lastTest?.ok,
+		);
+		const backendId = this.plugin.settings.annotationBackendId || "auto";
+		new Setting(containerEl)
+			.setName("执行后端")
+			.setDesc("自动模式使用当前启用且已验证的 Direct API；未配置时使用 Codex CLI。")
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption("auto", "自动选择")
+					.addOption("codex-cli", "Codex CLI")
+					.addOption("claude-code", "Claude Code");
+				verifiedProfiles.forEach((profile) => {
+					dropdown.addOption(profile.id, `Direct API · ${profile.name}`);
+				});
+				dropdown
+					.setValue(backendId)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationBackendId = value;
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		if (backendId === "auto") {
+			const activeProfile = verifiedProfiles.find(
+				(profile) => profile.id === this.plugin.settings.activeProviderId,
+			);
+			new Setting(containerEl)
+				.setName("自动选择顺序")
+				.setDesc(
+					activeProfile
+						? `使用 Direct API“${activeProfile.name}”（${activeProfile.model}）；若以后停用该配置，则使用下方 Codex 回退参数。`
+						: "当前没有启用且已验证的 Direct API，将直接使用下方 Codex 回退参数。",
+				);
+			this.renderAnnotationCliSettings(containerEl, "codex-cli", true);
+			this.renderAnnotationTokenSetting(containerEl, Boolean(activeProfile));
+			return;
+		}
+
+		if (backendId === "codex-cli" || backendId === "claude-code") {
+			this.renderAnnotationCliSettings(containerEl, backendId);
+			return;
+		}
+
+		const profile = verifiedProfiles.find((item) => item.id === backendId);
+		if (!profile) {
+			new Setting(containerEl)
+				.setName("配置不可用")
+				.setDesc("所选 Direct API 未通过连接测试，保存后会自动回退到“自动选择”。");
+			return;
+		}
+		this.createProviderSectionHeader(
+			containerEl,
+			"Direct API 参数",
+			"批注解释使用该配置保存的模型和 endpoint；如需更换供应商模型，请进入 Direct API 页面修改配置。",
+		);
+		new Setting(containerEl)
+			.setName("模型")
+			.setDesc(`${profile.name} · ${profile.model || "未选择模型"}`)
+			.addButton((button) =>
+				button
+					.setButtonText("编辑配置")
+					.onClick(() => {
+						this.plugin.providerEditorProfileId = profile.id;
+						this.activePage = "direct-api";
+						this.display();
+					})
+			);
+		this.renderAnnotationTokenSetting(containerEl, true);
+	}
+
+	private renderAnnotationCliSettings(
+		containerEl: HTMLElement,
+		backendId: CliBackendId,
+		isFallback = false,
+	): void {
+		const isClaude = backendId === "claude-code";
+		const title = isFallback
+			? "Codex 回退参数"
+			: `${getCliBackendLabel(backendId)} 参数`;
+		this.createProviderSectionHeader(
+			containerEl,
+			title,
+			isClaude
+				? "模型留空时沿用 CC Switch 当前模型；Claude Code 批注不开放任何工具。"
+				: "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。",
+		);
+		const discovery = this.plugin.getCliModelDiscovery(backendId);
+		const selectedModel = isClaude
+			? this.plugin.settings.annotationClaudeModel
+			: this.plugin.settings.annotationCodexModel;
+		const models = discovery?.models || (
+			isClaude
+				? []
+				: MODEL_OPTIONS.map((option) => ({
+					id: option.id,
+					label: option.label,
+					description: option.description,
+					supportsFast: option.supportsFast,
+				}))
+		);
+		new Setting(containerEl)
+			.setName("模型")
+			.setDesc(
+				discovery
+					? `模型来源：${discovery.source}${discovery.complete ? "" : "（候选列表可能不完整）"}`
+					: "正在识别当前后端模型；也可先使用后端默认值。",
+			)
+			.addDropdown((dropdown) => {
+				dropdown.addOption(
+					"",
+					isClaude
+						? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}`
+						: "使用批注默认模型",
+				);
+				models.forEach((model) => {
+					dropdown.addOption(
+						model.id,
+						model.description
+							? `${model.label} · ${model.description}`
+							: model.label,
+					);
+				});
+				if (selectedModel && !models.some((model) => model.id === selectedModel)) {
+					dropdown.addOption(selectedModel, `${selectedModel} · 已保存的自定义模型`);
+				}
+				dropdown
+					.setValue(selectedModel)
+					.onChange(async (value) => {
+						if (isClaude) {
+							this.plugin.settings.annotationClaudeModel = value;
+						} else {
+							this.plugin.settings.annotationCodexModel = value;
+							if (
+								this.plugin.settings.annotationCodexServiceTier === "fast"
+								&& !this.plugin.supportsFast(value || this.plugin.settings.codexModel)
+							) {
+								this.plugin.settings.annotationCodexServiceTier = "default";
+							}
+						}
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			})
+			.addExtraButton((button) =>
+				button
+					.setIcon("refresh-cw")
+					.setTooltip("重新识别模型")
+					.onClick(async () => {
+						await this.plugin.discoverCliModels(backendId, true);
+						this.display();
+					})
+			);
+
+		const reasoningValue = isClaude
+			? this.plugin.settings.annotationClaudeReasoningEffort
+			: this.plugin.settings.annotationCodexReasoningEffort;
+		new Setting(containerEl)
+			.setName("推理强度")
+			.setDesc("仅影响批注解释，不改变查询、深读或综合分析任务。")
+			.addDropdown((dropdown) => {
+				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+				dropdown
+					.setValue(reasoningValue)
+					.onChange(async (value) => {
+						if (isClaude) {
+							this.plugin.settings.annotationClaudeReasoningEffort = value;
+						} else {
+							this.plugin.settings.annotationCodexReasoningEffort = value;
+						}
+						await this.plugin.saveSettings();
+					});
+			});
+
+		if (!isClaude) {
+			const effectiveModel = selectedModel || this.plugin.settings.codexModel;
+			const fastSupported = this.plugin.supportsFast(effectiveModel);
+			new Setting(containerEl)
+				.setName("速度")
+				.setDesc(
+					fastSupported
+						? "标准为默认速度；快速模式可能增加用量。"
+						: "当前模型未声明支持快速服务档位。",
+				)
+				.addDropdown((dropdown) => {
+					dropdown
+						.addOption("default", "标准")
+						.addOption("fast", "快速")
+						.setValue(
+							fastSupported
+								? this.plugin.settings.annotationCodexServiceTier
+								: "default",
+						)
+						.setDisabled(!fastSupported)
+						.onChange(async (value) => {
+							this.plugin.settings.annotationCodexServiceTier = value === "fast"
+								? "fast"
+								: "default";
+							await this.plugin.saveSettings();
+						});
+				});
+		}
+
+		if (!discovery) {
+			void this.plugin.discoverCliModels(backendId)
+				.then(() => {
+					if (this.activePage === "annotations") this.display();
+				})
+				.catch(() => undefined);
+		}
+	}
+
+	private renderAnnotationTokenSetting(
+		containerEl: HTMLElement,
+		enabled: boolean,
+	): void {
+		new Setting(containerEl)
+			.setName("最大输出 Token")
+			.setDesc(
+				enabled
+					? "仅用于 Direct API 批注解释，范围 128-4096。CLI 后端不支持此处限制。"
+					: "当前自动模式没有启用 Direct API；该参数会保留，待 Direct API 可用时生效。",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("900")
+					.setValue(String(this.plugin.settings.annotationMaxTokens))
+					.setDisabled(!enabled)
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (!Number.isFinite(parsed)) return;
+						this.plugin.settings.annotationMaxTokens = Math.max(
+							128,
+							Math.min(4096, parsed),
+						);
+						await this.plugin.saveSettings();
+					})
+			);
 	}
 
 	private renderDirectApiSettings(containerEl: HTMLElement): void {

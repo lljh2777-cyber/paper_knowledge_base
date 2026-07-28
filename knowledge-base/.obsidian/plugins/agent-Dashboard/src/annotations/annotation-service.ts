@@ -437,17 +437,21 @@ export class AnnotationService {
 			selection.context,
 		].filter(Boolean).join("\n");
 		const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
-		const activeProfile = this.plugin.getProviderProfile(this.plugin.settings.activeProviderId);
-		if (configuredBackend === "auto" && activeProfile?.lastTest?.ok) {
-			const provider = this.plugin.createLLMProvider(activeProfile);
+		const directProfile = configuredBackend === "auto"
+			? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId)
+			: configuredBackend !== "codex-cli" && configuredBackend !== "claude-code"
+				? this.plugin.getProviderProfile(configuredBackend)
+				: null;
+		if (directProfile?.lastTest?.ok) {
+			const provider = this.plugin.createLLMProvider(directProfile);
 			const result = await provider.complete(
 				{
-					model: activeProfile.model,
+					model: directProfile.model,
 					messages: [
 						{ role: "system", content: system },
 						{ role: "user", content: user },
 					],
-					maxTokens: 900,
+					maxTokens: this.plugin.settings.annotationMaxTokens,
 				},
 				{ registerCancel },
 			);
@@ -455,8 +459,8 @@ export class AnnotationService {
 			if (!text) throw new Error("模型返回了空解释");
 			return {
 				text,
-				provider: activeProfile.name,
-				model: activeProfile.model,
+				provider: directProfile.name,
+				model: directProfile.model,
 			};
 		}
 
@@ -469,9 +473,21 @@ export class AnnotationService {
 		const cliBackend: CliBackendId = configuredBackend === "claude-code"
 			? "claude-code"
 			: "codex-cli";
+		const annotationOverrides = cliBackend === "claude-code"
+			? {
+				model: this.plugin.settings.annotationClaudeModel,
+				reasoningEffort: this.plugin.settings.annotationClaudeReasoningEffort,
+				serviceTier: "default" as const,
+			}
+			: {
+				model: this.plugin.settings.annotationCodexModel,
+				reasoningEffort: this.plugin.settings.annotationCodexReasoningEffort,
+				serviceTier: this.plugin.settings.annotationCodexServiceTier,
+			};
 		const executionConfig = this.plugin.resolveCliActionExecutionConfig(
 			action,
 			cliBackend,
+			annotationOverrides,
 		);
 		const result = await this.plugin.runVaultAction(
 			runId,
