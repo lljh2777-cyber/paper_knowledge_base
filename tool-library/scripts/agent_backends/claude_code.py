@@ -145,6 +145,12 @@ class ClaudeCodeBackend:
             executable,
             "-p",
             "--safe-mode",
+            "--setting-sources",
+            (
+                "user,project,local"
+                if request.backend_options.get("config_source") == "cc-switch"
+                else "project,local"
+            ),
             "--permission-mode",
             "plan" if needs_vault_read else "dontAsk",
         ]

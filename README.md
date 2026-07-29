@@ -70,13 +70,13 @@ sources / methods / concepts / code / projects / synthesis
 
 插件支持三类查询后端：
 
-1. **Codex CLI**：默认模式，复用本机 Codex 的认证、模型和沙箱配置。
-2. **Claude Code**：查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和综合分析支持受审计的阶段所有权写入，可沿用 CC Switch 管理的模型。
+1. **Codex CLI**：可在设置中选择官方 Codex 或 CC Switch。官方模式显式使用 OpenAI provider 和 Dashboard 的官方模型策略；CC Switch 模式沿用当前 `~/.codex/config.toml`，插件不改写供应商或凭据文件。
+2. **Claude Code**：可在设置中选择官方 Claude Code 或 CC Switch 配置来源。查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和综合分析支持受审计的阶段所有权写入。
 3. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
 
-CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli` 与 `claude-code`；切换查询后端时，Codex 通过 `app-server model/list` 自动获取真实模型目录，Claude 从 CC Switch/Claude 设置和初始化事件识别当前模型及候选。Claude 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入，并由宿主生成变更清单、审计路径、执行后置体检和失败回滚。完整写入任务仍使用 Codex CLI；OpenCode 尚未接入。
+CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli` 与 `claude-code`；两者都可在官方配置与 CC Switch 当前配置之间切换。Codex 通过 `app-server model/list` 获取所选 provider 的模型目录，Claude 按所选来源使用官方 CLI 别名或 CC Switch 用户设置，并通过初始化事件识别实际模型。Claude 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入，并由宿主生成变更清单、审计路径、执行后置体检和失败回滚。完整写入任务仍使用 Codex CLI；OpenCode 尚未接入。
 
 ## Skills 与智能体
 

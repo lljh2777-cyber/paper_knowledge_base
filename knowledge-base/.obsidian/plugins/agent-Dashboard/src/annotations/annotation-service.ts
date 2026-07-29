@@ -8,6 +8,7 @@ import {
 
 import type AgentDashboardPlugin from "../plugin";
 import { getCliBackendLabel, type CliBackendId } from "../config";
+import { getClaudeDefaultModelLabel } from "../runtime/settings";
 import type {
 	AnnotationDraft,
 	AnnotationExplanation,
@@ -505,7 +506,9 @@ export class AnnotationService {
 		return {
 			text,
 			provider: getCliBackendLabel(cliBackend),
-			model: executionConfig.model || "CC Switch 默认模型",
+			model: executionConfig.model || getClaudeDefaultModelLabel(
+				this.plugin.settings.claudeConfigSource,
+			),
 		};
 	}
 

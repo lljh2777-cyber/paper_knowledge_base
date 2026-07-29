@@ -52,6 +52,30 @@ function asRecord(value: unknown): Record<string, unknown> {
 		: {};
 }
 
+function createClaudeProcessEnv(settings: DashboardSettings): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		PYTHONUTF8: "1",
+		PYTHONIOENCODING: "utf-8",
+	};
+	if (settings.claudeConfigSource !== "official") return env;
+	for (const key of [
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_FABLE_MODEL",
+		"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+	]) {
+		delete env[key];
+	}
+	return env;
+}
+
 export class ProcessExecutionService {
 	constructor(private readonly state: DashboardLifecycleState) {}
 
@@ -66,16 +90,45 @@ export class ProcessExecutionService {
 
 	private discoverCodexModels(settings: DashboardSettings): Promise<CliModelDiscoveryResult> {
 		const executable = String(settings.codexExecutable || "");
+		const useOfficialConfig = settings.codexConfigSource === "official";
+		let switchedModel = "";
+		let switchedProvider = "";
+		if (!useOfficialConfig) {
+			const codexHome = String(process.env.CODEX_HOME || "").trim()
+				|| path.join(process.env.USERPROFILE || "", ".codex");
+			try {
+				const lines = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8")
+					.split(/\r?\n/);
+				for (const rawLine of lines) {
+					const line = rawLine.trim();
+					if (line.startsWith("[")) break;
+					const match = line.match(/^(model|model_provider)\s*=\s*["']([^"']+)["']/);
+					if (match?.[1] === "model") switchedModel = match[2].trim();
+					if (match?.[1] === "model_provider") switchedProvider = match[2].trim();
+				}
+			} catch {
+				// The app-server may still expose the active CC Switch model.
+			}
+		}
 		const fallback = (message = ""): CliModelDiscoveryResult => ({
 			backendId: "codex-cli",
-			models: MODEL_OPTIONS.map((model) => ({
-				id: model.id,
-				label: model.label,
-				description: model.description,
-				supportsFast: model.supportsFast,
-			})),
-			effectiveModel: settings.codexModel,
-			source: "插件静态回退",
+			models: useOfficialConfig
+				? MODEL_OPTIONS.map((model) => ({
+					id: model.id,
+					label: model.label,
+					description: model.description,
+					supportsFast: model.supportsFast,
+				}))
+				: switchedModel
+					? [{
+						id: switchedModel,
+						label: `当前模型 · ${switchedModel}`,
+						description: switchedProvider ? `provider: ${switchedProvider}` : undefined,
+						supportsFast: false,
+					}]
+					: [],
+			effectiveModel: useOfficialConfig ? settings.codexModel : switchedModel,
+			source: useOfficialConfig ? "Codex 官方静态回退" : "CC Switch 当前配置",
 			complete: false,
 			message,
 			discoveredAt: new Date().toISOString(),
@@ -88,7 +141,14 @@ export class ProcessExecutionService {
 			let stdoutBuffer = "";
 			let stderr = "";
 			let timer = 0;
-			const child = spawn(executable, ["app-server", "--stdio"], {
+			const appServerArgs = [
+				...(useOfficialConfig
+					? ["--config", 'model_provider="openai"']
+					: []),
+				"app-server",
+				"--stdio",
+			];
+			const child = spawn(executable, appServerArgs, {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,
@@ -154,8 +214,12 @@ export class ProcessExecutionService {
 				finish({
 					backendId: "codex-cli",
 					models,
-					effectiveModel: settings.codexModel || catalogDefault,
-					source: "Codex app-server",
+					effectiveModel: useOfficialConfig
+						? settings.codexModel || catalogDefault
+						: switchedModel || catalogDefault,
+					source: useOfficialConfig
+						? "Codex app-server · 官方 OpenAI"
+						: "Codex app-server · CC Switch",
 					complete: true,
 					discoveredAt: new Date().toISOString(),
 				});
@@ -209,28 +273,39 @@ export class ProcessExecutionService {
 		};
 		let configuredModel = "";
 		let settingsFound = false;
-		const settingsPath = path.join(
-			process.env.USERPROFILE || "",
-			".claude",
-			"settings.json",
-		);
-		try {
-			const source = asRecord(JSON.parse(fs.readFileSync(settingsPath, "utf8")));
-			const env = asRecord(source.env);
-			settingsFound = true;
-			configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
-			addModel(configuredModel, configuredModel ? `当前模型 · ${configuredModel}` : "");
-			for (const [key, label] of [
-				["ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"],
-				["ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"],
-				["ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"],
-				["ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"],
-			] as const) {
-				const model = String(env[key] || "").trim();
-				addModel(model, model ? `${label} · ${model}` : "");
+		if (settings.claudeConfigSource === "cc-switch") {
+			const settingsPath = path.join(
+				process.env.USERPROFILE || "",
+				".claude",
+				"settings.json",
+			);
+			try {
+				const source = asRecord(JSON.parse(fs.readFileSync(settingsPath, "utf8")));
+				const env = asRecord(source.env);
+				settingsFound = true;
+				configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
+				addModel(configuredModel, configuredModel ? `当前模型 · ${configuredModel}` : "");
+				for (const [key, label] of [
+					["ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"],
+					["ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"],
+					["ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"],
+					["ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"],
+				] as const) {
+					const model = String(env[key] || "").trim();
+					addModel(model, model ? `${label} · ${model}` : "");
+				}
+			} catch {
+				// An explicit model can still be used when CC Switch settings are unavailable.
 			}
-		} catch {
-			// Claude can still use an explicit plugin model or its own internal default.
+		} else {
+			for (const [id, label] of [
+				["sonnet", "Sonnet · 官方 CLI 别名"],
+				["opus", "Opus · 官方 CLI 别名"],
+				["haiku", "Haiku · 官方 CLI 别名"],
+				["fable", "Fable · 官方 CLI 别名"],
+			] as const) {
+				addModel(id, label);
+			}
 		}
 		const testedResult = this.state.providerRuntimeState.get("claude-code")?.result;
 		const testedModel = testedResult?.ok
@@ -249,13 +324,17 @@ export class ProcessExecutionService {
 				? "插件设置覆盖"
 				: testedModel
 					? "Claude 初始化事件"
-					: settingsFound
-						? "Claude settings / CC Switch"
-						: "Claude Code 默认配置",
+					: settings.claudeConfigSource === "cc-switch"
+						? settingsFound
+							? "CC Switch 用户设置"
+							: "CC Switch 配置"
+						: "官方 Claude Code",
 			complete: false,
-			message: settingsFound
-				? "Claude Code 不提供完整模型目录；此处列出 CC Switch/Claude 设置中可识别的模型。"
-				: "Claude Code 不提供完整模型目录，且未找到可读取的 CC Switch/Claude 模型设置。",
+			message: settings.claudeConfigSource === "cc-switch"
+				? settingsFound
+					? "Claude Code 不提供完整模型目录；此处列出 CC Switch 用户设置中可识别的模型。"
+					: "未找到可读取的 CC Switch 用户设置；可检查配置来源或手动填写模型。"
+				: "Claude Code 不提供完整模型目录；此处列出官方 CLI 别名和初始化事件中确认的模型。",
 			discoveredAt: new Date().toISOString(),
 		};
 	}
@@ -412,7 +491,7 @@ export class ProcessExecutionService {
 				? settings.claudeExecutable
 				: settings.codexExecutable,
 			"--reasoning-effort",
-			executionConfig.reasoningEffort,
+			executionConfig.reasoningEffort || "default",
 			"--service-tier",
 			executionConfig.serviceTier,
 			"--python",
@@ -424,6 +503,12 @@ export class ProcessExecutionService {
 			"--run-id",
 			runId,
 		];
+		args.push(
+			"--backend-config-source",
+			executionConfig.backend === "claude-code"
+				? settings.claudeConfigSource
+				: settings.codexConfigSource,
+		);
 		if (executionConfig.backend === "claude-code") {
 			if (executionConfig.model) {
 				args.push("--backend-model", executionConfig.model);
@@ -575,11 +660,14 @@ export class ProcessExecutionService {
 	probeCodexCli(settings: DashboardSettings): Promise<ProviderConnectionTestResult> {
 		const startedAt = Date.now();
 		const executable = String(settings.codexExecutable || "");
+		const displayModel = settings.codexConfigSource === "cc-switch"
+			? "CC Switch 当前模型"
+			: settings.codexModel || "Codex 官方默认模型";
 		if (!executable || !fs.existsSync(executable)) {
 			return Promise.resolve({
 				ok: false,
 				type: "configuration",
-				model: settings.codexModel,
+				model: displayModel,
 				message: `Codex 可执行文件不存在：${executable || "未配置"}`,
 				responseTimeMs: Date.now() - startedAt,
 				testedAt: new Date().toISOString(),
@@ -602,7 +690,7 @@ export class ProcessExecutionService {
 				settled = true;
 				window.clearTimeout(timer);
 				resolve({
-					model: settings.codexModel,
+					model: displayModel,
 					responseTimeMs: Date.now() - startedAt,
 					testedAt: new Date().toISOString(),
 					...result,
@@ -622,6 +710,9 @@ export class ProcessExecutionService {
 					finish({
 						ok: true,
 						type: "success",
+						endpoint: settings.codexConfigSource === "cc-switch"
+							? "Codex CLI · CC Switch"
+							: "Codex CLI · 官方 OpenAI",
 						modelExists: null,
 						modelCount: MODEL_OPTIONS.length,
 						streaming: { supported: false, verified: false },
@@ -652,7 +743,11 @@ export class ProcessExecutionService {
 				ok: false,
 				type: "configuration",
 				provider: "claude-code",
-				model: settings.claudeModel || "CC Switch 默认模型",
+				model: settings.claudeModel || (
+					settings.claudeConfigSource === "cc-switch"
+						? "CC Switch 当前模型"
+						: "Claude CLI 默认模型"
+				),
 				message: `Claude Code 可执行文件不存在：${executable || "未配置"}`,
 				responseTimeMs: Date.now() - startedAt,
 				testedAt: new Date().toISOString(),
@@ -675,6 +770,10 @@ export class ProcessExecutionService {
 				"stream-json",
 				"--verbose",
 				"--no-session-persistence",
+				"--setting-sources",
+				settings.claudeConfigSource === "cc-switch"
+					? "user,project,local"
+					: "project,local",
 			];
 			if (settings.claudeModel.trim()) {
 				args.push("--model", settings.claudeModel.trim());
@@ -684,11 +783,7 @@ export class ProcessExecutionService {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,
-				env: {
-					...process.env,
-					PYTHONUTF8: "1",
-					PYTHONIOENCODING: "utf-8",
-				},
+				env: createClaudeProcessEnv(settings),
 			});
 			const finish = (
 				result: Omit<ProviderConnectionTestResult, "model" | "responseTimeMs" | "testedAt">,
@@ -697,7 +792,11 @@ export class ProcessExecutionService {
 				settled = true;
 				window.clearTimeout(timer);
 				resolve({
-					model: detectedModel || settings.claudeModel || "CC Switch 默认模型",
+					model: detectedModel || settings.claudeModel || (
+						settings.claudeConfigSource === "cc-switch"
+							? "CC Switch 当前模型"
+							: "Claude CLI 默认模型"
+					),
 					responseTimeMs: Date.now() - startedAt,
 					testedAt: new Date().toISOString(),
 					...result,
@@ -739,19 +838,21 @@ export class ProcessExecutionService {
 						ok: true,
 						type: "success",
 						provider: "claude-code",
-						endpoint: "Claude Code / CC Switch",
+						endpoint: settings.claudeConfigSource === "cc-switch"
+							? "Claude Code · CC Switch"
+							: "Claude Code · 官方配置",
 						modelExists: null,
 						streaming: { supported: true, verified: true },
 						pdf: { supported: false, verified: false },
 						vision: {
 							supported: true,
 							verified: false,
-							note: "Claude Code Read 工具支持图片；当前 CC Switch 模型的视觉兼容性将在首次图片查询时验证",
+							note: "Claude Code Read 工具支持图片；当前模型的视觉兼容性将在首次图片查询时验证",
 						},
 						webSearch: {
 							supported: true,
 							verified: false,
-							note: "仅在查询侧边栏的“联网搜索”模式开放 WebSearch/WebFetch；实际可用性取决于当前 Claude Code/CC Switch 模型与账号",
+							note: "仅在查询侧边栏的“联网搜索”模式开放 WebSearch/WebFetch；实际可用性取决于当前模型与账号",
 						},
 						responsePreview: responsePreview || "Claude Code 可用",
 					});

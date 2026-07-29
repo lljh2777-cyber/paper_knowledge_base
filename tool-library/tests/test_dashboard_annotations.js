@@ -82,6 +82,8 @@ assert.match(settingsSource, /renderAnnotationSettings/);
 assert.match(settingsSource, /Direct API · \$\{profile\.name\}/);
 assert.match(settingsSource, /最大输出 Token/);
 assert.match(runtimeSettingsSource, /annotationMaxTokens:\s*900/);
+assert.match(runtimeSettingsSource, /claudeConfigSource:\s*"official"/);
+assert.match(runtimeSettingsSource, /codexConfigSource:\s*"official"/);
 assert.match(pluginSource, /archiveStatus:\s*"pending"/);
 assert.match(popoverSource, /保留并存档/);
 assert.match(popoverSource, /手动批注/);

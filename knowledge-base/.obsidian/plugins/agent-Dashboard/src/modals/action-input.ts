@@ -6,6 +6,12 @@ import {
 	REASONING_OPTIONS,
 	type CliBackendId,
 } from "../config";
+import {
+	getClaudeDefaultModelLabel,
+	type ClaudeConfigSource,
+	getCodexDefaultModelLabel,
+	type CodexConfigSource,
+} from "../runtime/settings";
 import type {
 	CliModelDiscoveryResult,
 	CodexExecutionConfig,
@@ -22,7 +28,9 @@ export interface ActionInputResult {
 
 interface ActionInputHost {
 	settings: {
+		codexConfigSource: CodexConfigSource;
 		codexModel: string;
+		claudeConfigSource: ClaudeConfigSource;
 		claudeModel: string;
 	};
 	resolveActionExecutionConfig(
@@ -221,8 +229,10 @@ export class ActionInputModal extends Modal {
 			const actionDefault = resolveEffective();
 			modelSelect.createEl("option", {
 				text: backendId === "claude-code"
-					? `使用 Claude 默认 · ${actionDefault.model || "CC Switch 当前模型"}`
-					: `使用按钮默认 · ${this.plugin.getModelLabel(actionDefault.model)}`,
+					? `使用 Claude 默认 · ${actionDefault.model || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
+					: `使用 Codex 默认 · ${actionDefault.model
+						? this.plugin.getModelLabel(actionDefault.model)
+						: getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource)}`,
 				attr: { value: "" },
 			});
 			const options = backendId === "claude-code"
@@ -236,7 +246,9 @@ export class ActionInputModal extends Modal {
 						}]
 						: []),
 				]
-				: [
+				: this.plugin.settings.codexConfigSource === "cc-switch"
+					? this.plugin.getCliModelDiscovery("codex-cli")?.models || []
+					: [
 					...MODEL_OPTIONS,
 					...(MODEL_OPTIONS.some(
 						(option) => option.id === this.plugin.settings.codexModel,
@@ -247,7 +259,7 @@ export class ActionInputModal extends Modal {
 							label: this.plugin.settings.codexModel,
 							supportsFast: false,
 						}]),
-				];
+					];
 			const seen = new Set<string>();
 			options.forEach((option) => {
 				if (!option.id || seen.has(option.id)) return;
@@ -269,7 +281,9 @@ export class ActionInputModal extends Modal {
 			reasoningDefaultOption.setText(
 				backendId === "claude-code"
 					? `使用 Claude 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
-					: `使用按钮默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`,
+					: actionDefault.reasoningEffort
+						? `使用 Codex 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
+						: "使用 CC Switch 当前推理强度",
 			);
 		};
 		const syncSpeedControl = () => {
@@ -281,6 +295,12 @@ export class ActionInputModal extends Modal {
 			const actionDefault = resolveEffective();
 			const selectedModel = modelSelect.value || actionDefault.model;
 			const supportsFast = this.plugin.supportsFast(selectedModel);
+			const usesCodexSwitch = this.plugin.settings.codexConfigSource === "cc-switch";
+			speedButtons[0].setText(usesCodexSwitch ? "当前配置" : "标准");
+			speedButtons[0].setAttr(
+				"title",
+				usesCodexSwitch ? "沿用 CC Switch 当前 service tier" : "默认速度",
+			);
 			if (!supportsFast) serviceTier = "default";
 			speedButtons.forEach((item) => {
 				const isFast = item.dataset.value === "fast";
@@ -305,11 +325,22 @@ export class ActionInputModal extends Modal {
 			const backendLabel = backendId === "claude-code" ? "Claude Code" : "Codex CLI";
 			const modelLabel = effective.model
 				? this.plugin.getModelLabel(effective.model)
-				: "CLI 默认模型";
+				: backendId === "claude-code"
+					? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
+					: getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource);
+			const reasoningLabel = effective.reasoningEffort
+				? this.plugin.getReasoningLabel(effective.reasoningEffort)
+				: "CLI 默认推理";
 			summary.setText(
 				backendId === "claude-code"
-					? `${backendLabel} · ${modelLabel} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)}`
-					: `${backendLabel} · ${modelLabel} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`,
+					? `${backendLabel} · ${modelLabel} · ${reasoningLabel}`
+					: `${backendLabel} · ${modelLabel} · ${reasoningLabel} · ${
+						effective.serviceTier === "fast"
+							? "快速"
+							: this.plugin.settings.codexConfigSource === "cc-switch"
+								? "当前速度配置"
+								: "标准"
+					}`,
 			);
 		};
 		modelSelect.addEventListener("change", () => {

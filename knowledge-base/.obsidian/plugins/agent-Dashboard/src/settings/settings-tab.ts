@@ -27,6 +27,12 @@ import {
 	type ProviderProfile,
 } from "../providers/profile";
 import type { ProviderModel } from "../providers/shared";
+import {
+	DEFAULT_SETTINGS,
+	getClaudeConfigSourceLabel,
+	getClaudeDefaultModelLabel,
+	getCodexConfigSourceLabel,
+} from "../runtime/settings";
 import type {
 	PluginHost,
 	ProviderConnectionTestResult,
@@ -40,6 +46,7 @@ interface SettingsPluginHost extends PluginHost {
 	checkRuntime(): { ready: boolean; message: string };
 	listProviderModels(profileId: string): Promise<ProviderModel[]>;
 	testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult>;
+	invalidateCliModelDiscovery(backendId: CliBackendId): void;
 	getProviderErrorLabel(type: string): string;
 	supportsFast(model: string): boolean;
 }
@@ -97,22 +104,30 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		const reasoningLabel = REASONING_OPTIONS.find(
 			(option) => option.id === this.plugin.settings.codexReasoningEffort,
 		)?.label || this.plugin.settings.codexReasoningEffort;
+		const codexSourceLabel = getCodexConfigSourceLabel(
+			this.plugin.settings.codexConfigSource,
+		);
 		this.createSettingsNavigationItem(navigation, {
 			page: "codex",
 			icon: "bot",
-			title: "Codex 模型",
-			description: "全局默认模型、推理强度，以及 Codex CLI 连接测试。",
-			status: `${this.plugin.settings.codexModel} · ${reasoningLabel}`,
+			title: "Codex CLI",
+			description: "选择官方 OpenAI 配置或 CC Switch 当前配置。",
+			status: this.plugin.settings.codexConfigSource === "official"
+				? `${codexSourceLabel} · ${this.plugin.settings.codexModel} · ${reasoningLabel}`
+				: `${codexSourceLabel} · 当前配置`,
 		});
 		const claudeReasoningLabel = REASONING_OPTIONS.find(
 			(option) => option.id === this.plugin.settings.claudeReasoningEffort,
 		)?.label || this.plugin.settings.claudeReasoningEffort;
+		const claudeSourceLabel = getClaudeConfigSourceLabel(
+			this.plugin.settings.claudeConfigSource,
+		);
 		this.createSettingsNavigationItem(navigation, {
 			page: "claude",
 			icon: "sparkles",
 			title: "Claude Code",
-			description: "只读检索与批注解释、CC Switch 模型覆盖和连接测试。",
-			status: `${this.plugin.settings.claudeModel || "CC Switch 默认"} · ${claudeReasoningLabel}`,
+			description: "选择官方配置或 CC Switch，并管理模型覆盖和连接测试。",
+			status: `${claudeSourceLabel} · ${this.plugin.settings.claudeModel || "默认模型"} · ${claudeReasoningLabel}`,
 		});
 		const annotationBackendId = this.plugin.settings.annotationBackendId || "auto";
 		const annotationProfile = this.plugin.settings.providerProfiles.find(
@@ -123,7 +138,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			: annotationBackendId === "codex-cli"
 				? `Codex · ${this.plugin.settings.annotationCodexModel || "默认模型"}`
 				: annotationBackendId === "claude-code"
-					? `Claude · ${this.plugin.settings.annotationClaudeModel || "CC Switch 默认"}`
+					? `Claude · ${this.plugin.settings.annotationClaudeModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
 					: annotationProfile
 						? `${annotationProfile.name} · ${annotationProfile.model}`
 						: "自动选择";
@@ -260,45 +275,90 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	}
 
 	private renderCodexSettings(containerEl: HTMLElement): void {
+		const configSource = this.plugin.settings.codexConfigSource;
+		const sourceLabel = getCodexConfigSourceLabel(configSource);
 		this.createSettingsPageHeader(
 			containerEl,
-			"Codex 模型",
-			"配置 Dashboard AI 任务的全局回退模型，并检查 Codex CLI 是否可用。",
+			"Codex CLI",
+			"选择官方 OpenAI Codex 或 CC Switch 当前配置；两种模式共用相同的项目权限边界。",
 			true,
 		);
 		new Setting(containerEl)
-			.setName("全局默认模型")
-			.setDesc("没有按钮级模型配置的 Dashboard AI 任务使用该模型。")
-			.addText((text) =>
-				text
-					.setPlaceholder("gpt-5.6-terra")
-					.setValue(this.plugin.settings.codexModel)
+			.setName("配置来源")
+			.setDesc(
+				configSource === "cc-switch"
+					? "沿用 CC Switch 写入 ~/.codex/config.toml 的 provider、endpoint、模型和认证配置。"
+					: "显式使用 OpenAI provider，并使用 Dashboard 的官方 Codex 模型策略。",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("official", "官方 Codex CLI")
+					.addOption("cc-switch", "CC Switch")
+					.setValue(configSource)
 					.onChange(async (value) => {
-						this.plugin.settings.codexModel = value.trim() || "gpt-5.6-terra";
+						this.plugin.settings.codexConfigSource = value === "cc-switch"
+							? "cc-switch"
+							: "official";
+						this.plugin.invalidateCliModelDiscovery("codex-cli");
+						this.plugin.providerRuntimeState.delete("codex-cli");
 						await this.plugin.saveSettings();
+						this.display();
 					})
 			);
-		new Setting(containerEl)
-			.setName("全局默认推理强度")
-			.setDesc("仅在按钮没有指定推理强度时使用；按钮默认值和本次运行覆盖优先。")
-			.addDropdown((dropdown) => {
-				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
-				dropdown
-					.setValue(this.plugin.settings.codexReasoningEffort)
-					.onChange(async (value) => {
-						this.plugin.settings.codexReasoningEffort = value;
-						await this.plugin.saveSettings();
-					});
-			});
+		if (configSource === "cc-switch") {
+			this.createProviderSectionHeader(
+				containerEl,
+				"CC Switch 配置",
+				"插件不改写 config.toml，只读取当前激活的 provider 和模型；切换供应商后重新测试连接即可。",
+			);
+			new Setting(containerEl)
+				.setName("模型与供应商")
+				.setDesc("由 CC Switch 当前激活配置管理。Dashboard 不保存第三方 endpoint 或 API Key。");
+		} else {
+			this.createProviderSectionHeader(
+				containerEl,
+				"官方 Codex 配置",
+				"每次调用显式覆盖 model_provider=openai；按钮级默认、全局回退和运行前临时覆盖只使用官方账号可用模型。",
+			);
+			new Setting(containerEl)
+				.setName("全局默认模型")
+				.setDesc("没有按钮级模型配置的 Dashboard AI 任务使用该模型。")
+				.addText((text) =>
+					text
+						.setPlaceholder("输入当前 Codex 账号可用的模型 ID")
+						.setValue(this.plugin.settings.codexModel)
+						.onChange(async (value) => {
+							this.plugin.settings.codexModel = value.trim() || DEFAULT_SETTINGS.codexModel;
+							this.plugin.invalidateCliModelDiscovery("codex-cli");
+							await this.plugin.saveSettings();
+						})
+				);
+			new Setting(containerEl)
+				.setName("全局默认推理强度")
+				.setDesc("仅在按钮没有指定推理强度时使用；按钮默认值和本次运行覆盖优先。")
+				.addDropdown((dropdown) => {
+					REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+					dropdown
+						.setValue(this.plugin.settings.codexReasoningEffort)
+						.onChange(async (value) => {
+							this.plugin.settings.codexReasoningEffort = value;
+							await this.plugin.saveSettings();
+						});
+				});
+		}
 		this.createProviderSectionHeader(
 			containerEl,
 			"模型调用",
-			"写入型 Dashboard 任务使用 Codex CLI；认证、模型调用、沙箱和权限继续由 Codex 管理。",
+			`${sourceLabel}。写入型 Dashboard 任务仍由项目沙箱和 skill 阶段边界约束。`,
 		);
 		const codexResult = this.plugin.providerRuntimeState.get("codex-cli") || null;
 		new Setting(containerEl)
-			.setName("当前执行后端")
-			.setDesc("Codex CLI：认证、模型调用、沙箱和权限继续由 Codex 管理。")
+			.setName(sourceLabel)
+			.setDesc(
+				configSource === "official"
+					? "验证 Codex CLI 和官方 OpenAI 配置；不发送 Vault 内容。"
+					: "验证 Codex CLI 和 CC Switch 当前配置；不发送 Vault 内容。",
+			)
 			.addButton((button) => {
 				const testing = codexResult?.status === "testing";
 				button
@@ -316,21 +376,54 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	}
 
 	private renderClaudeSettings(containerEl: HTMLElement): void {
+		const configSource = this.plugin.settings.claudeConfigSource;
+		const sourceLabel = getClaudeConfigSourceLabel(configSource);
+		const defaultModelLabel = getClaudeDefaultModelLabel(configSource);
 		this.createSettingsPageHeader(
 			containerEl,
 			"Claude Code",
-			"配置 Claude Code CLI。查询与批注保持只读；代码分析和综合分析可使用阶段所有权写入。",
+			"选择 Claude Code 的配置来源。官方配置与 CC Switch 共用权限边界，但分别加载独立的模型和 endpoint 设置。",
 			true,
 		);
 		new Setting(containerEl)
+			.setName("配置来源")
+			.setDesc(
+				configSource === "cc-switch"
+					? "加载用户级 Claude 设置，跟随 CC Switch 写入的模型和兼容 endpoint。"
+					: "忽略用户级 Claude 设置中的代理模型映射，使用官方 Claude Code 认证、模型和服务。",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("official", "官方 Claude Code")
+					.addOption("cc-switch", "CC Switch")
+					.setValue(configSource)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeConfigSource = value === "cc-switch"
+							? "cc-switch"
+							: "official";
+						this.plugin.invalidateCliModelDiscovery("claude-code");
+						this.plugin.providerRuntimeState.delete("claude-code");
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+		this.createProviderSectionHeader(
+			containerEl,
+			`${sourceLabel} 配置`,
+			configSource === "cc-switch"
+				? "CC Switch 模式加载 user、project 和 local 设置；空模型值跟随 CC Switch 当前选择。"
+				: "官方模式只加载 project 和 local 设置，避免用户级兼容 endpoint 覆盖官方服务；空模型值使用 Claude CLI 默认模型。",
+		);
+		new Setting(containerEl)
 			.setName("模型覆盖")
-			.setDesc("留空时沿用 CC Switch 当前模型；填写后仅覆盖 Dashboard 发起的 Claude Code 任务。")
+			.setDesc(`留空时使用${defaultModelLabel}；填写后仅覆盖 Dashboard 发起的 Claude Code 任务。`)
 			.addText((text) =>
 				text
-					.setPlaceholder("留空使用 CC Switch 默认模型")
+					.setPlaceholder(`留空使用${defaultModelLabel}`)
 					.setValue(this.plugin.settings.claudeModel)
 					.onChange(async (value) => {
 						this.plugin.settings.claudeModel = value.trim();
+						this.plugin.invalidateCliModelDiscovery("claude-code");
 						await this.plugin.saveSettings();
 					})
 			);
@@ -349,7 +442,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("查询图片")
 			.setDesc(
-				`知识库查询可发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片。插件只传递经过校验的本地路径，Claude Code 使用只读 Read 工具打开图片；实际视觉能力取决于 CC Switch 当前模型。`,
+				`知识库查询可发送最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片。插件只传递经过校验的本地路径，Claude Code 使用只读 Read 工具打开图片；实际视觉能力取决于当前模型。`,
 			);
 		this.createProviderSectionHeader(
 			containerEl,
@@ -358,8 +451,12 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		);
 		const resultState = this.plugin.providerRuntimeState.get("claude-code") || null;
 		new Setting(containerEl)
-			.setName("Claude Code / CC Switch")
-			.setDesc("验证 CLI、当前模型、JSONL 输出以及自定义 endpoint 是否可用。")
+			.setName(sourceLabel)
+			.setDesc(
+				configSource === "cc-switch"
+					? "验证 CLI、CC Switch 当前模型、JSONL 输出和兼容 endpoint。"
+					: "验证 CLI、官方认证、当前模型和 JSONL 输出。",
+			)
 			.addButton((button) => {
 				const testing = resultState?.status === "testing";
 				button
@@ -463,6 +560,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		isFallback = false,
 	): void {
 		const isClaude = backendId === "claude-code";
+		const usesCodexSwitch = backendId === "codex-cli"
+			&& this.plugin.settings.codexConfigSource === "cc-switch";
 		const title = isFallback
 			? "Codex 回退参数"
 			: `${getCliBackendLabel(backendId)} 参数`;
@@ -470,8 +569,10 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			containerEl,
 			title,
 			isClaude
-				? "模型留空时沿用 CC Switch 当前模型；Claude Code 批注不开放任何工具。"
-				: "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。",
+				? `模型留空时使用${getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}；Claude Code 批注不开放任何工具。`
+				: usesCodexSwitch
+					? "模型留空时沿用 CC Switch 当前 Codex 配置；快速模式仅在显式模型支持时生效。"
+					: "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。",
 		);
 		const discovery = this.plugin.getCliModelDiscovery(backendId);
 		const selectedModel = isClaude
@@ -498,8 +599,10 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				dropdown.addOption(
 					"",
 					isClaude
-						? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}`
-						: "使用批注默认模型",
+						? `使用后端默认 · ${discovery?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
+						: usesCodexSwitch
+							? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}`
+							: "使用批注默认模型",
 				);
 				models.forEach((model) => {
 					dropdown.addOption(

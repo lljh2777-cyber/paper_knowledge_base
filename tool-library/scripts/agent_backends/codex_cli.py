@@ -132,8 +132,11 @@ class CodexCliBackend:
             request.model,
             request.service_tier,
         )
-        command = [
-            executable,
+        config_source = str(
+            request.backend_options.get("config_source") or "official"
+        )
+        command = [executable]
+        command.extend([
             "exec",
             "--ephemeral",
             "--color",
@@ -144,11 +147,17 @@ class CodexCliBackend:
             request.sandbox,
             "-c",
             'approval_policy="never"',
-            "-c",
-            f'model_reasoning_effort="{request.reasoning_effort}"',
-            "-c",
-            f'service_tier="{effective_service_tier}"',
-        ]
+        ])
+        if config_source == "official":
+            command.extend(["-c", 'model_provider="openai"'])
+        if request.reasoning_effort:
+            command.extend(
+                ["-c", f'model_reasoning_effort="{request.reasoning_effort}"']
+            )
+        if config_source == "official" or effective_service_tier == "fast":
+            command.extend(
+                ["-c", f'service_tier="{effective_service_tier}"']
+            )
         if request.action == "vault-retrieval":
             if request.output_schema is None:
                 raise ValueError("vault retrieval requires an output schema")

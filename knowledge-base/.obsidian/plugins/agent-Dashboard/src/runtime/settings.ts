@@ -3,6 +3,9 @@ import * as path from "node:path";
 
 import type { ProviderProfile } from "../providers/profile";
 
+export type ClaudeConfigSource = "official" | "cc-switch";
+export type CodexConfigSource = "official" | "cc-switch";
+
 const LEGACY_CODEX_EXECUTABLE =
 	"C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
 const MANAGED_CODEX_BIN_ROOT = path.join(
@@ -21,9 +24,11 @@ const DEFAULT_CLAUDE_EXECUTABLE = path.join(
 export interface DashboardSettings {
 	projectRoot: string;
 	codexExecutable: string;
+	codexConfigSource: CodexConfigSource;
 	codexModel: string;
 	codexReasoningEffort: string;
 	claudeExecutable: string;
+	claudeConfigSource: ClaudeConfigSource;
 	claudeModel: string;
 	claudeReasoningEffort: string;
 	annotationBackendId: string;
@@ -50,6 +55,41 @@ export function findPreferredClaudeExecutable(): string {
 	].filter(Boolean);
 	return candidates.find((candidate) => fs.existsSync(candidate))
 		|| DEFAULT_CLAUDE_EXECUTABLE;
+}
+
+export function inferLegacyClaudeConfigSource(): ClaudeConfigSource {
+	const settingsPath = path.join(
+		process.env.USERPROFILE || "",
+		".claude",
+		"settings.json",
+	);
+	try {
+		const source = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+			env?: Record<string, unknown>;
+		};
+		const env = source.env && typeof source.env === "object" ? source.env : {};
+		const customEndpoint = String(env.ANTHROPIC_BASE_URL || "").trim();
+		const configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
+		return customEndpoint || configuredModel ? "cc-switch" : "official";
+	} catch {
+		return "official";
+	}
+}
+
+export function getClaudeConfigSourceLabel(source: ClaudeConfigSource): string {
+	return source === "cc-switch" ? "CC Switch" : "官方 Claude Code";
+}
+
+export function getClaudeDefaultModelLabel(source: ClaudeConfigSource): string {
+	return source === "cc-switch" ? "CC Switch 当前模型" : "Claude CLI 默认模型";
+}
+
+export function getCodexConfigSourceLabel(source: CodexConfigSource): string {
+	return source === "cc-switch" ? "CC Switch" : "官方 Codex CLI";
+}
+
+export function getCodexDefaultModelLabel(source: CodexConfigSource): string {
+	return source === "cc-switch" ? "CC Switch 当前模型" : "Codex 官方默认模型";
 }
 
 export function findPreferredCodexExecutable(): string {
@@ -94,9 +134,11 @@ export function isManagedCodexExecutable(executable: unknown): boolean {
 export const DEFAULT_SETTINGS: DashboardSettings = {
 	projectRoot: "",
 	codexExecutable: findPreferredCodexExecutable(),
+	codexConfigSource: "official",
 	codexModel: "gpt-5.6-terra",
 	codexReasoningEffort: "medium",
 	claudeExecutable: findPreferredClaudeExecutable(),
+	claudeConfigSource: "official",
 	claudeModel: "",
 	claudeReasoningEffort: "medium",
 	annotationBackendId: "auto",

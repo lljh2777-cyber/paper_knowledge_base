@@ -90,6 +90,37 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn(str(schema_path), command)
         self.assertEqual(command[-1], "-")
 
+    def test_codex_adapter_separates_official_and_cc_switch_providers(
+        self,
+    ) -> None:
+        backend = get_backend("codex-cli")
+        base = {
+            "action": "annotation-explain",
+            "agent": "annotation-assistant",
+            "project_root": PROJECT_ROOT,
+            "sandbox": "read-only",
+            "writes": False,
+            "model": "",
+            "reasoning_effort": "",
+            "service_tier": "default",
+        }
+        official = BackendCommandRequest(
+            **base,
+            backend_options={"config_source": "official"},
+        )
+        switched = BackendCommandRequest(
+            **base,
+            backend_options={"config_source": "cc-switch"},
+        )
+
+        official_command = backend.build_command("codex.exe", official)
+        switched_command = backend.build_command("codex.exe", switched)
+
+        self.assertIn('model_provider="openai"', official_command)
+        self.assertNotIn('model_provider="openai"', switched_command)
+        self.assertNotIn('model_reasoning_effort=""', switched_command)
+        self.assertNotIn('service_tier="default"', switched_command)
+
     def test_action_access_policy_distinguishes_read_and_write_scopes(
         self,
     ) -> None:
@@ -293,6 +324,50 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("WebSearch", denied)
         self.assertIn("WebFetch", denied)
         self.assertEqual(command[-2:], ["--output-format", "text"])
+
+    def test_claude_adapter_separates_official_and_cc_switch_settings(self) -> None:
+        backend = get_backend("claude-code")
+        policy = BackendAccessPolicy(
+            mode="read-only",
+            write_scope="none",
+            allowed_roots=(PROJECT_ROOT,),
+        )
+        official = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            access_policy=policy,
+            backend_options={"config_source": "official"},
+        )
+        switched = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            access_policy=policy,
+            backend_options={"config_source": "cc-switch"},
+        )
+
+        official_command = backend.build_command("claude.exe", official)
+        switched_command = backend.build_command("claude.exe", switched)
+
+        self.assertEqual(
+            official_command[official_command.index("--setting-sources") + 1],
+            "project,local",
+        )
+        self.assertEqual(
+            switched_command[switched_command.index("--setting-sources") + 1],
+            "user,project,local",
+        )
 
     def test_claude_adapter_normalizes_init_tool_and_result_events(
         self,

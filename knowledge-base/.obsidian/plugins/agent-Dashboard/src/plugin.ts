@@ -15,6 +15,9 @@ import {
 	DEFAULT_SETTINGS,
 	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
+	getClaudeDefaultModelLabel,
+	getCodexDefaultModelLabel,
+	inferLegacyClaudeConfigSource,
 	isManagedCodexExecutable,
 } from "./runtime/settings";
 import type { DashboardSettings } from "./runtime/settings";
@@ -734,10 +737,18 @@ export default class AgentDashboardPlugin extends Plugin {
 				changed = true;
 			}
 		}
+		if (!["official", "cc-switch"].includes(String(storedSettings.codexConfigSource || ""))) {
+			this.settings.codexConfigSource = "official";
+			changed = true;
+		}
 		const preferredClaudeExecutable = findPreferredClaudeExecutable();
 		const configuredClaudeExecutable = String(this.settings.claudeExecutable || "").trim();
 		if (!configuredClaudeExecutable && preferredClaudeExecutable) {
 			this.settings.claudeExecutable = preferredClaudeExecutable;
+			changed = true;
+		}
+		if (!["official", "cc-switch"].includes(String(storedSettings.claudeConfigSource || ""))) {
+			this.settings.claudeConfigSource = inferLegacyClaudeConfigSource();
 			changed = true;
 		}
 		if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
@@ -918,11 +929,15 @@ export default class AgentDashboardPlugin extends Plugin {
 			? this.settings.claudeModel
 			: this.settings.codexModel;
 		const signature = `${executable}\u0000${configuredModel}`;
+		const sourceSignature = backendId === "claude-code"
+			? this.settings.claudeConfigSource
+			: this.settings.codexConfigSource;
+		const signatureWithSource = `${signature}\u0000${sourceSignature}`;
 		const cached = this.cliModelDiscoveryCache.get(backendId);
 		if (
 			!force
 			&& cached
-			&& cached.signature === signature
+			&& cached.signature === signatureWithSource
 			&& cached.expiresAt > Date.now()
 		) {
 			return cached.result;
@@ -932,7 +947,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		const pending = this.processExecution.discoverCliModels(this.settings, backendId)
 			.then((result) => {
 				this.cliModelDiscoveryCache.set(backendId, {
-					signature,
+					signature: signatureWithSource,
 					expiresAt: Date.now() + (backendId === "codex-cli" ? 300000 : 5000),
 					result,
 				});
@@ -1350,22 +1365,36 @@ export default class AgentDashboardPlugin extends Plugin {
 		action: DashboardAction,
 		overrides: ExecutionOverrides = {},
 	): CodexExecutionConfig {
-		const buttonModel = action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel;
-		const buttonReasoning = action.reasoningEffort
-			|| this.settings.codexReasoningEffort
-			|| DEFAULT_SETTINGS.codexReasoningEffort;
+		const useOfficialConfig = this.settings.codexConfigSource === "official";
+		const buttonModel = useOfficialConfig
+			? action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel
+			: "";
+		const buttonReasoning = useOfficialConfig
+			? action.reasoningEffort
+				|| this.settings.codexReasoningEffort
+				|| DEFAULT_SETTINGS.codexReasoningEffort
+			: "";
 		const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
 		const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
 		const reasoningEffort = REASONING_OPTIONS.some((option) => option.id === requestedReasoning)
 			? requestedReasoning
 			: buttonReasoning;
+		const effectiveModel = requestedModel || buttonModel;
 		return {
 			backend: "codex-cli",
-			model: requestedModel || buttonModel,
+			model: effectiveModel,
 			reasoningEffort,
-			serviceTier: overrides.serviceTier === "fast" && this.supportsFast(requestedModel || buttonModel) ? "fast" : "default",
-			modelSource: requestedModel ? "本次覆盖" : action.model ? "按钮默认" : "全局默认",
-			reasoningSource: requestedReasoning ? "本次覆盖" : action.reasoningEffort ? "按钮默认" : "全局默认",
+			serviceTier: overrides.serviceTier === "fast" && this.supportsFast(effectiveModel) ? "fast" : "default",
+			modelSource: requestedModel
+				? "本次覆盖"
+				: useOfficialConfig
+					? action.model ? "按钮默认" : "全局默认"
+					: getCodexDefaultModelLabel(this.settings.codexConfigSource),
+			reasoningSource: requestedReasoning
+				? "本次覆盖"
+				: useOfficialConfig
+					? action.reasoningEffort ? "按钮默认" : "全局默认"
+					: "Codex CLI 配置",
 		};
 	}
 
@@ -1401,7 +1430,7 @@ export default class AgentDashboardPlugin extends Plugin {
 				? "本次覆盖"
 				: this.settings.claudeModel.trim()
 					? "Claude 默认"
-					: "CC Switch 默认",
+					: getClaudeDefaultModelLabel(this.settings.claudeConfigSource),
 			reasoningSource: requestedReasoning ? "本次覆盖" : "Claude 默认",
 		};
 	}

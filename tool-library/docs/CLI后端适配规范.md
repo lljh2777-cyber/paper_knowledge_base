@@ -30,6 +30,18 @@ tool-library/schemas/
 
 新增 CLI 时，应增加一个适配器文件并在 `registry.py` 注册。不要在 Dashboard 的视图、按钮或结果弹窗中增加工具名称判断。
 
+## Codex CLI 配置来源
+
+`codex-cli` 支持 `official` 与 `cc-switch` 两种来源。官方模式在模型发现和
+任务调用中显式传入 `model_provider="openai"`，并继续使用 Dashboard 的官方
+模型、按钮级推理和运行时覆盖。CC Switch 模式不覆盖 provider、默认模型、
+推理强度或默认 service tier，直接沿用 `~/.codex/config.toml` 中当前激活的
+配置；只有用户在本次运行界面显式选择参数时才覆盖对应字段。
+
+插件不改写 `config.toml`、`auth.json` 或 CC Switch 数据库。若要在第三方
+provider 与官方 Codex 之间直接切换，CC Switch 应启用保留官方登录的选项；
+否则官方 OAuth 状态被替换后，单纯覆盖 provider 不能恢复认证。
+
 ## Claude Code 当前边界
 
 `claude-code` 的知识库检索使用 `plan` 权限模式。知识库模式仅开放
@@ -37,14 +49,18 @@ tool-library/schemas/
 `WebSearch`、`WebFetch`。批注解释和关键词扩展使用 `dontAsk` 且不开放任何
 工具。所有只读任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`；
 非联网模式还显式禁用 `WebSearch`、`WebFetch`。
-CC Switch 配置的模型由 Claude Code 自己选择；只有显式传入
-`--backend-model` 时，runner 才覆盖该模型。
+Claude Code 支持两种配置来源。`official` 只加载 `project,local` 设置，避免
+用户级兼容 endpoint 覆盖官方认证与模型；`cc-switch` 加载
+`user,project,local`，跟随 CC Switch 写入的模型和 endpoint。只有显式传入
+`--backend-model` 时，runner 才覆盖所选来源的默认模型。
+官方模式还会从子进程环境中移除第三方 endpoint 和模型映射变量，但保留官方
+认证可使用的凭据环境变量。
 
 知识库查询可携带 Vault 图片。插件只在会话中保存 Vault 相对路径；runner
 重新检查路径穿越、符号链接逃逸、扩展名、实际大小、单轮数量和总大小，再将
 验证后的绝对路径交给 Claude Code。Claude 必须通过只读 `Read` 工具打开图片，
 不得把文件名、source note 文本或历史回答当作视觉观察。`image_input=true`
-表示适配器能够传递本地图片，不代表 CC Switch 当前模型一定支持视觉；界面和
+表示适配器能够传递本地图片，不代表当前模型一定支持视觉；界面和
 连接状态必须将模型兼容性标记为运行时依赖。
 
 Claude Code 写入支持按 `restricted`、`stage-owned`、`full` 分层。当前只
@@ -58,12 +74,13 @@ Claude Code。
 若原生安装目录未加入 `PATH`，插件或 runner 应保存并传入 `claude.exe`
 绝对路径，不应依赖交互式终端的临时环境。
 
-插件设置为 Claude Code 提供独立二级页面，可配置可执行文件、可选模型覆盖和
-默认推理强度；批注 AI 使用独立二级页面选择自动、Codex CLI、Claude Code
+插件设置为 Claude Code 提供独立二级页面，可选择官方 Claude Code 或
+CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独立二级页面选择自动、Codex CLI、Claude Code
 或已验证 Direct API，并保存批注专用模型和参数。查询侧边栏可在 Codex CLI、Claude Code 和
 已验证的 Direct API 配置之间选择。选择 Claude Code 时可使用知识库或联网
 搜索模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
-模型选择只显示从 CC Switch/Claude 设置或初始化事件中识别出的候选。
+模型选择按配置来源显示官方 CLI 别名，或 CC Switch 用户设置与初始化事件中
+识别出的候选。
 代码分析和综合分析的运行弹窗可切换 Codex CLI 或 Claude Code；Claude 模式
 必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。`WebSearch` 和
 `WebFetch` 不得出现在批注、代码分析、综合分析或其他非检索任务中。
@@ -73,11 +90,13 @@ Claude Code。
 模型发现属于宿主与 CLI 的适配层，不属于 Direct API Provider：
 
 - Codex CLI 通过 `app-server` 的 `initialize` 与 `model/list` 获取当前账号
-  可用的动态模型目录、默认模型、推理档位和 service tier 能力。
-- Claude Code 没有完整模型目录接口。插件读取
-  `%USERPROFILE%\.claude\settings.json` 中 CC Switch/Claude 写入的当前模型
-  和 Fable、Haiku、Opus、Sonnet 映射，并用 `stream-json` 初始化事件校验
-  实际模型。
+  可用的动态模型目录、默认模型、推理档位和 service tier 能力。官方模式强制
+  查询 OpenAI provider；CC Switch 模式读取当前 `config.toml` 的根级
+  `model`/`model_provider` 并以 app-server 结果校验。
+- Claude Code 没有完整模型目录接口。官方模式展示 CLI 支持的模型别名，并用
+  `stream-json` 初始化事件校验实际模型；CC Switch 模式读取
+  `%USERPROFILE%\.claude\settings.json` 中的当前模型和 Fable、Haiku、Opus、
+  Sonnet 映射。
 - Codex 目录检测失败时回退到插件内置模型表；Claude 无法读取配置时回退到
   Claude Code 自身默认模型。回退必须在界面明确标记，不能伪装成完整目录。
 - Codex 与 Claude 的运行时模型覆盖必须分别保存。切换后端不得把一种 CLI

@@ -40,6 +40,12 @@ import {
 	profileSupportsQueryImage,
 	type ProviderProfile,
 } from "../providers/profile";
+import {
+	getClaudeConfigSourceLabel,
+	getClaudeDefaultModelLabel,
+	getCodexConfigSourceLabel,
+	getCodexDefaultModelLabel,
+} from "../runtime/settings";
 import type {
 	CliModelDiscoveryResult,
 	DashboardProcessEvent,
@@ -1022,6 +1028,24 @@ export class QueryWikiView extends ItemView {
 			"claude-code",
 			claudeOverrides,
 		);
+		const claudeSourceLabel = getClaudeConfigSourceLabel(
+			this.plugin.settings.claudeConfigSource,
+		);
+		const claudeDefaultModelLabel = getClaudeDefaultModelLabel(
+			this.plugin.settings.claudeConfigSource,
+		);
+		const codexSourceLabel = getCodexConfigSourceLabel(
+			this.plugin.settings.codexConfigSource,
+		);
+		const codexDefaultModelLabel = getCodexDefaultModelLabel(
+			this.plugin.settings.codexConfigSource,
+		);
+		const codexModelLabel = effective.model
+			? this.plugin.getModelLabel(effective.model)
+			: codexDefaultModelLabel;
+		const codexReasoningLabel = effective.reasoningEffort
+			? this.plugin.getReasoningLabel(effective.reasoningEffort)
+			: "CLI 默认推理";
 		const details = parent.createEl("details", { cls: "query-wiki-run-settings" });
 		details.open = true;
 		const summary = details.createEl("summary");
@@ -1031,8 +1055,14 @@ export class QueryWikiView extends ItemView {
 			text: directProfile
 				? `Direct API · ${directProfile.name} · ${directProfile.model}`
 				: backendId === "claude-code"
-					? `Claude Code · ${claudeEffective.model || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
-				: `Codex CLI · ${this.plugin.getModelLabel(effective.model)} · ${this.plugin.getReasoningLabel(effective.reasoningEffort)} · ${effective.serviceTier === "fast" ? "快速" : "标准"}`,
+					? `Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
+				: `Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${
+					effective.serviceTier === "fast"
+						? "快速"
+						: this.plugin.settings.codexConfigSource === "cc-switch"
+							? "当前速度配置"
+							: "标准"
+				}`,
 		});
 		const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
 		const backend = this.createSelectField(grid, "执行后端");
@@ -1060,7 +1090,12 @@ export class QueryWikiView extends ItemView {
 		});
 		reasoning.value = codexOverrides.reasoningEffort;
 		const speed = this.createSelectField(grid, "速度");
-		speed.createEl("option", { text: "标准", attr: { value: "default" } });
+		speed.createEl("option", {
+			text: this.plugin.settings.codexConfigSource === "cc-switch"
+				? "使用当前配置"
+				: "标准",
+			attr: { value: "default" },
+		});
 		speed.createEl("option", { text: "快速", attr: { value: "fast" } });
 		speed.value = codexOverrides.serviceTier;
 		const claudeModel = this.createSelectField(grid, "模型");
@@ -1122,7 +1157,9 @@ export class QueryWikiView extends ItemView {
 			const defaultModel = this.plugin.resolveActionExecutionConfig(action).model;
 			populateModelSelect(
 				model,
-				`使用检索默认 · ${this.plugin.getModelLabel(defaultModel)}`,
+				`使用检索默认 · ${defaultModel
+					? this.plugin.getModelLabel(defaultModel)
+					: codexDefaultModelLabel}`,
 				codexDiscovery,
 				codexOverrides.model,
 			);
@@ -1130,7 +1167,7 @@ export class QueryWikiView extends ItemView {
 		const renderClaudeModels = (): void => {
 			const detectedModel = claudeDiscovery?.effectiveModel
 				|| claudeEffective.model
-				|| "CC Switch 默认模型";
+				|| claudeDefaultModelLabel;
 			populateModelSelect(
 				claudeModel,
 				`使用后端默认 · ${detectedModel}`,
@@ -1172,8 +1209,8 @@ export class QueryWikiView extends ItemView {
 						"Direct API 不执行 Codex skill 或文件写入。",
 					].join("")
 					: usingClaude
-						? `Claude Code 使用 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于 CC Switch 当前模型及账号能力。`
-						: "",
+						? `Claude Code 使用 ${claudeSourceLabel} 和 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于当前模型及账号能力。`
+						: `Codex CLI 使用${codexSourceLabel}。知识库模式使用只读沙箱；联网搜索模式启用 Codex 原生 Web Search。`,
 			);
 			if (selectedProfile) {
 				summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
@@ -1189,7 +1226,7 @@ export class QueryWikiView extends ItemView {
 					claudeOverrides,
 				);
 				summaryText.setText(
-					`Claude Code · ${next.model || claudeDiscovery?.effectiveModel || "CC Switch 默认模型"} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
+					`Claude Code · ${next.model || claudeDiscovery?.effectiveModel || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
 				);
 				return;
 			}
@@ -1204,7 +1241,15 @@ export class QueryWikiView extends ItemView {
 				action,
 				codexOverrides,
 			);
-			summaryText.setText(`Codex CLI · ${this.plugin.getModelLabel(next.model)} · ${this.plugin.getReasoningLabel(next.reasoningEffort)} · ${next.serviceTier === "fast" ? "快速" : "标准"}`);
+			summaryText.setText(
+				`Codex CLI · ${next.model ? this.plugin.getModelLabel(next.model) : codexDefaultModelLabel} · ${
+					next.reasoningEffort ? this.plugin.getReasoningLabel(next.reasoningEffort) : "CLI 默认推理"
+				} · ${next.serviceTier === "fast"
+					? "快速"
+					: this.plugin.settings.codexConfigSource === "cc-switch"
+						? "当前速度配置"
+						: "标准"}`,
+			);
 		};
 		backend.addEventListener("change", async () => {
 			this.initialQuestion = this.inputEl?.value || "";
@@ -1370,9 +1415,9 @@ export class QueryWikiView extends ItemView {
 						action,
 						"claude-code",
 						this.executionOverridesByBackend["claude-code"],
-					).model
+						).model
 						|| this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel
-						|| "CC Switch 默认模型"
+						|| getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
 					: ""
 			),
 		};
@@ -1470,7 +1515,9 @@ export class QueryWikiView extends ItemView {
 				queryBackendId: backendId,
 				providerName: directProfile?.name || getCliBackendLabel(backendId),
 				model: executionConfig.model || (
-					backendId === "claude-code" ? "CC Switch 默认模型" : ""
+					backendId === "claude-code"
+						? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
+						: ""
 				),
 			});
 			const output = [

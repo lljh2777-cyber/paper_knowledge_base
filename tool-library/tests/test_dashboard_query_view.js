@@ -134,7 +134,7 @@ assert.ok(
 	"shared runtime contracts should expose the PluginHost boundary",
 );
 assert.ok(
-	queryViewSource.includes('"CC Switch 默认模型"')
+	queryViewSource.includes("getClaudeDefaultModelLabel")
 		&& queryViewSource.includes("claudeModel.parentElement.hidden = !usingClaude")
 		&& queryViewSource.includes("executionOverridesByBackend"),
 	"query settings should keep Codex and Claude model overrides independent",
@@ -145,10 +145,22 @@ assert.ok(
 	"query settings should honor hidden backend-specific fields",
 );
 assert.ok(
-	processExecutionSource.includes('["app-server", "--stdio"]')
+	processExecutionSource.includes('"app-server"')
 		&& processExecutionSource.includes('method: "model/list"')
-		&& processExecutionSource.includes('"Claude settings / CC Switch"'),
-	"CLI model discovery should use the Codex catalog and Claude/CC Switch settings",
+		&& processExecutionSource.includes('"CC Switch 用户设置"')
+		&& processExecutionSource.includes('"官方 Claude Code"'),
+	"CLI model discovery should distinguish official Claude and CC Switch settings",
+);
+assert.ok(
+	settingsSource.includes('.addOption("official", "官方 Codex CLI")')
+		&& settingsSource.includes('.addOption("cc-switch", "CC Switch")')
+		&& processExecutionSource.includes('model_provider="openai"'),
+	"Codex settings should separate official OpenAI and CC Switch configuration sources",
+);
+assert.ok(
+	settingsSource.includes('.addOption("official", "官方 Claude Code")')
+		&& settingsSource.includes('.addOption("cc-switch", "CC Switch")'),
+	"Claude settings should expose explicit official and CC Switch configuration sources",
 );
 
 const plugin = new AgentDashboardPlugin();
@@ -656,6 +668,7 @@ async function testClaudeCliModelDiscovery() {
 	discoveryPlugin.settings = {
 		projectRoot: path.resolve(__dirname, "../.."),
 		claudeExecutable: process.execPath,
+		claudeConfigSource: "official",
 		claudeModel: "qwen-test-model",
 		claudeReasoningEffort: "medium",
 		providerProfiles: [],
