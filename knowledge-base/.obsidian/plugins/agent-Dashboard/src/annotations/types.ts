@@ -9,6 +9,7 @@ export interface AnnotationSelection {
 	sourceEnd: number;
 	prefix: string;
 	suffix: string;
+	isTableCell: boolean;
 	anchorRect: DOMRect;
 }
 

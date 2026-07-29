@@ -63,6 +63,11 @@ assert.match(
 );
 assert.match(serviceSource, /wiki\/annotations/);
 assert.match(serviceSource, /#\^\$\{record\.id\}/);
+assert.match(serviceSource, /isTableCell:\s*block\.matches\("td, th"\)/);
+assert.ok(
+	serviceSource.includes('selection.isTableCell ? "\\\\|" : "|"'),
+	"table-cell annotations should escape the wikilink alias separator",
+);
 assert.match(serviceSource, /settings\.annotationBackendId/);
 assert.match(serviceSource, /settings\.annotationMaxTokens/);
 assert.match(serviceSource, /settings\.annotationCodexModel/);
@@ -85,6 +90,14 @@ assert.match(popoverSource, /MarkdownRenderer\.render/);
 assert.match(popoverSource, /cancel\.addEventListener\("click", \(\) => this\.renderChooser\(\)\)/);
 assert.doesNotMatch(popoverSource, /text:\s*"关闭"/);
 assert.match(styles, /a\.internal-link\[data-href\^="wiki\/annotations\/"\]/);
+const repairedTableSource = fs.readFileSync(
+	path.join(projectRoot, "knowledge-base/wiki/sources/cho_pan-cancer_2026.md"),
+	"utf8",
+);
+assert.match(
+	repairedTableSource,
+	/\[\[wiki\/annotations\/cho_pan-cancer_2026#\^ann-6d4763cdfc\\\|CR2\/FCER2/,
+);
 
 const plugin = new AgentDashboardPlugin();
 const targets = plugin.parseAnnotationArchiveTargets(

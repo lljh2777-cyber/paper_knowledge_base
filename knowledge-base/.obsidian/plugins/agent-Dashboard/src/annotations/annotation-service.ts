@@ -305,6 +305,7 @@ export class AnnotationService {
 			sourceEnd,
 			prefix: content.slice(Math.max(0, sourceStart - 80), sourceStart),
 			suffix: content.slice(sourceEnd, sourceEnd + 80),
+			isTableCell: block.matches("td, th"),
 			anchorRect: range.getBoundingClientRect(),
 		};
 	}
@@ -340,7 +341,8 @@ export class AnnotationService {
 			await this.app.vault.process(sourceFile, (content) => {
 				const location = this.relocateSelection(content, selection);
 				const linkTarget = annotationPath.replace(/\.md$/i, "");
-				const link = `[[${linkTarget}#^${record.id}|${selection.selectedText}]]`;
+				const aliasSeparator = selection.isTableCell ? "\\|" : "|";
+				const link = `[[${linkTarget}#^${record.id}${aliasSeparator}${selection.selectedText}]]`;
 				return `${content.slice(0, location.start)}${link}${content.slice(location.end)}`;
 			});
 		} catch (error) {
