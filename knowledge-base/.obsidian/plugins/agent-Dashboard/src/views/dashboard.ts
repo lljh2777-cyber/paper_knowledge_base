@@ -591,7 +591,9 @@ export class DashboardView extends ItemView {
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
 		const backendId = executionOverrides.backend === "claude-code"
 			? "claude-code"
-			: "codex-cli";
+			: executionOverrides.backend === "opencode"
+				? "opencode"
+				: "codex-cli";
 		const executionConfig = action.ai
 			? this.plugin.resolveCliActionExecutionConfig(
 				action,

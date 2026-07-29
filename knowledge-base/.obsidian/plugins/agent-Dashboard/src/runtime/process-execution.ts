@@ -3,8 +3,12 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 
 import type { DashboardAction } from "../actions";
-import { MODEL_OPTIONS } from "../config";
-import { getCliBackendLabel } from "../config";
+import {
+	getCliBackendLabel,
+	MODEL_OPTIONS,
+	OPENCODE_ZEN_FREE_MODELS,
+	type CliBackendId,
+} from "../config";
 import { ProviderConnectionError } from "../providers/shared";
 import type { DashboardSettings } from "./settings";
 import type { DashboardLifecycleState } from "./lifecycle-state";
@@ -81,11 +85,15 @@ export class ProcessExecutionService {
 
 	discoverCliModels(
 		settings: DashboardSettings,
-		backendId: "codex-cli" | "claude-code",
+		backendId: CliBackendId,
 	): Promise<CliModelDiscoveryResult> {
-		return backendId === "claude-code"
-			? Promise.resolve(this.discoverClaudeModels(settings))
-			: this.discoverCodexModels(settings);
+		if (backendId === "claude-code") {
+			return Promise.resolve(this.discoverClaudeModels(settings));
+		}
+		if (backendId === "opencode") {
+			return this.discoverOpenCodeModels(settings);
+		}
+		return this.discoverCodexModels(settings);
 	}
 
 	private discoverCodexModels(settings: DashboardSettings): Promise<CliModelDiscoveryResult> {
@@ -339,6 +347,122 @@ export class ProcessExecutionService {
 		};
 	}
 
+	private discoverOpenCodeModels(settings: DashboardSettings): Promise<CliModelDiscoveryResult> {
+		const executable = String(settings.openCodeExecutable || "");
+		const useOfficialConfig = settings.openCodeConfigSource === "official";
+		let configuredModel = useOfficialConfig ? settings.openCodeModel.trim() : "";
+		if (!useOfficialConfig) {
+			for (const configPath of [
+				path.join(process.env.USERPROFILE || "", ".config", "opencode", "opencode.json"),
+				path.join(process.env.USERPROFILE || "", ".opencode", "config.json"),
+			]) {
+				try {
+					const content = fs.readFileSync(configPath, "utf8");
+					const source = asRecord(JSON.parse(content));
+					configuredModel = String(source.model || "").trim();
+					if (configuredModel) break;
+				} catch {
+					// The CLI model list remains authoritative when JSONC or a custom path is used.
+				}
+			}
+		}
+		const fallback = (message = ""): CliModelDiscoveryResult => ({
+			backendId: "opencode",
+			models: useOfficialConfig
+				? OPENCODE_ZEN_FREE_MODELS.map((model) => ({
+					...model,
+					supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+				}))
+				: configuredModel
+					? [{
+						id: configuredModel,
+						label: `当前模型 · ${configuredModel}`,
+						supportsFast: false,
+						supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+					}]
+					: [],
+			effectiveModel: configuredModel,
+			source: useOfficialConfig ? "OpenCode Zen 静态回退" : "CC Switch 当前配置",
+			complete: false,
+			message,
+			discoveredAt: new Date().toISOString(),
+		});
+		if (!executable || !fs.existsSync(executable)) {
+			return Promise.resolve(fallback(`OpenCode 可执行文件不存在：${executable || "未配置"}`));
+		}
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			let timer = 0;
+			const args = useOfficialConfig ? ["models", "opencode"] : ["models"];
+			const child = spawn(executable, args, {
+				cwd: settings.projectRoot,
+				shell: false,
+				windowsHide: true,
+			});
+			const finish = (result: CliModelDiscoveryResult): void => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				resolve(result);
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout = appendOutput(stdout, chunk, 200000);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendOutput(stderr, chunk, 8000);
+			});
+			child.once("error", (error: Error) => finish(fallback(error.message)));
+			child.once("close", (code) => {
+				if (code !== 0) {
+					finish(fallback(stderr.trim() || stdout.trim() || `OpenCode 退出码 ${code}`));
+					return;
+				}
+				const seen = new Set<string>();
+				const models = stdout
+					.split(/\r?\n/)
+					.map((line) => line.trim().split(/\s+/)[0] || "")
+					.filter((id) => {
+						if (!id.includes("/") || seen.has(id)) return false;
+						seen.add(id);
+						return true;
+					})
+					.map((id): CliDiscoveredModel => ({
+						id,
+						label: id.split("/").slice(1).join("/") || id,
+						description: id.endsWith("-free") ? "免费模型" : undefined,
+						isDefault: id === configuredModel,
+						supportsFast: false,
+						supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+					}));
+				if (!models.length) {
+					finish(fallback("OpenCode 返回了空模型目录"));
+					return;
+				}
+				if (!configuredModel) {
+					configuredModel = useOfficialConfig
+						? settings.openCodeModel.trim() || models[0].id
+						: models.find((model) => model.isDefault)?.id || "";
+				}
+				finish({
+					backendId: "opencode",
+					models,
+					effectiveModel: configuredModel,
+					source: useOfficialConfig
+						? "OpenCode models · 官方 Zen"
+						: "OpenCode models · CC Switch",
+					complete: true,
+					discoveredAt: new Date().toISOString(),
+				});
+			});
+			timer = window.setTimeout(() => {
+				if (!child.killed) child.kill();
+				finish(fallback("OpenCode 模型目录检测超过 20 秒"));
+			}, 20000);
+		});
+	}
+
 	recoverInterruptedPracticeRuns(settings: DashboardSettings): void {
 		const runsDirectory = path.join(
 			settings.projectRoot,
@@ -478,6 +602,21 @@ export class ProcessExecutionService {
 		);
 		fs.mkdirSync(path.dirname(stopPath), { recursive: true });
 		if (fs.existsSync(stopPath)) fs.unlinkSync(stopPath);
+		const backendId: CliBackendId = executionConfig.backend === "claude-code"
+			? "claude-code"
+			: executionConfig.backend === "opencode"
+				? "opencode"
+				: "codex-cli";
+		const backendExecutable = backendId === "claude-code"
+			? settings.claudeExecutable
+			: backendId === "opencode"
+				? settings.openCodeExecutable
+				: settings.codexExecutable;
+		const backendConfigSource = backendId === "claude-code"
+			? settings.claudeConfigSource
+			: backendId === "opencode"
+				? settings.openCodeConfigSource
+				: settings.codexConfigSource;
 		const args = [
 			runner,
 			"--action",
@@ -485,11 +624,9 @@ export class ProcessExecutionService {
 			"--project-root",
 			projectRoot,
 			"--backend",
-			executionConfig.backend === "claude-code" ? "claude-code" : "codex-cli",
+			backendId,
 			"--backend-executable",
-			executionConfig.backend === "claude-code"
-				? settings.claudeExecutable
-				: settings.codexExecutable,
+			backendExecutable,
 			"--reasoning-effort",
 			executionConfig.reasoningEffort || "default",
 			"--service-tier",
@@ -505,11 +642,9 @@ export class ProcessExecutionService {
 		];
 		args.push(
 			"--backend-config-source",
-			executionConfig.backend === "claude-code"
-				? settings.claudeConfigSource
-				: settings.codexConfigSource,
+			backendConfigSource,
 		);
-		if (executionConfig.backend === "claude-code") {
+		if (backendId !== "codex-cli") {
 			if (executionConfig.model) {
 				args.push("--backend-model", executionConfig.model);
 			}
@@ -874,6 +1009,193 @@ export class ProcessExecutionService {
 					message: `${getCliBackendLabel("claude-code")} 连接测试超过 45 秒`,
 				});
 			}, 45000);
+		});
+	}
+
+	probeOpenCode(settings: DashboardSettings): Promise<ProviderConnectionTestResult> {
+		const startedAt = Date.now();
+		const executable = String(settings.openCodeExecutable || "");
+		const pythonExecutable = String(settings.pythonExecutable || "").trim();
+		const runner = path.join(
+			settings.projectRoot,
+			"tool-library",
+			"scripts",
+			"run_vault_action.py",
+		);
+		const configuredModel = settings.openCodeModel.trim();
+		const displayModel = configuredModel || (
+			settings.openCodeConfigSource === "cc-switch"
+				? "CC Switch 当前模型"
+				: "OpenCode Zen 默认模型"
+		);
+		if (!pythonExecutable) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				provider: "opencode",
+				model: displayModel,
+				message: "未配置 Python 可执行文件",
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		if (!fs.existsSync(pythonExecutable)) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				provider: "opencode",
+				model: displayModel,
+				message: `Python 可执行文件不存在：${pythonExecutable}`,
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		if (!fs.existsSync(runner)) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				provider: "opencode",
+				model: displayModel,
+				message: `统一 runner 不存在：${runner}`,
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		if (!executable || !fs.existsSync(executable)) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				provider: "opencode",
+				model: displayModel,
+				message: `OpenCode 可执行文件不存在：${executable || "未配置"}`,
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		const runnerTimeoutSeconds = Math.max(
+			60,
+			Math.min(180, Number(settings.providerTimeoutSeconds || 20) * 3),
+		);
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			let timer = 0;
+			const args = [
+				runner,
+				"--probe-backend",
+				"opencode",
+				"--project-root",
+				settings.projectRoot,
+				"--backend-executable",
+				executable,
+				"--backend-config-source",
+				settings.openCodeConfigSource,
+				"--reasoning-effort",
+				settings.openCodeReasoningEffort,
+				"--service-tier",
+				"default",
+				"--timeout-seconds",
+				String(runnerTimeoutSeconds),
+			];
+			if (configuredModel) args.push("--backend-model", configuredModel);
+			const child = spawn(pythonExecutable, args, {
+				cwd: settings.projectRoot,
+				shell: false,
+				windowsHide: true,
+				env: {
+					...process.env,
+					PYTHONUTF8: "1",
+					PYTHONIOENCODING: "utf-8",
+				},
+			});
+			const finish = (
+				result: Omit<ProviderConnectionTestResult, "model" | "responseTimeMs" | "testedAt">,
+				model = displayModel,
+				responseTimeMs = Date.now() - startedAt,
+			): void => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				resolve({
+					model,
+					responseTimeMs,
+					testedAt: new Date().toISOString(),
+					...result,
+				});
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout = appendOutput(stdout, chunk, 30000);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendOutput(stderr, chunk, 10000);
+			});
+			child.once("error", (error: Error) => {
+				finish({
+					ok: false,
+					type: "local-service-offline",
+					provider: "opencode",
+					message: error.message,
+				});
+			});
+			child.once("close", (code) => {
+				let payload: Record<string, unknown> = {};
+				try {
+					payload = asRecord(JSON.parse(stdout.trim()));
+				} catch {
+					// A non-JSON runner response is classified below.
+				}
+				const payloadModel = String(payload.model || "").trim() || displayModel;
+				const payloadResponseTime = Number(payload.response_time_ms);
+				const responseTimeMs = Number.isFinite(payloadResponseTime)
+					? payloadResponseTime
+					: Date.now() - startedAt;
+				if (code === 0 && payload.ok === true) {
+					finish({
+						ok: true,
+						type: "success",
+						provider: "opencode",
+						endpoint: settings.openCodeConfigSource === "cc-switch"
+							? "OpenCode · CC Switch"
+							: "OpenCode · 官方 Zen",
+						modelExists: null,
+						streaming: { supported: true, verified: true },
+						pdf: { supported: false, verified: false },
+						vision: {
+							supported: false,
+							verified: false,
+							note: "首版未向 OpenCode runner 开放 Vault 图片附件",
+						},
+						webSearch: {
+							supported: true,
+							verified: false,
+							note: "仅在查询侧边栏的“联网搜索”模式开放 websearch/webfetch",
+						},
+						responsePreview: String(payload.response_preview || "").trim(),
+					}, payloadModel, responseTimeMs);
+					return;
+				}
+				finish({
+					ok: false,
+					type: String(payload.type || (code === 0 ? "protocol" : "runner-failure")),
+					provider: "opencode",
+					message: String(
+						payload.message
+						|| stderr.trim()
+						|| stdout.trim()
+						|| `统一 runner 退出码 ${code}`,
+					),
+				}, payloadModel, responseTimeMs);
+			});
+			timer = window.setTimeout(() => {
+				if (!child.killed) child.kill();
+				finish({
+					ok: false,
+					type: "runner-failure",
+					provider: "opencode",
+					message: `统一 runner 未在 ${runnerTimeoutSeconds + 15} 秒内退出`,
+				});
+			}, (runnerTimeoutSeconds + 15) * 1000);
 		});
 	}
 

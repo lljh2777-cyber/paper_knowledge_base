@@ -29,7 +29,9 @@ Codex / 自定义智能体
 Agent Dashboard（Obsidian 插件）
         │
         ├── CLI Backend Protocol
-        │   └── Codex CLI 参考适配器
+        │   ├── Codex CLI
+        │   ├── Claude Code
+        │   └── OpenCode
         ├── Direct API Provider
         ├── Python/R 本地执行器
         └── 检索、体检和 OKF 确定性脚本
@@ -56,15 +58,15 @@ sources / methods / concepts / code / projects / synthesis
 |---|---|---|
 | 文献入库 | Codex CLI | 更新入库元数据、索引和日志，不生成论文结论 |
 | PDF 深读 | `paper_xray` 智能体 | 完成全文证据检查后才允许标记为 `x-ray` |
-| 代码分析 | `code_reader` 智能体 | 默认只做静态阅读，不运行或修改项目代码 |
-| 知识库检索 | Codex CLI、Claude Code 或 Direct API | 只读检索，支持连续对话和来源面板；Claude Code 可在“联网搜索”模式使用 WebSearch/WebFetch，并可分析 Vault 图片 |
-| 综合分析 | Codex CLI | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面 |
+| 代码分析 | Codex CLI、Claude Code 或 OpenCode | 默认静态阅读；Claude/OpenCode 仅能在阶段目录白名单内写入知识页面 |
+| 知识库检索 | Codex CLI、Claude Code、OpenCode 或 Direct API | 只读检索与连续对话；Claude/OpenCode 仅在“联网搜索”模式开放网络工具 |
+| 综合分析 | Codex CLI、Claude Code 或 OpenCode | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面；非 Codex 后端执行后置审计 |
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
 | 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
 
-阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code 或已验证 Direct API，并配置批注专用模型、推理强度、速度和输出长度。
+阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code、OpenCode 或已验证 Direct API，并配置批注专用模型、推理强度和输出长度。
 
 ### 模型后端
 
@@ -72,11 +74,14 @@ sources / methods / concepts / code / projects / synthesis
 
 1. **Codex CLI**：可在设置中选择官方 Codex 或 CC Switch。官方模式显式使用 OpenAI provider 和 Dashboard 的官方模型策略；CC Switch 模式沿用当前 `~/.codex/config.toml`，插件不改写供应商或凭据文件。
 2. **Claude Code**：可在设置中选择官方 Claude Code 或 CC Switch 配置来源。查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和综合分析支持受审计的阶段所有权写入。
-3. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
+3. **OpenCode**：可选择官方 OpenCode Zen 或 CC Switch。官方模式默认提供当前内置的免费 Zen 模型候选并动态运行 `opencode models opencode` 校验；CC Switch 模式读取当前 OpenCode 全局配置和模型。查询与批注保持只读，代码分析和综合分析支持受审计的阶段所有权写入。第一版不传递图片。
+4. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
 
-CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli` 与 `claude-code`；两者都可在官方配置与 CC Switch 当前配置之间切换。Codex 通过 `app-server model/list` 获取所选 provider 的模型目录，Claude 按所选来源使用官方 CLI 别名或 CC Switch 用户设置，并通过初始化事件识别实际模型。Claude 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入，并由宿主生成变更清单、审计路径、执行后置体检和失败回滚。完整写入任务仍使用 Codex CLI；OpenCode 尚未接入。
+CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入，并由宿主生成变更清单、审计路径、执行后置体检和失败回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
+
+OpenCode 的模型目录由插件直接运行 `opencode models` 获取；连接测试和实际任务统一通过 Python runner 执行。这样可以统一处理 JSONL、超时、Windows 进程树终止和错误分类。若 Python 或 runner 路径无效，设置页会显示明确的配置错误，而不会误报为 OpenCode 超时。
 
 ## Skills 与智能体
 
@@ -155,7 +160,7 @@ knowledge-base/
 
 - Windows 10/11
 - Obsidian Desktop `1.8.0` 或更高版本
-- Codex App 或 Codex CLI
+- Codex App / Codex CLI；可选安装 Claude Code 或 OpenCode
 - Python 3
 - R / `Rscript`，仅代码练习或 R 工作流需要
 - Node.js 与 pnpm/npm，仅开发插件时需要
@@ -166,7 +171,7 @@ knowledge-base/
 D:\python\python.exe
 ```
 
-Python、Rscript、Codex CLI 和项目根目录也可以在 Agent Dashboard 设置中调整。
+Python、Rscript、各 CLI 可执行文件和项目根目录都可以在 Agent Dashboard 设置中调整。
 
 ### 2. 获取项目
 
@@ -190,8 +195,8 @@ cd paper_knowledge_base
 在 Agent Dashboard 设置中依次检查：
 
 1. 项目根目录。
-2. Python、Rscript 和 Codex CLI 路径。
-3. Codex CLI 连接状态。
+2. Python、Rscript 和计划使用的 CLI 路径。
+3. Codex CLI、Claude Code 或 OpenCode 的配置来源、模型与连接状态。
 4. 可选的 Direct API Provider、SecretStorage 凭据、模型列表和连接测试。
 
 `.codex/config.toml` 是项目级 Codex 配置，只作用于本项目。开始处理真实文献前，请先阅读 [AGENTS.md](AGENTS.md) 中的安全、证据和写入边界。

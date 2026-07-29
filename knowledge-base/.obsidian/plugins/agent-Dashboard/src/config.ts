@@ -2,14 +2,16 @@ export const VIEW_TYPE = "agent-dashboard-research-vault";
 export const CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 export const QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 
-export type CliBackendId = "codex-cli" | "claude-code";
+export type CliBackendId = "codex-cli" | "claude-code" | "opencode";
 
 export function isCliBackendId(value: unknown): value is CliBackendId {
-	return value === "codex-cli" || value === "claude-code";
+	return value === "codex-cli" || value === "claude-code" || value === "opencode";
 }
 
 export function getCliBackendLabel(value: unknown): string {
-	return value === "claude-code" ? "Claude Code" : "Codex CLI";
+	if (value === "claude-code") return "Claude Code";
+	if (value === "opencode") return "OpenCode";
+	return "Codex CLI";
 }
 
 export const MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
@@ -34,6 +36,45 @@ export const MODEL_OPTIONS: readonly ModelOption[] = [
 	{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
 	{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
 	{ id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "快速代码模型", supportsFast: false },
+];
+
+export const OPENCODE_ZEN_FREE_MODELS: readonly ModelOption[] = [
+	{
+		id: "opencode/mimo-v2.5-free",
+		label: "MiMo-V2.5 Free",
+		description: "OpenCode Zen 免费模型",
+		supportsFast: false,
+	},
+	{
+		id: "opencode/north-mini-code-free",
+		label: "North Mini Code Free",
+		description: "OpenCode Zen 免费代码模型",
+		supportsFast: false,
+	},
+	{
+		id: "opencode/nemotron-3-ultra-free",
+		label: "Nemotron 3 Ultra Free",
+		description: "OpenCode Zen 免费模型",
+		supportsFast: false,
+	},
+	{
+		id: "opencode/deepseek-v4-flash-free",
+		label: "DeepSeek V4 Flash Free",
+		description: "OpenCode Zen 免费模型",
+		supportsFast: false,
+	},
+	{
+		id: "opencode/laguna-s-2.1-free",
+		label: "Laguna S 2.1 Free",
+		description: "OpenCode Zen 免费模型",
+		supportsFast: false,
+	},
+	{
+		id: "opencode/ling-3.0-flash-free",
+		label: "Ling 3.0 Flash Free",
+		description: "OpenCode Zen 免费模型",
+		supportsFast: false,
+	},
 ];
 
 export interface ReasoningOption {

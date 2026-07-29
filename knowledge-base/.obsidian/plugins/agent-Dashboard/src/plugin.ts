@@ -15,8 +15,10 @@ import {
 	DEFAULT_SETTINGS,
 	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
+	findPreferredOpenCodeExecutable,
 	getClaudeDefaultModelLabel,
 	getCodexDefaultModelLabel,
+	getOpenCodeDefaultModelLabel,
 	inferLegacyClaudeConfigSource,
 	isManagedCodexExecutable,
 } from "./runtime/settings";
@@ -706,6 +708,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			const retrievalMode = (
 				queryBackendId === "codex-cli"
 				|| queryBackendId === "claude-code"
+				|| queryBackendId === "opencode"
 				|| profileSupportsDirectWebSearch(queryProfile)
 			)
 				? session.retrievalMode
@@ -751,6 +754,16 @@ export default class AgentDashboardPlugin extends Plugin {
 			this.settings.claudeConfigSource = inferLegacyClaudeConfigSource();
 			changed = true;
 		}
+		const preferredOpenCodeExecutable = findPreferredOpenCodeExecutable();
+		const configuredOpenCodeExecutable = String(this.settings.openCodeExecutable || "").trim();
+		if (!configuredOpenCodeExecutable && preferredOpenCodeExecutable) {
+			this.settings.openCodeExecutable = preferredOpenCodeExecutable;
+			changed = true;
+		}
+		if (!["official", "cc-switch"].includes(String(storedSettings.openCodeConfigSource || ""))) {
+			this.settings.openCodeConfigSource = "official";
+			changed = true;
+		}
 		if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
 			this.settings.codexModel = "gpt-5.6-terra";
 			changed = true;
@@ -763,9 +776,13 @@ export default class AgentDashboardPlugin extends Plugin {
 			this.settings.claudeReasoningEffort = DEFAULT_SETTINGS.claudeReasoningEffort;
 			changed = true;
 		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.openCodeReasoningEffort)) {
+			this.settings.openCodeReasoningEffort = DEFAULT_SETTINGS.openCodeReasoningEffort;
+			changed = true;
+		}
 		const annotationBackendId = String(this.settings.annotationBackendId || "auto");
 		if (
-			!["auto", "codex-cli", "claude-code"].includes(annotationBackendId)
+			!["auto", "codex-cli", "claude-code", "opencode"].includes(annotationBackendId)
 			&& !normalizedProfiles.some(
 				(profile) => profile.id === annotationBackendId && profile.lastTest?.ok,
 			)
@@ -779,6 +796,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationClaudeReasoningEffort)) {
 			this.settings.annotationClaudeReasoningEffort = DEFAULT_SETTINGS.annotationClaudeReasoningEffort;
+			changed = true;
+		}
+		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationOpenCodeReasoningEffort)) {
+			this.settings.annotationOpenCodeReasoningEffort = DEFAULT_SETTINGS.annotationOpenCodeReasoningEffort;
 			changed = true;
 		}
 		if (!["default", "fast"].includes(this.settings.annotationCodexServiceTier)) {
@@ -856,6 +877,11 @@ export default class AgentDashboardPlugin extends Plugin {
 				? "claude-code"
 				: "codex-cli";
 		}
+		if (normalized === "opencode") {
+			return this.isCliBackendAvailable("opencode")
+				? "opencode"
+				: "codex-cli";
+		}
 		return this.getVerifiedProviderProfiles().some((profile) => profile.id === normalized)
 			? normalized
 			: "codex-cli";
@@ -864,7 +890,9 @@ export default class AgentDashboardPlugin extends Plugin {
 	isCliBackendAvailable(backendId: CliBackendId): boolean {
 		const executable = backendId === "claude-code"
 			? this.settings.claudeExecutable
-			: this.settings.codexExecutable;
+			: backendId === "opencode"
+				? this.settings.openCodeExecutable
+				: this.settings.codexExecutable;
 		return Boolean(executable && fs.existsSync(executable));
 	}
 
@@ -924,14 +952,20 @@ export default class AgentDashboardPlugin extends Plugin {
 	): Promise<CliModelDiscoveryResult> {
 		const executable = backendId === "claude-code"
 			? this.settings.claudeExecutable
-			: this.settings.codexExecutable;
+			: backendId === "opencode"
+				? this.settings.openCodeExecutable
+				: this.settings.codexExecutable;
 		const configuredModel = backendId === "claude-code"
 			? this.settings.claudeModel
-			: this.settings.codexModel;
+			: backendId === "opencode"
+				? this.settings.openCodeModel
+				: this.settings.codexModel;
 		const signature = `${executable}\u0000${configuredModel}`;
 		const sourceSignature = backendId === "claude-code"
 			? this.settings.claudeConfigSource
-			: this.settings.codexConfigSource;
+			: backendId === "opencode"
+				? this.settings.openCodeConfigSource
+				: this.settings.codexConfigSource;
 		const signatureWithSource = `${signature}\u0000${sourceSignature}`;
 		const cached = this.cliModelDiscoveryCache.get(backendId);
 		if (
@@ -948,7 +982,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			.then((result) => {
 				this.cliModelDiscoveryCache.set(backendId, {
 					signature: signatureWithSource,
-					expiresAt: Date.now() + (backendId === "codex-cli" ? 300000 : 5000),
+					expiresAt: Date.now() + (backendId === "claude-code" ? 5000 : 300000),
 					result,
 				});
 				return result;
@@ -969,6 +1003,12 @@ export default class AgentDashboardPlugin extends Plugin {
 			const result = await this.processExecution.probeClaudeCode(this.settings);
 			this.providerRuntimeState.set("claude-code", { status: "done", result });
 			this.invalidateCliModelDiscovery("claude-code");
+			return result;
+		}
+		if (profileId === "opencode") {
+			const result = await this.processExecution.probeOpenCode(this.settings);
+			this.providerRuntimeState.set("opencode", { status: "done", result });
+			this.invalidateCliModelDiscovery("opencode");
 			return result;
 		}
 		const provider = this.createLLMProvider(profileId);
@@ -1406,6 +1446,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (backendId === "codex-cli") {
 			return this.resolveActionExecutionConfig(action, overrides);
 		}
+		const isOpenCode = backendId === "opencode";
 		const requestedModel = typeof overrides.model === "string"
 			? overrides.model.trim()
 			: "";
@@ -1413,13 +1454,29 @@ export default class AgentDashboardPlugin extends Plugin {
 			? overrides.reasoningEffort.trim()
 			: "";
 		const defaultReasoning = REASONING_OPTIONS.some(
-			(option) => option.id === this.settings.claudeReasoningEffort,
+			(option) => option.id === (
+				isOpenCode
+					? this.settings.openCodeReasoningEffort
+					: this.settings.claudeReasoningEffort
+			),
 		)
-			? this.settings.claudeReasoningEffort
-			: DEFAULT_SETTINGS.claudeReasoningEffort;
+			? (
+				isOpenCode
+					? this.settings.openCodeReasoningEffort
+					: this.settings.claudeReasoningEffort
+			)
+			: isOpenCode
+				? DEFAULT_SETTINGS.openCodeReasoningEffort
+				: DEFAULT_SETTINGS.claudeReasoningEffort;
+		const configuredModel = isOpenCode
+			? this.settings.openCodeModel.trim()
+			: this.settings.claudeModel.trim();
+		const configSource = isOpenCode
+			? this.settings.openCodeConfigSource
+			: this.settings.claudeConfigSource;
 		return {
-			backend: "claude-code",
-			model: requestedModel || this.settings.claudeModel.trim(),
+			backend: backendId,
+			model: requestedModel || configuredModel,
 			reasoningEffort: REASONING_OPTIONS.some(
 				(option) => option.id === requestedReasoning,
 			)
@@ -1428,10 +1485,14 @@ export default class AgentDashboardPlugin extends Plugin {
 			serviceTier: "default",
 			modelSource: requestedModel
 				? "本次覆盖"
-				: this.settings.claudeModel.trim()
-					? "Claude 默认"
-					: getClaudeDefaultModelLabel(this.settings.claudeConfigSource),
-			reasoningSource: requestedReasoning ? "本次覆盖" : "Claude 默认",
+				: configuredModel
+					? `${getCliBackendLabel(backendId)} 默认`
+					: isOpenCode
+						? getOpenCodeDefaultModelLabel(configSource)
+						: getClaudeDefaultModelLabel(configSource),
+			reasoningSource: requestedReasoning
+				? "本次覆盖"
+				: `${getCliBackendLabel(backendId)} 默认`,
 		};
 	}
 
@@ -1539,7 +1600,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			!action
 			|| ["vault-lint", "vault-lint-fix"].includes(action.id)
 			|| (
-				backendId === "claude-code"
+				backendId !== "codex-cli"
 				&& action.writes
 				&& ["code-analysis", "synthesis"].includes(action.id)
 			)
@@ -1549,7 +1610,9 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
 			const executable = backendId === "claude-code"
 				? this.settings.claudeExecutable
-				: this.settings.codexExecutable;
+				: backendId === "opencode"
+					? this.settings.openCodeExecutable
+					: this.settings.codexExecutable;
 			checks.push([getCliBackendLabel(backendId), fs.existsSync(executable)]);
 		}
 		const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
@@ -1972,19 +2035,23 @@ export default class AgentDashboardPlugin extends Plugin {
 					|| (
 						executionConfig.backend === "claude-code"
 							? this.settings.claudeReasoningEffort
-							: this.settings.codexReasoningEffort
+							: executionConfig.backend === "opencode"
+								? this.settings.openCodeReasoningEffort
+								: this.settings.codexReasoningEffort
 					),
 				serviceTier: executionConfig.serviceTier || "default",
 			} as CodexExecutionConfig
 			: this.resolveActionExecutionConfig(action);
 		const backendId: CliBackendId = effectiveConfig.backend === "claude-code"
 			? "claude-code"
-			: "codex-cli";
-		const claudeStageWriteAllowed = backendId === "claude-code"
+			: effectiveConfig.backend === "opencode"
+				? "opencode"
+				: "codex-cli";
+		const stageWriteAllowed = backendId !== "codex-cli"
 			&& ["code-analysis", "synthesis"].includes(action.id);
-		if (action.writes && backendId !== "codex-cli" && !claudeStageWriteAllowed) {
+		if (action.writes && backendId !== "codex-cli" && !stageWriteAllowed) {
 			return Promise.reject(
-				new Error("Claude Code 当前仅开放“代码分析”和“综合分析”的阶段所有权写入"),
+				new Error(`${getCliBackendLabel(backendId)} 当前仅开放“代码分析”和“综合分析”的阶段所有权写入`),
 			);
 		}
 		const runtime = this.checkRuntime(action, backendId);

@@ -5,11 +5,13 @@ from __future__ import annotations
 from .base import AgentCliBackend
 from .claude_code import ClaudeCodeBackend
 from .codex_cli import CodexCliBackend
+from .opencode import OpenCodeBackend
 
 
 _BACKENDS: dict[str, AgentCliBackend] = {
     "claude-code": ClaudeCodeBackend(),
     "codex-cli": CodexCliBackend(),
+    "opencode": OpenCodeBackend(),
 }
 
 

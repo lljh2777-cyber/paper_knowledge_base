@@ -279,10 +279,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-actions", action="store_true")
     parser.add_argument("--list-backends", action="store_true")
+    parser.add_argument(
+        "--probe-backend",
+        default="",
+        help=(
+            "Run a no-tools connection probe for one CLI backend and return "
+            "a single structured JSON result."
+        ),
+    )
     args = parser.parse_args()
-    if not args.list_actions and not args.list_backends and not args.action:
+    if (
+        not args.list_actions
+        and not args.list_backends
+        and not args.probe_backend
+        and not args.action
+    ):
         parser.error(
-            "--action is required unless --list-actions or --list-backends is used"
+            "--action is required unless a list or probe mode is used"
         )
     if args.timeout_seconds < 10:
         parser.error("--timeout-seconds must be at least 10")
@@ -390,6 +403,63 @@ def build_command_environment(command: list[str]) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    executable_name = Path(command[0]).name.lower() if command else ""
+    if executable_name in {"opencode", "opencode.exe", "opencode.cmd"}:
+        try:
+            title_index = command.index("--title") + 1
+            title = command[title_index]
+        except (ValueError, IndexError):
+            title = ""
+        if title.startswith("agent-dashboard:"):
+            profile = title.split(":", 1)[1]
+            permissions: dict[str, Any] = {
+                "*": "deny",
+                "question": "deny",
+                "task": "deny",
+                "external_directory": "deny",
+                "bash": "deny",
+                "edit": "deny",
+                "read": "deny",
+                "glob": "deny",
+                "grep": "deny",
+                "list": "deny",
+                "skill": "deny",
+                "lsp": "deny",
+                "websearch": "deny",
+                "webfetch": "deny",
+            }
+            if profile in {"read-only", "read-only-web", "stage-write"}:
+                permissions.update(
+                    {
+                        "read": "allow",
+                        "glob": "allow",
+                        "grep": "allow",
+                        "list": "allow",
+                        "skill": "allow",
+                        "lsp": "allow",
+                    }
+                )
+            if profile == "read-only-web":
+                permissions.update({"websearch": "allow", "webfetch": "allow"})
+            if profile == "stage-write":
+                permissions["edit"] = "allow"
+            inline: dict[str, Any] = {}
+            try:
+                existing = json.loads(
+                    env.get("OPENCODE_CONFIG_CONTENT", "") or "{}"
+                )
+                if isinstance(existing, dict):
+                    inline.update(existing)
+            except json.JSONDecodeError:
+                pass
+            inline["permission"] = permissions
+            inline["share"] = "disabled"
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+                inline,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        return env
     try:
         source_index = command.index("--setting-sources") + 1
         setting_sources = command[source_index]
@@ -1508,6 +1578,307 @@ def run_retrieval_process(
     return 0
 
 
+def run_structured_backend_process(
+    command: list[str],
+    project_root: Path,
+    timeout_seconds: int,
+    stdin_text: str,
+    stop_file: Path | None,
+    backend: AgentCliBackend,
+) -> int:
+    """Run a JSONL backend and expose only normalized final text on stdout."""
+
+    env = build_command_environment(command)
+    process = spawn_managed_process(
+        command,
+        cwd=project_root,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        bufsize=1,
+        **subprocess_group_options(),
+    )
+    final_messages: list[str] = []
+    output_lock = threading.Lock()
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                with output_lock:
+                    print(
+                        f"{backend.label} JSONL parse warning: {line[:500]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                continue
+            if not isinstance(event, dict):
+                continue
+            parsed = backend.parse_event(event)
+            for dashboard_event in parsed.dashboard_events:
+                emit_dashboard_event(dashboard_event)
+            final_messages.extend(parsed.final_messages)
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            with output_lock:
+                print(line, end="", file=sys.stderr, flush=True)
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    assert process.stdin is not None
+    process.stdin.write(stdin_text)
+    process.stdin.close()
+    return_code, completion_status = wait_for_process(
+        process,
+        timeout_seconds,
+        stop_file,
+    )
+    if completion_status == "timeout":
+        print(
+            f"Action timed out after {timeout_seconds} seconds.",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif completion_status == "stopped":
+        emit_dashboard_event(
+            {
+                "type": "status",
+                "stage": "stopped",
+                "label": "任务已停止，子进程已清理",
+            }
+        )
+        print(
+            "Action stopped by user; child process tree was terminated.",
+            file=sys.stderr,
+            flush=True,
+        )
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    if return_code != 0:
+        return return_code
+    if not final_messages:
+        print(
+            f"{backend.label} JSONL completed without a final agent message.",
+            file=sys.stderr,
+        )
+        return 1
+    print(final_messages[-1], flush=True)
+    return 0
+
+
+def classify_backend_probe_error(
+    return_code: int,
+    diagnostic: str,
+) -> tuple[str, str]:
+    """Map CLI diagnostics to stable reader-facing connection error types."""
+
+    text = diagnostic.strip()
+    lowered = text.lower()
+    if return_code == 124:
+        return "timeout", "OpenCode 请求在 runner 超时前未完成"
+    if return_code == 130:
+        return "stopped", "OpenCode 连接测试已停止"
+    if any(
+        marker in lowered
+        for marker in (
+            "model not found",
+            "model_not_found",
+            "unknown model",
+            "does not exist",
+            "invalid model",
+        )
+    ):
+        return "model-not-found", text or "OpenCode 模型不存在"
+    if any(
+        marker in lowered
+        for marker in (
+            "unauthorized",
+            "authentication",
+            "invalid api key",
+            "api key",
+            "status 401",
+            "\"status\":401",
+            "status 403",
+            "\"status\":403",
+        )
+    ):
+        return "authentication", text or "OpenCode 认证失败"
+    if any(
+        marker in lowered
+        for marker in (
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "status 429",
+            "\"status\":429",
+        )
+    ):
+        return "rate-limit", text or "OpenCode 请求受到速率限制"
+    if any(
+        marker in lowered
+        for marker in (
+            "econnrefused",
+            "enotfound",
+            "fetch failed",
+            "network error",
+            "connection reset",
+            "connection refused",
+            "socket hang up",
+        )
+    ):
+        return "network", text or "OpenCode 无法连接模型服务"
+    if return_code != 0:
+        return "process-exit", text or f"OpenCode 退出码 {return_code}"
+    return "protocol", text or "OpenCode JSONL 未返回最终文本"
+
+
+def run_backend_probe(
+    backend_id: str,
+    backend_executable: str,
+    project_root: Path,
+    model: str,
+    reasoning_effort: str,
+    service_tier: str,
+    config_source: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Execute a no-tools handshake through the same managed runtime as tasks."""
+
+    started_at = time.monotonic()
+    selected_model = model.strip()
+    result: dict[str, Any] = {
+        "schema_version": BACKEND_PROTOCOL_VERSION,
+        "ok": False,
+        "backend": backend_id,
+        "model": selected_model or "CLI default",
+        "protocol": "jsonl",
+        "response_time_ms": 0,
+    }
+    if backend_id != "opencode":
+        result.update(
+            {
+                "type": "unsupported",
+                "message": (
+                    "Dedicated runner probing is currently implemented for "
+                    "OpenCode only"
+                ),
+            }
+        )
+        return result
+    backend = get_backend(backend_id)
+    try:
+        executable = resolve_executable(backend_executable, backend.label)
+    except FileNotFoundError as error:
+        result.update({"type": "configuration", "message": str(error)})
+        return result
+
+    request = BackendCommandRequest(
+        action="annotation-explain",
+        agent="connection-probe",
+        project_root=project_root,
+        sandbox="read-only",
+        writes=False,
+        model=selected_model,
+        reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
+        backend_options={"config_source": config_source},
+    )
+    try:
+        command = backend.build_command(executable, request)
+        completed = run_captured_process(
+            command,
+            project_root,
+            "仅回复：OPENCODE_BACKEND_OK",
+            timeout_seconds,
+            build_command_environment(command),
+        )
+    except OSError as error:
+        result.update(
+            {
+                "type": "process-start",
+                "message": f"无法启动 OpenCode：{error}",
+            }
+        )
+        result["response_time_ms"] = round(
+            (time.monotonic() - started_at) * 1000
+        )
+        return result
+
+    final_messages: list[str] = []
+    protocol_errors: list[str] = []
+    backend_errors: list[str] = []
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            protocol_errors.append(line[:300])
+            continue
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("type") or "").lower() == "error":
+            error_value = event.get("error") or event.get("message") or event
+            backend_errors.append(
+                json.dumps(error_value, ensure_ascii=False)[:1000]
+                if not isinstance(error_value, str)
+                else error_value[:1000]
+            )
+        parsed = backend.parse_event(event)
+        final_messages.extend(parsed.final_messages)
+
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    result["response_time_ms"] = elapsed_ms
+    if completed.returncode == 0 and final_messages:
+        result.update(
+            {
+                "ok": True,
+                "type": "success",
+                "message": "OpenCode runner 连接成功",
+                "response_preview": final_messages[-1][:160],
+                "exit_code": 0,
+            }
+        )
+        return result
+
+    diagnostic_parts = [
+        completed.stderr.strip(),
+        "\n".join(backend_errors).strip(),
+    ]
+    if completed.returncode == 0 and protocol_errors:
+        diagnostic_parts.append(
+            "JSONL parse error: " + " | ".join(protocol_errors[:3])
+        )
+    diagnostic = "\n".join(part for part in diagnostic_parts if part).strip()
+    error_type, message = classify_backend_probe_error(
+        completed.returncode,
+        diagnostic,
+    )
+    result.update(
+        {
+            "type": error_type,
+            "message": message[:2000],
+            "exit_code": completed.returncode,
+        }
+    )
+    return result
+
+
 def run_process(
     command: list[str],
     project_root: Path,
@@ -1589,13 +1960,23 @@ def run_audited_stage_write(
     )
     print("Capturing pre-run workspace snapshot.", file=sys.stderr)
     audit.capture()
-    result = run_process(
-        command,
-        project_root,
-        timeout_seconds,
-        prompt,
-        stop_file,
-    )
+    if backend.backend_id == "opencode":
+        result = run_structured_backend_process(
+            command,
+            project_root,
+            timeout_seconds,
+            prompt,
+            stop_file,
+            backend,
+        )
+    else:
+        result = run_process(
+            command,
+            project_root,
+            timeout_seconds,
+            prompt,
+            stop_file,
+        )
     audit.inspect()
     violations = audit.violations()
     if result != 0 or violations:
@@ -1869,6 +2250,24 @@ def main() -> int:
         return 0
 
     project_root = validate_project_root(args.project_root)
+    if args.probe_backend:
+        print(
+            json.dumps(
+                run_backend_probe(
+                    args.probe_backend,
+                    args.backend_executable,
+                    project_root,
+                    args.backend_model,
+                    args.reasoning_effort,
+                    args.service_tier,
+                    args.backend_config_source,
+                    args.timeout_seconds,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     stop_file = args.stop_file.expanduser().resolve() if args.stop_file else None
     if stop_file and stop_file.exists():
         stop_file.unlink()
@@ -2085,7 +2484,7 @@ def main() -> int:
             backend,
         )
     elif (
-        backend.backend_id == "claude-code"
+        backend.backend_id in {"claude-code", "opencode"}
         and spec.get("writes")
     ):
         result = run_audited_stage_write(
@@ -2101,13 +2500,23 @@ def main() -> int:
             python_value=args.python,
         )
     else:
-        result = run_process(
-            command,
-            project_root,
-            args.timeout_seconds,
-            prompt,
-            stop_file,
-        )
+        if backend.backend_id == "opencode":
+            result = run_structured_backend_process(
+                command,
+                project_root,
+                args.timeout_seconds,
+                prompt,
+                stop_file,
+                backend,
+            )
+        else:
+            result = run_process(
+                command,
+                project_root,
+                args.timeout_seconds,
+                prompt,
+                stop_file,
+            )
     if result != 0 or not spec.get("post_validate"):
         return result
 

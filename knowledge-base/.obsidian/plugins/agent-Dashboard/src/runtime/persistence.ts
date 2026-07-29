@@ -58,7 +58,7 @@ function normalizeExecutionConfig(value: unknown): ExecutionConfig | null {
 		: isCliBackendId(source.backend)
 			? source.backend
 			: "codex-cli";
-	if (!model && backend !== "claude-code") return null;
+	if (!model && backend !== "claude-code" && backend !== "opencode") return null;
 	const serviceTier = source.serviceTier === "fast"
 		? "fast"
 		: source.serviceTier === "default"

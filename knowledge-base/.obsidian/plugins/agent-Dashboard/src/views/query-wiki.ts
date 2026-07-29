@@ -45,6 +45,8 @@ import {
 	getClaudeDefaultModelLabel,
 	getCodexConfigSourceLabel,
 	getCodexDefaultModelLabel,
+	getOpenCodeConfigSourceLabel,
+	getOpenCodeDefaultModelLabel,
 } from "../runtime/settings";
 import type {
 	CliModelDiscoveryResult,
@@ -197,6 +199,11 @@ export class QueryWikiView extends ItemView {
 				serviceTier: "default",
 			},
 			"claude-code": {
+				model: "",
+				reasoningEffort: "",
+				serviceTier: "default",
+			},
+			"opencode": {
 				model: "",
 				reasoningEffort: "",
 				serviceTier: "default",
@@ -510,6 +517,8 @@ export class QueryWikiView extends ItemView {
 				cls: `query-wiki-message-backend ${
 					message.queryBackendId === "claude-code"
 						? "is-claude"
+						: message.queryBackendId === "opencode"
+							? "is-opencode"
 						: message.queryBackendId === "codex-cli"
 							? "is-codex"
 							: "is-direct"
@@ -1020,19 +1029,32 @@ export class QueryWikiView extends ItemView {
 			: directProfiles.find((profile) => profile.id === backendId) || null;
 		const codexOverrides = this.executionOverridesByBackend["codex-cli"];
 		const claudeOverrides = this.executionOverridesByBackend["claude-code"];
+		const openCodeOverrides = this.executionOverridesByBackend["opencode"];
 		let codexDiscovery = this.plugin.getCliModelDiscovery("codex-cli");
 		let claudeDiscovery = this.plugin.getCliModelDiscovery("claude-code");
+		let openCodeDiscovery = this.plugin.getCliModelDiscovery("opencode");
 		const effective = this.plugin.resolveActionExecutionConfig(action, codexOverrides);
 		const claudeEffective = this.plugin.resolveCliActionExecutionConfig(
 			action,
 			"claude-code",
 			claudeOverrides,
 		);
+		const openCodeEffective = this.plugin.resolveCliActionExecutionConfig(
+			action,
+			"opencode",
+			openCodeOverrides,
+		);
 		const claudeSourceLabel = getClaudeConfigSourceLabel(
 			this.plugin.settings.claudeConfigSource,
 		);
 		const claudeDefaultModelLabel = getClaudeDefaultModelLabel(
 			this.plugin.settings.claudeConfigSource,
+		);
+		const openCodeSourceLabel = getOpenCodeConfigSourceLabel(
+			this.plugin.settings.openCodeConfigSource,
+		);
+		const openCodeDefaultModelLabel = getOpenCodeDefaultModelLabel(
+			this.plugin.settings.openCodeConfigSource,
 		);
 		const codexSourceLabel = getCodexConfigSourceLabel(
 			this.plugin.settings.codexConfigSource,
@@ -1056,6 +1078,8 @@ export class QueryWikiView extends ItemView {
 				? `Direct API · ${directProfile.name} · ${directProfile.model}`
 				: backendId === "claude-code"
 					? `Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
+				: backendId === "opencode"
+					? `OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}`
 				: `Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${
 					effective.serviceTier === "fast"
 						? "快速"
@@ -1075,6 +1099,11 @@ export class QueryWikiView extends ItemView {
 			attr: { value: "claude-code" },
 		});
 		claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
+		const openCodeOption = backend.createEl("option", {
+			text: "OpenCode · 只读",
+			attr: { value: "opencode" },
+		});
+		openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
 		directProfiles.forEach((profile) => {
 			backend.createEl("option", {
 				text: `Direct API · ${profile.name} · ${profile.model}${profileSupportsDirectWebSearch(profile) ? " · 可联网" : ""}`,
@@ -1111,6 +1140,19 @@ export class QueryWikiView extends ItemView {
 			});
 		});
 		claudeReasoning.value = claudeOverrides.reasoningEffort;
+		const openCodeModel = this.createSelectField(grid, "模型");
+		const openCodeReasoning = this.createSelectField(grid, "推理强度");
+		openCodeReasoning.createEl("option", {
+			text: "使用 OpenCode 默认",
+			attr: { value: "" },
+		});
+		REASONING_OPTIONS.forEach((option) => {
+			openCodeReasoning.createEl("option", {
+				text: option.label,
+				attr: { value: option.id },
+			});
+		});
+		openCodeReasoning.value = openCodeOverrides.reasoningEffort;
 		const modelStatus = details.createDiv({ cls: "query-wiki-cli-model-status" });
 		const backendNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
 		const populateModelSelect = (
@@ -1175,19 +1217,39 @@ export class QueryWikiView extends ItemView {
 				claudeOverrides.model,
 			);
 		};
+		const renderOpenCodeModels = (): void => {
+			const detectedModel = openCodeDiscovery?.effectiveModel
+				|| openCodeEffective.model
+				|| openCodeDefaultModelLabel;
+			populateModelSelect(
+				openCodeModel,
+				`使用后端默认 · ${detectedModel}`,
+				openCodeDiscovery,
+				openCodeOverrides.model,
+			);
+		};
 		renderCodexModels();
 		renderClaudeModels();
+		renderOpenCodeModels();
 		const sync = () => {
 			const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
 			const usingDirect = Boolean(selectedProfile);
 			const usingClaude = backend.value === "claude-code";
-			if (model.parentElement) model.parentElement.hidden = usingDirect || usingClaude;
-			if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingClaude;
-			if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingClaude;
+			const usingOpenCode = backend.value === "opencode";
+			const usingAlternateCli = usingClaude || usingOpenCode;
+			if (model.parentElement) model.parentElement.hidden = usingDirect || usingAlternateCli;
+			if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingAlternateCli;
+			if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingAlternateCli;
 			if (claudeModel.parentElement) claudeModel.parentElement.hidden = !usingClaude;
 			if (claudeReasoning.parentElement) claudeReasoning.parentElement.hidden = !usingClaude;
+			if (openCodeModel.parentElement) openCodeModel.parentElement.hidden = !usingOpenCode;
+			if (openCodeReasoning.parentElement) openCodeReasoning.parentElement.hidden = !usingOpenCode;
 			modelStatus.hidden = usingDirect;
-			const activeDiscovery = usingClaude ? claudeDiscovery : codexDiscovery;
+			const activeDiscovery = usingClaude
+				? claudeDiscovery
+				: usingOpenCode
+					? openCodeDiscovery
+					: codexDiscovery;
 			modelStatus.setText(
 				activeDiscovery
 					? `模型来源：${activeDiscovery.source} · 可识别 ${activeDiscovery.models.length} 个模型${
@@ -1195,7 +1257,7 @@ export class QueryWikiView extends ItemView {
 					}${activeDiscovery.message ? `。${activeDiscovery.message}` : ""}`
 					: "正在识别当前后端的可用模型…",
 			);
-			backendNotice.toggleClass("is-visible", usingDirect || usingClaude);
+			backendNotice.toggleClass("is-visible", usingDirect || usingAlternateCli);
 			backendNotice.setText(
 				selectedProfile
 					? [
@@ -1210,6 +1272,8 @@ export class QueryWikiView extends ItemView {
 					].join("")
 					: usingClaude
 						? `Claude Code 使用 ${claudeSourceLabel} 和 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于当前模型及账号能力。`
+						: usingOpenCode
+							? `OpenCode 使用${openCodeSourceLabel}。知识库模式仅开放 read、glob、grep 和 list；联网搜索模式额外开放 websearch/webfetch。Shell、编辑和外部目录访问均禁用；首版不向 OpenCode 发送图片附件。`
 						: `Codex CLI 使用${codexSourceLabel}。知识库模式使用只读沙箱；联网搜索模式启用 Codex 原生 Web Search。`,
 			);
 			if (selectedProfile) {
@@ -1227,6 +1291,20 @@ export class QueryWikiView extends ItemView {
 				);
 				summaryText.setText(
 					`Claude Code · ${next.model || claudeDiscovery?.effectiveModel || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
+				);
+				return;
+			}
+			if (usingOpenCode) {
+				openCodeOverrides.model = openCodeModel.value;
+				openCodeOverrides.reasoningEffort = openCodeReasoning.value;
+				openCodeOverrides.serviceTier = "default";
+				const next = this.plugin.resolveCliActionExecutionConfig(
+					action,
+					"opencode",
+					openCodeOverrides,
+				);
+				summaryText.setText(
+					`OpenCode · ${next.model || openCodeDiscovery?.effectiveModel || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
 				);
 				return;
 			}
@@ -1282,6 +1360,8 @@ export class QueryWikiView extends ItemView {
 		speed.addEventListener("change", sync);
 		claudeModel.addEventListener("change", sync);
 		claudeReasoning.addEventListener("change", sync);
+		openCodeModel.addEventListener("change", sync);
+		openCodeReasoning.addEventListener("change", sync);
 		sync();
 		if (isCliBackendId(backendId)) {
 			void this.plugin.discoverCliModels(backendId)
@@ -1290,6 +1370,9 @@ export class QueryWikiView extends ItemView {
 					if (backendId === "claude-code") {
 						claudeDiscovery = discovery;
 						renderClaudeModels();
+					} else if (backendId === "opencode") {
+						openCodeDiscovery = discovery;
+						renderOpenCodeModels();
 					} else {
 						codexDiscovery = discovery;
 						renderCodexModels();
@@ -1377,6 +1460,7 @@ export class QueryWikiView extends ItemView {
 			&& (
 				backendId === "codex-cli"
 				|| backendId === "claude-code"
+				|| backendId === "opencode"
 				|| profileSupportsDirectWebSearch(directProfile)
 			)
 			? "web"
@@ -1418,6 +1502,14 @@ export class QueryWikiView extends ItemView {
 						).model
 						|| this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel
 						|| getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
+					: backendId === "opencode"
+						? this.plugin.resolveCliActionExecutionConfig(
+							action,
+							"opencode",
+							this.executionOverridesByBackend["opencode"],
+						).model
+							|| this.plugin.getCliModelDiscovery("opencode")?.effectiveModel
+							|| getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)
 					: ""
 			),
 		};
@@ -1431,6 +1523,12 @@ export class QueryWikiView extends ItemView {
 					action,
 					"claude-code",
 					this.executionOverridesByBackend["claude-code"],
+				)
+			: backendId === "opencode"
+				? this.plugin.resolveCliActionExecutionConfig(
+					action,
+					"opencode",
+					this.executionOverridesByBackend["opencode"],
 				)
 			: {
 				backend: "codex-cli" as const,
@@ -1693,7 +1791,9 @@ export class QueryWikiView extends ItemView {
 		}
 		const backendId = overrides.backend === "claude-code"
 			? "claude-code"
-			: "codex-cli";
+			: overrides.backend === "opencode"
+				? "opencode"
+				: "codex-cli";
 		const executionConfig = this.plugin.resolveCliActionExecutionConfig(
 			action,
 			backendId,

@@ -177,6 +177,23 @@ var DEFAULT_CLAUDE_EXECUTABLE = path.join(
   "bin",
   "claude.exe"
 );
+var DEFAULT_OPENCODE_EXECUTABLE = path.join(
+  process.env.USERPROFILE || "",
+  ".opencode",
+  "bin",
+  "opencode.exe"
+);
+function findPreferredOpenCodeExecutable() {
+  const candidates = [
+    String(process.env.OPENCODE_PATH || "").trim(),
+    DEFAULT_OPENCODE_EXECUTABLE,
+    path.join(process.env.USERPROFILE || "", ".local", "bin", "opencode.exe"),
+    path.join(process.env.USERPROFILE || "", "scoop", "shims", "opencode.exe"),
+    path.join(process.env.APPDATA || "", "npm", "opencode.cmd"),
+    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "opencode.exe")
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || DEFAULT_OPENCODE_EXECUTABLE;
+}
 function findPreferredClaudeExecutable() {
   const candidates = [
     String(process.env.CLAUDE_CODE_PATH || "").trim(),
@@ -212,6 +229,12 @@ function getCodexConfigSourceLabel(source) {
 }
 function getCodexDefaultModelLabel(source) {
   return source === "cc-switch" ? "CC Switch 当前模型" : "Codex 官方默认模型";
+}
+function getOpenCodeConfigSourceLabel(source) {
+  return source === "cc-switch" ? "CC Switch" : "官方 OpenCode Zen";
+}
+function getOpenCodeDefaultModelLabel(source) {
+  return source === "cc-switch" ? "CC Switch 当前模型" : "OpenCode Zen 默认模型";
 }
 function findPreferredCodexExecutable() {
   const candidates = /* @__PURE__ */ new Set();
@@ -254,12 +277,18 @@ var DEFAULT_SETTINGS = {
   claudeConfigSource: "official",
   claudeModel: "",
   claudeReasoningEffort: "medium",
+  openCodeExecutable: findPreferredOpenCodeExecutable(),
+  openCodeConfigSource: "official",
+  openCodeModel: "opencode/mimo-v2.5-free",
+  openCodeReasoningEffort: "medium",
   annotationBackendId: "auto",
   annotationCodexModel: "",
   annotationCodexReasoningEffort: "medium",
   annotationCodexServiceTier: "default",
   annotationClaudeModel: "",
   annotationClaudeReasoningEffort: "medium",
+  annotationOpenCodeModel: "",
+  annotationOpenCodeReasoningEffort: "medium",
   annotationMaxTokens: 900,
   pythonExecutable: "D:\\python\\python.exe",
   rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
@@ -293,10 +322,12 @@ var VIEW_TYPE = "agent-dashboard-research-vault";
 var CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 var QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
 function isCliBackendId(value) {
-  return value === "codex-cli" || value === "claude-code";
+  return value === "codex-cli" || value === "claude-code" || value === "opencode";
 }
 function getCliBackendLabel(value) {
-  return value === "claude-code" ? "Claude Code" : "Codex CLI";
+  if (value === "claude-code") return "Claude Code";
+  if (value === "opencode") return "OpenCode";
+  return "Codex CLI";
 }
 var MAX_VAULT_IMAGE_BYTES = 7 * 1024 * 1024;
 var MAX_QUERY_IMAGE_ATTACHMENTS = 6;
@@ -311,6 +342,44 @@ var MODEL_OPTIONS = [
   { id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
   { id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
   { id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "快速代码模型", supportsFast: false }
+];
+var OPENCODE_ZEN_FREE_MODELS = [
+  {
+    id: "opencode/mimo-v2.5-free",
+    label: "MiMo-V2.5 Free",
+    description: "OpenCode Zen 免费模型",
+    supportsFast: false
+  },
+  {
+    id: "opencode/north-mini-code-free",
+    label: "North Mini Code Free",
+    description: "OpenCode Zen 免费代码模型",
+    supportsFast: false
+  },
+  {
+    id: "opencode/nemotron-3-ultra-free",
+    label: "Nemotron 3 Ultra Free",
+    description: "OpenCode Zen 免费模型",
+    supportsFast: false
+  },
+  {
+    id: "opencode/deepseek-v4-flash-free",
+    label: "DeepSeek V4 Flash Free",
+    description: "OpenCode Zen 免费模型",
+    supportsFast: false
+  },
+  {
+    id: "opencode/laguna-s-2.1-free",
+    label: "Laguna S 2.1 Free",
+    description: "OpenCode Zen 免费模型",
+    supportsFast: false
+  },
+  {
+    id: "opencode/ling-3.0-flash-free",
+    label: "Ling 3.0 Flash Free",
+    description: "OpenCode Zen 免费模型",
+    supportsFast: false
+  }
 ];
 var REASONING_OPTIONS = [
   { id: "low", label: "低" },
@@ -524,7 +593,7 @@ function normalizeExecutionConfig(value) {
   const source = asRecord2(value);
   const model = String(source.model || "").trim();
   const backend = source.backend === "direct-api" ? "direct-api" : isCliBackendId(source.backend) ? source.backend : "codex-cli";
-  if (!model && backend !== "claude-code") return null;
+  if (!model && backend !== "claude-code" && backend !== "opencode") return null;
   const serviceTier = source.serviceTier === "fast" ? "fast" : source.serviceTier === "default" ? "default" : null;
   return {
     backend,
@@ -758,7 +827,13 @@ var ProcessExecutionService = class {
     this.state = state;
   }
   discoverCliModels(settings, backendId) {
-    return backendId === "claude-code" ? Promise.resolve(this.discoverClaudeModels(settings)) : this.discoverCodexModels(settings);
+    if (backendId === "claude-code") {
+      return Promise.resolve(this.discoverClaudeModels(settings));
+    }
+    if (backendId === "opencode") {
+      return this.discoverOpenCodeModels(settings);
+    }
+    return this.discoverCodexModels(settings);
   }
   discoverCodexModels(settings) {
     const executable = String(settings.codexExecutable || "");
@@ -972,6 +1047,108 @@ var ProcessExecutionService = class {
       discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
+  discoverOpenCodeModels(settings) {
+    const executable = String(settings.openCodeExecutable || "");
+    const useOfficialConfig = settings.openCodeConfigSource === "official";
+    let configuredModel = useOfficialConfig ? settings.openCodeModel.trim() : "";
+    if (!useOfficialConfig) {
+      for (const configPath of [
+        path2.join(process.env.USERPROFILE || "", ".config", "opencode", "opencode.json"),
+        path2.join(process.env.USERPROFILE || "", ".opencode", "config.json")
+      ]) {
+        try {
+          const content = fs2.readFileSync(configPath, "utf8");
+          const source = asRecord4(JSON.parse(content));
+          configuredModel = String(source.model || "").trim();
+          if (configuredModel) break;
+        } catch {
+        }
+      }
+    }
+    const fallback = (message = "") => ({
+      backendId: "opencode",
+      models: useOfficialConfig ? OPENCODE_ZEN_FREE_MODELS.map((model) => ({
+        ...model,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+      })) : configuredModel ? [{
+        id: configuredModel,
+        label: `当前模型 · ${configuredModel}`,
+        supportsFast: false,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+      }] : [],
+      effectiveModel: configuredModel,
+      source: useOfficialConfig ? "OpenCode Zen 静态回退" : "CC Switch 当前配置",
+      complete: false,
+      message,
+      discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve(fallback(`OpenCode 可执行文件不存在：${executable || "未配置"}`));
+    }
+    return new Promise((resolve4) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      const args = useOfficialConfig ? ["models", "opencode"] : ["models"];
+      const child = (0, import_node_child_process.spawn)(executable, args, {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true
+      });
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve4(result);
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 2e5);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 8e3);
+      });
+      child.once("error", (error) => finish(fallback(error.message)));
+      child.once("close", (code) => {
+        if (code !== 0) {
+          finish(fallback(stderr.trim() || stdout.trim() || `OpenCode 退出码 ${code}`));
+          return;
+        }
+        const seen = /* @__PURE__ */ new Set();
+        const models = stdout.split(/\r?\n/).map((line) => line.trim().split(/\s+/)[0] || "").filter((id) => {
+          if (!id.includes("/") || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        }).map((id) => ({
+          id,
+          label: id.split("/").slice(1).join("/") || id,
+          description: id.endsWith("-free") ? "免费模型" : void 0,
+          isDefault: id === configuredModel,
+          supportsFast: false,
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+        }));
+        if (!models.length) {
+          finish(fallback("OpenCode 返回了空模型目录"));
+          return;
+        }
+        if (!configuredModel) {
+          configuredModel = useOfficialConfig ? settings.openCodeModel.trim() || models[0].id : models.find((model) => model.isDefault)?.id || "";
+        }
+        finish({
+          backendId: "opencode",
+          models,
+          effectiveModel: configuredModel,
+          source: useOfficialConfig ? "OpenCode models · 官方 Zen" : "OpenCode models · CC Switch",
+          complete: true,
+          discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish(fallback("OpenCode 模型目录检测超过 20 秒"));
+      }, 2e4);
+    });
+  }
   recoverInterruptedPracticeRuns(settings) {
     const runsDirectory = path2.join(
       settings.projectRoot,
@@ -1103,6 +1280,9 @@ Execution interrupted before the plugin restarted.`.trim();
     );
     fs2.mkdirSync(path2.dirname(stopPath), { recursive: true });
     if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
+    const backendId = executionConfig.backend === "claude-code" ? "claude-code" : executionConfig.backend === "opencode" ? "opencode" : "codex-cli";
+    const backendExecutable = backendId === "claude-code" ? settings.claudeExecutable : backendId === "opencode" ? settings.openCodeExecutable : settings.codexExecutable;
+    const backendConfigSource = backendId === "claude-code" ? settings.claudeConfigSource : backendId === "opencode" ? settings.openCodeConfigSource : settings.codexConfigSource;
     const args = [
       runner,
       "--action",
@@ -1110,9 +1290,9 @@ Execution interrupted before the plugin restarted.`.trim();
       "--project-root",
       projectRoot,
       "--backend",
-      executionConfig.backend === "claude-code" ? "claude-code" : "codex-cli",
+      backendId,
       "--backend-executable",
-      executionConfig.backend === "claude-code" ? settings.claudeExecutable : settings.codexExecutable,
+      backendExecutable,
       "--reasoning-effort",
       executionConfig.reasoningEffort || "default",
       "--service-tier",
@@ -1128,9 +1308,9 @@ Execution interrupted before the plugin restarted.`.trim();
     ];
     args.push(
       "--backend-config-source",
-      executionConfig.backend === "claude-code" ? settings.claudeConfigSource : settings.codexConfigSource
+      backendConfigSource
     );
-    if (executionConfig.backend === "claude-code") {
+    if (backendId !== "codex-cli") {
       if (executionConfig.model) {
         args.push("--backend-model", executionConfig.model);
       }
@@ -1471,6 +1651,176 @@ Execution interrupted before the plugin restarted.`.trim();
       }, 45e3);
     });
   }
+  probeOpenCode(settings) {
+    const startedAt = Date.now();
+    const executable = String(settings.openCodeExecutable || "");
+    const pythonExecutable = String(settings.pythonExecutable || "").trim();
+    const runner = path2.join(
+      settings.projectRoot,
+      "tool-library",
+      "scripts",
+      "run_vault_action.py"
+    );
+    const configuredModel = settings.openCodeModel.trim();
+    const displayModel = configuredModel || (settings.openCodeConfigSource === "cc-switch" ? "CC Switch 当前模型" : "OpenCode Zen 默认模型");
+    if (!pythonExecutable) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        provider: "opencode",
+        model: displayModel,
+        message: "未配置 Python 可执行文件",
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    if (!fs2.existsSync(pythonExecutable)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        provider: "opencode",
+        model: displayModel,
+        message: `Python 可执行文件不存在：${pythonExecutable}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    if (!fs2.existsSync(runner)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        provider: "opencode",
+        model: displayModel,
+        message: `统一 runner 不存在：${runner}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        provider: "opencode",
+        model: displayModel,
+        message: `OpenCode 可执行文件不存在：${executable || "未配置"}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    const runnerTimeoutSeconds = Math.max(
+      60,
+      Math.min(180, Number(settings.providerTimeoutSeconds || 20) * 3)
+    );
+    return new Promise((resolve4) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      const args = [
+        runner,
+        "--probe-backend",
+        "opencode",
+        "--project-root",
+        settings.projectRoot,
+        "--backend-executable",
+        executable,
+        "--backend-config-source",
+        settings.openCodeConfigSource,
+        "--reasoning-effort",
+        settings.openCodeReasoningEffort,
+        "--service-tier",
+        "default",
+        "--timeout-seconds",
+        String(runnerTimeoutSeconds)
+      ];
+      if (configuredModel) args.push("--backend-model", configuredModel);
+      const child = (0, import_node_child_process.spawn)(pythonExecutable, args, {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        }
+      });
+      const finish = (result, model = displayModel, responseTimeMs = Date.now() - startedAt) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve4({
+          model,
+          responseTimeMs,
+          testedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          ...result
+        });
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 3e4);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 1e4);
+      });
+      child.once("error", (error) => {
+        finish({
+          ok: false,
+          type: "local-service-offline",
+          provider: "opencode",
+          message: error.message
+        });
+      });
+      child.once("close", (code) => {
+        let payload = {};
+        try {
+          payload = asRecord4(JSON.parse(stdout.trim()));
+        } catch {
+        }
+        const payloadModel = String(payload.model || "").trim() || displayModel;
+        const payloadResponseTime = Number(payload.response_time_ms);
+        const responseTimeMs = Number.isFinite(payloadResponseTime) ? payloadResponseTime : Date.now() - startedAt;
+        if (code === 0 && payload.ok === true) {
+          finish({
+            ok: true,
+            type: "success",
+            provider: "opencode",
+            endpoint: settings.openCodeConfigSource === "cc-switch" ? "OpenCode · CC Switch" : "OpenCode · 官方 Zen",
+            modelExists: null,
+            streaming: { supported: true, verified: true },
+            pdf: { supported: false, verified: false },
+            vision: {
+              supported: false,
+              verified: false,
+              note: "首版未向 OpenCode runner 开放 Vault 图片附件"
+            },
+            webSearch: {
+              supported: true,
+              verified: false,
+              note: "仅在查询侧边栏的“联网搜索”模式开放 websearch/webfetch"
+            },
+            responsePreview: String(payload.response_preview || "").trim()
+          }, payloadModel, responseTimeMs);
+          return;
+        }
+        finish({
+          ok: false,
+          type: String(payload.type || (code === 0 ? "protocol" : "runner-failure")),
+          provider: "opencode",
+          message: String(
+            payload.message || stderr.trim() || stdout.trim() || `统一 runner 退出码 ${code}`
+          )
+        }, payloadModel, responseTimeMs);
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish({
+          ok: false,
+          type: "runner-failure",
+          provider: "opencode",
+          message: `统一 runner 未在 ${runnerTimeoutSeconds + 15} 秒内退出`
+        });
+      }, (runnerTimeoutSeconds + 15) * 1e3);
+    });
+  }
   stopVaultAction(runId) {
     const child = this.state.activeProcesses.get(runId);
     if (!child || child.killed) return false;
@@ -1531,6 +1881,9 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       case "claude":
         this.renderClaudeSettings(containerEl);
         break;
+      case "opencode":
+        this.renderOpenCodeSettings(containerEl);
+        break;
       case "annotations":
         this.renderAnnotationSettings(containerEl);
         break;
@@ -1581,11 +1934,24 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       description: "选择官方配置或 CC Switch，并管理模型覆盖和连接测试。",
       status: `${claudeSourceLabel} · ${this.plugin.settings.claudeModel || "默认模型"} · ${claudeReasoningLabel}`
     });
+    const openCodeReasoningLabel = REASONING_OPTIONS.find(
+      (option) => option.id === this.plugin.settings.openCodeReasoningEffort
+    )?.label || this.plugin.settings.openCodeReasoningEffort;
+    const openCodeSourceLabel = getOpenCodeConfigSourceLabel(
+      this.plugin.settings.openCodeConfigSource
+    );
+    this.createSettingsNavigationItem(navigation, {
+      page: "opencode",
+      icon: "braces",
+      title: "OpenCode",
+      description: "选择官方 OpenCode Zen 或 CC Switch，并自动识别当前可用模型。",
+      status: `${openCodeSourceLabel} · ${this.plugin.settings.openCodeModel || "默认模型"} · ${openCodeReasoningLabel}`
+    });
     const annotationBackendId = this.plugin.settings.annotationBackendId || "auto";
     const annotationProfile = this.plugin.settings.providerProfiles.find(
       (profile) => profile.id === annotationBackendId
     );
-    const annotationStatus = annotationBackendId === "auto" ? "自动选择" : annotationBackendId === "codex-cli" ? `Codex · ${this.plugin.settings.annotationCodexModel || "默认模型"}` : annotationBackendId === "claude-code" ? `Claude · ${this.plugin.settings.annotationClaudeModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : annotationProfile ? `${annotationProfile.name} · ${annotationProfile.model}` : "自动选择";
+    const annotationStatus = annotationBackendId === "auto" ? "自动选择" : annotationBackendId === "codex-cli" ? `Codex · ${this.plugin.settings.annotationCodexModel || "默认模型"}` : annotationBackendId === "claude-code" ? `Claude · ${this.plugin.settings.annotationClaudeModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : annotationBackendId === "opencode" ? `OpenCode · ${this.plugin.settings.annotationOpenCodeModel || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}` : annotationProfile ? `${annotationProfile.name} · ${annotationProfile.model}` : "自动选择";
     this.createSettingsNavigationItem(navigation, {
       page: "annotations",
       icon: "message-square-text",
@@ -1627,6 +1993,13 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Claude Code 可执行文件").setDesc("用于只读知识库检索与批注解释。原生安装通常位于用户目录的 .local\\bin\\claude.exe。").addText(
       (text) => text.setPlaceholder("C:\\Users\\<user>\\.local\\bin\\claude.exe").setValue(this.plugin.settings.claudeExecutable).onChange(async (value) => {
         this.plugin.settings.claudeExecutable = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("OpenCode 可执行文件").setDesc("用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。").addText(
+      (text) => text.setPlaceholder("C:\\Users\\<user>\\.opencode\\bin\\opencode.exe").setValue(this.plugin.settings.openCodeExecutable).onChange(async (value) => {
+        this.plugin.settings.openCodeExecutable = value.trim();
+        this.plugin.invalidateCliModelDiscovery("opencode");
         await this.plugin.saveSettings();
       })
     );
@@ -1800,6 +2173,98 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       this.renderConnectionResult(containerEl, resultState.result);
     }
   }
+  renderOpenCodeSettings(containerEl) {
+    const configSource = this.plugin.settings.openCodeConfigSource;
+    const sourceLabel = getOpenCodeConfigSourceLabel(configSource);
+    const defaultModelLabel = getOpenCodeDefaultModelLabel(configSource);
+    this.createSettingsPageHeader(
+      containerEl,
+      "OpenCode",
+      "选择官方 OpenCode Zen 或 CC Switch 当前配置。两种来源共用 Dashboard 的只读和阶段所有权写入边界。",
+      true
+    );
+    new import_obsidian.Setting(containerEl).setName("配置来源").setDesc(
+      configSource === "cc-switch" ? "沿用 CC Switch 管理的 OpenCode provider、endpoint、模型和认证配置。" : "显式使用 OpenCode Zen 模型；凭据仍由 OpenCode auth 管理，插件不保存 API Key。"
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("official", "官方 OpenCode Zen").addOption("cc-switch", "CC Switch").setValue(configSource).onChange(async (value) => {
+        this.plugin.settings.openCodeConfigSource = value === "cc-switch" ? "cc-switch" : "official";
+        if (value === "cc-switch") {
+          this.plugin.settings.openCodeModel = "";
+        } else if (!this.plugin.settings.openCodeModel) {
+          this.plugin.settings.openCodeModel = DEFAULT_SETTINGS.openCodeModel;
+        }
+        this.plugin.invalidateCliModelDiscovery("opencode");
+        this.plugin.providerRuntimeState.delete("opencode");
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    this.createProviderSectionHeader(
+      containerEl,
+      `${sourceLabel} 配置`,
+      configSource === "cc-switch" ? "空模型值跟随 CC Switch 当前选择；也可为 Dashboard 任务设置临时模型覆盖。" : "官方模式默认使用 OpenCode Zen 免费模型。免费可用性和限额以 OpenCode 当前账号与模型目录为准。"
+    );
+    const discovery = this.plugin.getCliModelDiscovery("opencode");
+    const models = discovery?.models || [];
+    new import_obsidian.Setting(containerEl).setName(configSource === "official" ? "默认模型" : "模型覆盖").setDesc(
+      discovery ? `模型来源：${discovery.source}${discovery.complete ? "" : "（回退列表）"}` : `留空时使用${defaultModelLabel}；点击右侧按钮可读取 OpenCode 模型目录。`
+    ).addDropdown((dropdown) => {
+      dropdown.addOption(
+        "",
+        configSource === "cc-switch" ? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}` : `使用官方默认 · ${discovery?.effectiveModel || DEFAULT_SETTINGS.openCodeModel}`
+      );
+      models.forEach((model) => {
+        dropdown.addOption(
+          model.id,
+          model.description ? `${model.label} · ${model.description}` : model.label
+        );
+      });
+      const selected = this.plugin.settings.openCodeModel;
+      if (selected && !models.some((model) => model.id === selected)) {
+        dropdown.addOption(selected, `${selected} · 已保存`);
+      }
+      dropdown.setValue(selected).onChange(async (value) => {
+        this.plugin.settings.openCodeModel = value;
+        await this.plugin.saveSettings();
+      });
+    }).addExtraButton(
+      (button) => button.setIcon("refresh-cw").setTooltip("重新识别 OpenCode 模型").onClick(async () => {
+        await this.plugin.discoverCliModels("opencode", true);
+        this.display();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("映射到 OpenCode 的 provider-specific variant；模型不支持时可能由 provider 忽略或报错。").addDropdown((dropdown) => {
+      REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+      dropdown.setValue(this.plugin.settings.openCodeReasoningEffort).onChange(async (value) => {
+        this.plugin.settings.openCodeReasoningEffort = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    this.createProviderSectionHeader(
+      containerEl,
+      "执行边界",
+      "检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和综合分析可写入阶段目录，并由宿主审计、验证和失败回滚。"
+    );
+    const resultState = this.plugin.providerRuntimeState.get("opencode") || null;
+    new import_obsidian.Setting(containerEl).setName(sourceLabel).setDesc(
+      "通过统一 Python runner 执行不含 Vault 内容的最小 JSONL 请求，验证 CLI、认证、模型和输出协议。"
+    ).addButton((button) => {
+      const testing = resultState?.status === "testing";
+      button.setButtonText(testing ? "测试中…" : "测试连接").setDisabled(testing).onClick(async () => {
+        this.plugin.providerRuntimeState.set("opencode", { status: "testing" });
+        this.display();
+        const result = await this.plugin.testProviderConnection("opencode");
+        this.plugin.providerRuntimeState.set("opencode", { status: "done", result });
+        this.display();
+      });
+    });
+    if (resultState?.result) this.renderConnectionResult(containerEl, resultState.result);
+    if (!discovery) {
+      void this.plugin.discoverCliModels("opencode").then(() => {
+        if (this.activePage === "opencode") this.display();
+      }).catch(() => void 0);
+    }
+  }
   renderAnnotationSettings(containerEl) {
     this.createSettingsPageHeader(
       containerEl,
@@ -1812,7 +2277,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     );
     const backendId = this.plugin.settings.annotationBackendId || "auto";
     new import_obsidian.Setting(containerEl).setName("执行后端").setDesc("自动模式使用当前启用且已验证的 Direct API；未配置时使用 Codex CLI。").addDropdown((dropdown) => {
-      dropdown.addOption("auto", "自动选择").addOption("codex-cli", "Codex CLI").addOption("claude-code", "Claude Code");
+      dropdown.addOption("auto", "自动选择").addOption("codex-cli", "Codex CLI").addOption("claude-code", "Claude Code").addOption("opencode", "OpenCode");
       verifiedProfiles.forEach((profile2) => {
         dropdown.addOption(profile2.id, `Direct API · ${profile2.name}`);
       });
@@ -1833,7 +2298,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       this.renderAnnotationTokenSetting(containerEl, Boolean(activeProfile));
       return;
     }
-    if (backendId === "codex-cli" || backendId === "claude-code") {
+    if (backendId === "codex-cli" || backendId === "claude-code" || backendId === "opencode") {
       this.renderAnnotationCliSettings(containerEl, backendId);
       return;
     }
@@ -1858,16 +2323,17 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
   }
   renderAnnotationCliSettings(containerEl, backendId, isFallback = false) {
     const isClaude = backendId === "claude-code";
+    const isOpenCode = backendId === "opencode";
     const usesCodexSwitch = backendId === "codex-cli" && this.plugin.settings.codexConfigSource === "cc-switch";
     const title = isFallback ? "Codex 回退参数" : `${getCliBackendLabel(backendId)} 参数`;
     this.createProviderSectionHeader(
       containerEl,
       title,
-      isClaude ? `模型留空时使用${getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}；Claude Code 批注不开放任何工具。` : usesCodexSwitch ? "模型留空时沿用 CC Switch 当前 Codex 配置；快速模式仅在显式模型支持时生效。" : "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。"
+      isClaude ? `模型留空时使用${getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}；Claude Code 批注不开放任何工具。` : isOpenCode ? `模型留空时使用${getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}；OpenCode 批注使用 no-tools 权限配置。` : usesCodexSwitch ? "模型留空时沿用 CC Switch 当前 Codex 配置；快速模式仅在显式模型支持时生效。" : "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。"
     );
     const discovery = this.plugin.getCliModelDiscovery(backendId);
-    const selectedModel = isClaude ? this.plugin.settings.annotationClaudeModel : this.plugin.settings.annotationCodexModel;
-    const models = discovery?.models || (isClaude ? [] : MODEL_OPTIONS.map((option) => ({
+    const selectedModel = isClaude ? this.plugin.settings.annotationClaudeModel : isOpenCode ? this.plugin.settings.annotationOpenCodeModel : this.plugin.settings.annotationCodexModel;
+    const models = discovery?.models || (isClaude || isOpenCode ? [] : MODEL_OPTIONS.map((option) => ({
       id: option.id,
       label: option.label,
       description: option.description,
@@ -1878,7 +2344,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addDropdown((dropdown) => {
       dropdown.addOption(
         "",
-        isClaude ? `使用后端默认 · ${discovery?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : usesCodexSwitch ? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}` : "使用批注默认模型"
+        isClaude ? `使用后端默认 · ${discovery?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : isOpenCode ? `使用后端默认 · ${discovery?.effectiveModel || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}` : usesCodexSwitch ? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}` : "使用批注默认模型"
       );
       models.forEach((model) => {
         dropdown.addOption(
@@ -1892,6 +2358,8 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       dropdown.setValue(selectedModel).onChange(async (value) => {
         if (isClaude) {
           this.plugin.settings.annotationClaudeModel = value;
+        } else if (isOpenCode) {
+          this.plugin.settings.annotationOpenCodeModel = value;
         } else {
           this.plugin.settings.annotationCodexModel = value;
           if (this.plugin.settings.annotationCodexServiceTier === "fast" && !this.plugin.supportsFast(value || this.plugin.settings.codexModel)) {
@@ -1907,19 +2375,21 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         this.display();
       })
     );
-    const reasoningValue = isClaude ? this.plugin.settings.annotationClaudeReasoningEffort : this.plugin.settings.annotationCodexReasoningEffort;
+    const reasoningValue = isClaude ? this.plugin.settings.annotationClaudeReasoningEffort : isOpenCode ? this.plugin.settings.annotationOpenCodeReasoningEffort : this.plugin.settings.annotationCodexReasoningEffort;
     new import_obsidian.Setting(containerEl).setName("推理强度").setDesc("仅影响批注解释，不改变查询、深读或综合分析任务。").addDropdown((dropdown) => {
       REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
       dropdown.setValue(reasoningValue).onChange(async (value) => {
         if (isClaude) {
           this.plugin.settings.annotationClaudeReasoningEffort = value;
+        } else if (isOpenCode) {
+          this.plugin.settings.annotationOpenCodeReasoningEffort = value;
         } else {
           this.plugin.settings.annotationCodexReasoningEffort = value;
         }
         await this.plugin.saveSettings();
       });
     });
-    if (!isClaude) {
+    if (!isClaude && !isOpenCode) {
       const effectiveModel = selectedModel || this.plugin.settings.codexModel;
       const fastSupported = this.plugin.supportsFast(effectiveModel);
       new import_obsidian.Setting(containerEl).setName("速度").setDesc(
@@ -3030,7 +3500,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     window.setTimeout(() => (input || submit).focus(), 0);
   }
   renderExecutionControls(parent) {
-    const supportsClaudeStageWrite = ["code-analysis", "synthesis"].includes(
+    const supportsStageWriteBackends = ["code-analysis", "synthesis"].includes(
       this.action.id
     );
     let backendId = "codex-cli";
@@ -3049,7 +3519,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     heading.createSpan({ text: "运行配置" });
     const summary = heading.createSpan({ cls: "agent-dashboard-run-config-summary" });
     let backendSelect = null;
-    if (supportsClaudeStageWrite) {
+    if (supportsStageWriteBackends) {
       backendSelect = this.createSelectField(section, "执行后端", "运行执行后端");
       backendSelect.createEl("option", {
         text: "Codex CLI",
@@ -3060,6 +3530,11 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         attr: { value: "claude-code" }
       });
       claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
+      const openCodeOption = backendSelect.createEl("option", {
+        text: this.plugin.isCliBackendAvailable("opencode") ? "OpenCode · 阶段写入" : "OpenCode · 未配置",
+        attr: { value: "opencode" }
+      });
+      openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
     }
     const modelSelect = this.createSelectField(section, "模型", "运行模型");
     const reasoningSelect = this.createSelectField(section, "推理强度", "运行推理强度");
@@ -3110,14 +3585,14 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       modelSelect.empty();
       const actionDefault = resolveEffective();
       modelSelect.createEl("option", {
-        text: backendId === "claude-code" ? `使用 Claude 默认 · ${actionDefault.model || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : `使用 Codex 默认 · ${actionDefault.model ? this.plugin.getModelLabel(actionDefault.model) : getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource)}`,
+        text: backendId === "claude-code" ? `使用 Claude 默认 · ${actionDefault.model || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}` : backendId === "opencode" ? `使用 OpenCode 默认 · ${actionDefault.model || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}` : `使用 Codex 默认 · ${actionDefault.model ? this.plugin.getModelLabel(actionDefault.model) : getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource)}`,
         attr: { value: "" }
       });
-      const options = backendId === "claude-code" ? [
-        ...this.plugin.getCliModelDiscovery("claude-code")?.models || [],
-        ...this.plugin.settings.claudeModel ? [{
-          id: this.plugin.settings.claudeModel,
-          label: this.plugin.settings.claudeModel,
+      const options = backendId !== "codex-cli" ? [
+        ...this.plugin.getCliModelDiscovery(backendId)?.models || [],
+        ...(backendId === "claude-code" ? this.plugin.settings.claudeModel : this.plugin.settings.openCodeModel) ? [{
+          id: backendId === "claude-code" ? this.plugin.settings.claudeModel : this.plugin.settings.openCodeModel,
+          label: backendId === "claude-code" ? this.plugin.settings.claudeModel : this.plugin.settings.openCodeModel,
           supportsFast: false
         }] : []
       ] : this.plugin.settings.codexConfigSource === "cc-switch" ? this.plugin.getCliModelDiscovery("codex-cli")?.models || [] : [
@@ -3145,7 +3620,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     const syncReasoningDefault = () => {
       const actionDefault = resolveEffective();
       reasoningDefaultOption.setText(
-        backendId === "claude-code" ? `使用 Claude 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}` : actionDefault.reasoningEffort ? `使用 Codex 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}` : "使用 CC Switch 当前推理强度"
+        backendId !== "codex-cli" ? `使用 ${getCliBackendLabel(backendId)} 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}` : actionDefault.reasoningEffort ? `使用 Codex 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}` : "使用 CC Switch 当前推理强度"
       );
     };
     const syncSpeedControl = () => {
@@ -3177,16 +3652,16 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     };
     const syncBoundaryNotice = () => {
       boundaryNotice.setText(
-        backendId === "claude-code" ? "Claude Code：仅允许当前阶段目录写入，Bash 已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。" : "Codex CLI：按当前项目沙箱和 skill 阶段边界执行。"
+        backendId === "claude-code" ? "Claude Code：仅允许当前阶段目录写入，Bash 已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。" : backendId === "opencode" ? "OpenCode：仅允许当前阶段写入，Shell 与外部目录访问已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。" : "Codex CLI：按当前项目沙箱和 skill 阶段边界执行。"
       );
     };
     const updateSummary = () => {
       const effective = resolveEffective(getOverrides());
-      const backendLabel = backendId === "claude-code" ? "Claude Code" : "Codex CLI";
-      const modelLabel = effective.model ? this.plugin.getModelLabel(effective.model) : backendId === "claude-code" ? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource) : getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource);
+      const backendLabel = getCliBackendLabel(backendId);
+      const modelLabel = effective.model ? this.plugin.getModelLabel(effective.model) : backendId === "claude-code" ? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource) : backendId === "opencode" ? getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource) : getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource);
       const reasoningLabel = effective.reasoningEffort ? this.plugin.getReasoningLabel(effective.reasoningEffort) : "CLI 默认推理";
       summary.setText(
-        backendId === "claude-code" ? `${backendLabel} · ${modelLabel} · ${reasoningLabel}` : `${backendLabel} · ${modelLabel} · ${reasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
+        backendId !== "codex-cli" ? `${backendLabel} · ${modelLabel} · ${reasoningLabel}` : `${backendLabel} · ${modelLabel} · ${reasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
       );
     };
     modelSelect.addEventListener("change", () => {
@@ -3195,7 +3670,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     });
     reasoningSelect.addEventListener("change", updateSummary);
     backendSelect?.addEventListener("change", () => {
-      backendId = backendSelect?.value === "claude-code" ? "claude-code" : "codex-cli";
+      backendId = backendSelect?.value === "claude-code" ? "claude-code" : backendSelect?.value === "opencode" ? "opencode" : "codex-cli";
       serviceTier = "default";
       modelSelect.value = "";
       reasoningSelect.value = "";
@@ -4422,7 +4897,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
   }
   async executeAction(action, input, executionOverrides = {}) {
     const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
-    const backendId = executionOverrides.backend === "claude-code" ? "claude-code" : "codex-cli";
+    const backendId = executionOverrides.backend === "claude-code" ? "claude-code" : executionOverrides.backend === "opencode" ? "opencode" : "codex-cli";
     const executionConfig = action.ai ? this.plugin.resolveCliActionExecutionConfig(
       action,
       backendId,
@@ -4927,6 +5402,11 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         model: "",
         reasoningEffort: "",
         serviceTier: "default"
+      },
+      "opencode": {
+        model: "",
+        reasoningEffort: "",
+        serviceTier: "default"
       }
     };
   }
@@ -5191,7 +5671,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       const cliBackend = isCliBackendId(message.queryBackendId);
       const backendLabel = cliBackend ? getCliBackendLabel(message.queryBackendId) : message.providerName || "Direct API";
       identity.createSpan({
-        cls: `query-wiki-message-backend ${message.queryBackendId === "claude-code" ? "is-claude" : message.queryBackendId === "codex-cli" ? "is-codex" : "is-direct"}`,
+        cls: `query-wiki-message-backend ${message.queryBackendId === "claude-code" ? "is-claude" : message.queryBackendId === "opencode" ? "is-opencode" : message.queryBackendId === "codex-cli" ? "is-codex" : "is-direct"}`,
         text: backendLabel,
         attr: {
           title: message.model ? `${backendLabel} · ${message.model}` : message.queryBackendId
@@ -5644,19 +6124,32 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const directProfile = isCliBackendId(backendId) ? null : directProfiles.find((profile) => profile.id === backendId) || null;
     const codexOverrides = this.executionOverridesByBackend["codex-cli"];
     const claudeOverrides = this.executionOverridesByBackend["claude-code"];
+    const openCodeOverrides = this.executionOverridesByBackend["opencode"];
     let codexDiscovery = this.plugin.getCliModelDiscovery("codex-cli");
     let claudeDiscovery = this.plugin.getCliModelDiscovery("claude-code");
+    let openCodeDiscovery = this.plugin.getCliModelDiscovery("opencode");
     const effective = this.plugin.resolveActionExecutionConfig(action, codexOverrides);
     const claudeEffective = this.plugin.resolveCliActionExecutionConfig(
       action,
       "claude-code",
       claudeOverrides
     );
+    const openCodeEffective = this.plugin.resolveCliActionExecutionConfig(
+      action,
+      "opencode",
+      openCodeOverrides
+    );
     const claudeSourceLabel = getClaudeConfigSourceLabel(
       this.plugin.settings.claudeConfigSource
     );
     const claudeDefaultModelLabel = getClaudeDefaultModelLabel(
       this.plugin.settings.claudeConfigSource
+    );
+    const openCodeSourceLabel = getOpenCodeConfigSourceLabel(
+      this.plugin.settings.openCodeConfigSource
+    );
+    const openCodeDefaultModelLabel = getOpenCodeDefaultModelLabel(
+      this.plugin.settings.openCodeConfigSource
     );
     const codexSourceLabel = getCodexConfigSourceLabel(
       this.plugin.settings.codexConfigSource
@@ -5672,7 +6165,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
     (0, import_obsidian9.setIcon)(icon, "sliders-horizontal");
     const summaryText = summary.createSpan({
-      text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : backendId === "claude-code" ? `Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}` : `Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
+      text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : backendId === "claude-code" ? `Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}` : backendId === "opencode" ? `OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}` : `Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
     });
     const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
     const backend = this.createSelectField(grid, "执行后端");
@@ -5685,6 +6178,11 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       attr: { value: "claude-code" }
     });
     claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
+    const openCodeOption = backend.createEl("option", {
+      text: "OpenCode · 只读",
+      attr: { value: "opencode" }
+    });
+    openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
     directProfiles.forEach((profile) => {
       backend.createEl("option", {
         text: `Direct API · ${profile.name} · ${profile.model}${profileSupportsDirectWebSearch(profile) ? " · 可联网" : ""}`,
@@ -5719,6 +6217,19 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       });
     });
     claudeReasoning.value = claudeOverrides.reasoningEffort;
+    const openCodeModel = this.createSelectField(grid, "模型");
+    const openCodeReasoning = this.createSelectField(grid, "推理强度");
+    openCodeReasoning.createEl("option", {
+      text: "使用 OpenCode 默认",
+      attr: { value: "" }
+    });
+    REASONING_OPTIONS.forEach((option) => {
+      openCodeReasoning.createEl("option", {
+        text: option.label,
+        attr: { value: option.id }
+      });
+    });
+    openCodeReasoning.value = openCodeOverrides.reasoningEffort;
     const modelStatus = details.createDiv({ cls: "query-wiki-cli-model-status" });
     const backendNotice = details.createDiv({ cls: "query-wiki-direct-notice" });
     const populateModelSelect = (select, defaultLabel, discovery, selectedValue) => {
@@ -5765,30 +6276,44 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         claudeOverrides.model
       );
     };
+    const renderOpenCodeModels = () => {
+      const detectedModel = openCodeDiscovery?.effectiveModel || openCodeEffective.model || openCodeDefaultModelLabel;
+      populateModelSelect(
+        openCodeModel,
+        `使用后端默认 · ${detectedModel}`,
+        openCodeDiscovery,
+        openCodeOverrides.model
+      );
+    };
     renderCodexModels();
     renderClaudeModels();
+    renderOpenCodeModels();
     const sync = () => {
       const selectedProfile = directProfiles.find((profile) => profile.id === backend.value) || null;
       const usingDirect = Boolean(selectedProfile);
       const usingClaude = backend.value === "claude-code";
-      if (model.parentElement) model.parentElement.hidden = usingDirect || usingClaude;
-      if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingClaude;
-      if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingClaude;
+      const usingOpenCode = backend.value === "opencode";
+      const usingAlternateCli = usingClaude || usingOpenCode;
+      if (model.parentElement) model.parentElement.hidden = usingDirect || usingAlternateCli;
+      if (reasoning.parentElement) reasoning.parentElement.hidden = usingDirect || usingAlternateCli;
+      if (speed.parentElement) speed.parentElement.hidden = usingDirect || usingAlternateCli;
       if (claudeModel.parentElement) claudeModel.parentElement.hidden = !usingClaude;
       if (claudeReasoning.parentElement) claudeReasoning.parentElement.hidden = !usingClaude;
+      if (openCodeModel.parentElement) openCodeModel.parentElement.hidden = !usingOpenCode;
+      if (openCodeReasoning.parentElement) openCodeReasoning.parentElement.hidden = !usingOpenCode;
       modelStatus.hidden = usingDirect;
-      const activeDiscovery = usingClaude ? claudeDiscovery : codexDiscovery;
+      const activeDiscovery = usingClaude ? claudeDiscovery : usingOpenCode ? openCodeDiscovery : codexDiscovery;
       modelStatus.setText(
         activeDiscovery ? `模型来源：${activeDiscovery.source} · 可识别 ${activeDiscovery.models.length} 个模型${activeDiscovery.complete ? "" : "（候选列表可能不完整）"}${activeDiscovery.message ? `。${activeDiscovery.message}` : ""}` : "正在识别当前后端的可用模型…"
       );
-      backendNotice.toggleClass("is-visible", usingDirect || usingClaude);
+      backendNotice.toggleClass("is-visible", usingDirect || usingAlternateCli);
       backendNotice.setText(
         selectedProfile ? [
           `将筛选后的知识库候选笔记发送至 ${selectedProfile.name}（${selectedProfile.model}）。`,
           profileSupportsQueryImage(selectedProfile) ? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。` : "当前适配器未启用视觉输入。",
           profileSupportsDirectWebSearch(selectedProfile) ? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。" : "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
           "Direct API 不执行 Codex skill 或文件写入。"
-        ].join("") : usingClaude ? `Claude Code 使用 ${claudeSourceLabel} 和 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于当前模型及账号能力。` : `Codex CLI 使用${codexSourceLabel}。知识库模式使用只读沙箱；联网搜索模式启用 Codex 原生 Web Search。`
+        ].join("") : usingClaude ? `Claude Code 使用 ${claudeSourceLabel} 和 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于当前模型及账号能力。` : usingOpenCode ? `OpenCode 使用${openCodeSourceLabel}。知识库模式仅开放 read、glob、grep 和 list；联网搜索模式额外开放 websearch/webfetch。Shell、编辑和外部目录访问均禁用；首版不向 OpenCode 发送图片附件。` : `Codex CLI 使用${codexSourceLabel}。知识库模式使用只读沙箱；联网搜索模式启用 Codex 原生 Web Search。`
       );
       if (selectedProfile) {
         summaryText.setText(`Direct API · ${selectedProfile.name} · ${selectedProfile.model}`);
@@ -5805,6 +6330,20 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         );
         summaryText.setText(
           `Claude Code · ${next2.model || claudeDiscovery?.effectiveModel || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next2.reasoningEffort || "")}`
+        );
+        return;
+      }
+      if (usingOpenCode) {
+        openCodeOverrides.model = openCodeModel.value;
+        openCodeOverrides.reasoningEffort = openCodeReasoning.value;
+        openCodeOverrides.serviceTier = "default";
+        const next2 = this.plugin.resolveCliActionExecutionConfig(
+          action,
+          "opencode",
+          openCodeOverrides
+        );
+        summaryText.setText(
+          `OpenCode · ${next2.model || openCodeDiscovery?.effectiveModel || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next2.reasoningEffort || "")}`
         );
         return;
       }
@@ -5849,6 +6388,8 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     speed.addEventListener("change", sync);
     claudeModel.addEventListener("change", sync);
     claudeReasoning.addEventListener("change", sync);
+    openCodeModel.addEventListener("change", sync);
+    openCodeReasoning.addEventListener("change", sync);
     sync();
     if (isCliBackendId(backendId)) {
       void this.plugin.discoverCliModels(backendId).then((discovery) => {
@@ -5856,6 +6397,9 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         if (backendId === "claude-code") {
           claudeDiscovery = discovery;
           renderClaudeModels();
+        } else if (backendId === "opencode") {
+          openCodeDiscovery = discovery;
+          renderOpenCodeModels();
         } else {
           codexDiscovery = discovery;
           renderCodexModels();
@@ -5926,7 +6470,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         linkedImageResult.discoveredCount > addedCount ? `从链接笔记发现 ${linkedImageResult.discoveredCount} 张图片，本轮按限制附加 ${addedCount} 张` : `已从链接笔记附加 ${addedCount} 张图片`
       );
     }
-    const retrievalMode = session.retrievalMode === "web" && (backendId === "codex-cli" || backendId === "claude-code" || profileSupportsDirectWebSearch(directProfile)) ? "web" : "vault";
+    const retrievalMode = session.retrievalMode === "web" && (backendId === "codex-cli" || backendId === "claude-code" || backendId === "opencode" || profileSupportsDirectWebSearch(directProfile)) ? "web" : "vault";
     const priorMessages = session.messages.filter((message) => message.status === "done");
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const userMessage = {
@@ -5959,7 +6503,11 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         action,
         "claude-code",
         this.executionOverridesByBackend["claude-code"]
-      ).model || this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource) : "")
+      ).model || this.plugin.getCliModelDiscovery("claude-code")?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource) : backendId === "opencode" ? this.plugin.resolveCliActionExecutionConfig(
+        action,
+        "opencode",
+        this.executionOverridesByBackend["opencode"]
+      ).model || this.plugin.getCliModelDiscovery("opencode")?.effectiveModel || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource) : "")
     };
     this.activeRunId = "starting";
     this.activeMessageId = assistantMessage.id;
@@ -5968,6 +6516,10 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       action,
       "claude-code",
       this.executionOverridesByBackend["claude-code"]
+    ) : backendId === "opencode" ? this.plugin.resolveCliActionExecutionConfig(
+      action,
+      "opencode",
+      this.executionOverridesByBackend["opencode"]
     ) : {
       backend: "codex-cli",
       ...this.plugin.resolveActionExecutionConfig(
@@ -6193,7 +6745,7 @@ ${message.content}`).join("\n\n");
       new import_obsidian9.Notice("综合分析正在运行");
       return;
     }
-    const backendId = overrides.backend === "claude-code" ? "claude-code" : "codex-cli";
+    const backendId = overrides.backend === "claude-code" ? "claude-code" : overrides.backend === "opencode" ? "opencode" : "codex-cli";
     const executionConfig = this.plugin.resolveCliActionExecutionConfig(
       action,
       backendId,
@@ -7038,7 +7590,7 @@ var AnnotationService = class {
       selection.context
     ].filter(Boolean).join("\n");
     const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
-    const directProfile = configuredBackend === "auto" ? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId) : configuredBackend !== "codex-cli" && configuredBackend !== "claude-code" ? this.plugin.getProviderProfile(configuredBackend) : null;
+    const directProfile = configuredBackend === "auto" ? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId) : !["codex-cli", "claude-code", "opencode"].includes(configuredBackend) ? this.plugin.getProviderProfile(configuredBackend) : null;
     if (directProfile?.lastTest?.ok) {
       const provider = this.plugin.createLLMProvider(directProfile);
       const result2 = await provider.complete(
@@ -7066,10 +7618,14 @@ var AnnotationService = class {
     registerCancel(() => {
       this.plugin.requestVaultActionStop(runId);
     });
-    const cliBackend = configuredBackend === "claude-code" ? "claude-code" : "codex-cli";
+    const cliBackend = configuredBackend === "claude-code" ? "claude-code" : configuredBackend === "opencode" ? "opencode" : "codex-cli";
     const annotationOverrides = cliBackend === "claude-code" ? {
       model: this.plugin.settings.annotationClaudeModel,
       reasoningEffort: this.plugin.settings.annotationClaudeReasoningEffort,
+      serviceTier: "default"
+    } : cliBackend === "opencode" ? {
+      model: this.plugin.settings.annotationOpenCodeModel,
+      reasoningEffort: this.plugin.settings.annotationOpenCodeReasoningEffort,
       serviceTier: "default"
     } : {
       model: this.plugin.settings.annotationCodexModel,
@@ -7097,9 +7653,7 @@ ${user}`,
     return {
       text,
       provider: getCliBackendLabel(cliBackend),
-      model: executionConfig.model || getClaudeDefaultModelLabel(
-        this.plugin.settings.claudeConfigSource
-      )
+      model: executionConfig.model || (cliBackend === "claude-code" ? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource) : cliBackend === "opencode" ? getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource) : this.plugin.settings.codexModel)
     };
   }
   async getRecordExplanationContext(record) {
@@ -8971,7 +9525,7 @@ ${result.stderr.trim()}` : ""
     this.querySessions = this.querySessions.map((session) => {
       const queryBackendId = this.resolveQueryBackendId(session.queryBackendId);
       const queryProfile = isCliBackendId(queryBackendId) ? null : this.getProviderProfile(queryBackendId);
-      const retrievalMode = queryBackendId === "codex-cli" || queryBackendId === "claude-code" || profileSupportsDirectWebSearch(queryProfile) ? session.retrievalMode : "vault";
+      const retrievalMode = queryBackendId === "codex-cli" || queryBackendId === "claude-code" || queryBackendId === "opencode" || profileSupportsDirectWebSearch(queryProfile) ? session.retrievalMode : "vault";
       if (queryBackendId !== session.queryBackendId || retrievalMode !== session.retrievalMode) {
         changed = true;
       }
@@ -9009,6 +9563,16 @@ ${result.stderr.trim()}` : ""
       this.settings.claudeConfigSource = inferLegacyClaudeConfigSource();
       changed = true;
     }
+    const preferredOpenCodeExecutable = findPreferredOpenCodeExecutable();
+    const configuredOpenCodeExecutable = String(this.settings.openCodeExecutable || "").trim();
+    if (!configuredOpenCodeExecutable && preferredOpenCodeExecutable) {
+      this.settings.openCodeExecutable = preferredOpenCodeExecutable;
+      changed = true;
+    }
+    if (!["official", "cc-switch"].includes(String(storedSettings.openCodeConfigSource || ""))) {
+      this.settings.openCodeConfigSource = "official";
+      changed = true;
+    }
     if (!storedSettings.codexModel || storedSettings.codexModel === "gpt-5.5") {
       this.settings.codexModel = "gpt-5.6-terra";
       changed = true;
@@ -9021,8 +9585,12 @@ ${result.stderr.trim()}` : ""
       this.settings.claudeReasoningEffort = DEFAULT_SETTINGS.claudeReasoningEffort;
       changed = true;
     }
+    if (!REASONING_OPTIONS.some((option) => option.id === this.settings.openCodeReasoningEffort)) {
+      this.settings.openCodeReasoningEffort = DEFAULT_SETTINGS.openCodeReasoningEffort;
+      changed = true;
+    }
     const annotationBackendId = String(this.settings.annotationBackendId || "auto");
-    if (!["auto", "codex-cli", "claude-code"].includes(annotationBackendId) && !normalizedProfiles.some(
+    if (!["auto", "codex-cli", "claude-code", "opencode"].includes(annotationBackendId) && !normalizedProfiles.some(
       (profile) => profile.id === annotationBackendId && profile.lastTest?.ok
     )) {
       this.settings.annotationBackendId = "auto";
@@ -9034,6 +9602,10 @@ ${result.stderr.trim()}` : ""
     }
     if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationClaudeReasoningEffort)) {
       this.settings.annotationClaudeReasoningEffort = DEFAULT_SETTINGS.annotationClaudeReasoningEffort;
+      changed = true;
+    }
+    if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationOpenCodeReasoningEffort)) {
+      this.settings.annotationOpenCodeReasoningEffort = DEFAULT_SETTINGS.annotationOpenCodeReasoningEffort;
       changed = true;
     }
     if (!["default", "fast"].includes(this.settings.annotationCodexServiceTier)) {
@@ -9092,10 +9664,13 @@ ${result.stderr.trim()}` : ""
     if (normalized === "claude-code") {
       return this.isCliBackendAvailable("claude-code") ? "claude-code" : "codex-cli";
     }
+    if (normalized === "opencode") {
+      return this.isCliBackendAvailable("opencode") ? "opencode" : "codex-cli";
+    }
     return this.getVerifiedProviderProfiles().some((profile) => profile.id === normalized) ? normalized : "codex-cli";
   }
   isCliBackendAvailable(backendId) {
-    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
+    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : backendId === "opencode" ? this.settings.openCodeExecutable : this.settings.codexExecutable;
     return Boolean(executable && fs4.existsSync(executable));
   }
   resolveDirectQueryExecutionConfig(profile) {
@@ -9143,10 +9718,10 @@ ${result.stderr.trim()}` : ""
     return this.cliModelDiscoveryCache.get(backendId)?.result || null;
   }
   async discoverCliModels(backendId, force = false) {
-    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
-    const configuredModel = backendId === "claude-code" ? this.settings.claudeModel : this.settings.codexModel;
+    const executable = backendId === "claude-code" ? this.settings.claudeExecutable : backendId === "opencode" ? this.settings.openCodeExecutable : this.settings.codexExecutable;
+    const configuredModel = backendId === "claude-code" ? this.settings.claudeModel : backendId === "opencode" ? this.settings.openCodeModel : this.settings.codexModel;
     const signature = `${executable}\0${configuredModel}`;
-    const sourceSignature = backendId === "claude-code" ? this.settings.claudeConfigSource : this.settings.codexConfigSource;
+    const sourceSignature = backendId === "claude-code" ? this.settings.claudeConfigSource : backendId === "opencode" ? this.settings.openCodeConfigSource : this.settings.codexConfigSource;
     const signatureWithSource = `${signature}\0${sourceSignature}`;
     const cached = this.cliModelDiscoveryCache.get(backendId);
     if (!force && cached && cached.signature === signatureWithSource && cached.expiresAt > Date.now()) {
@@ -9157,7 +9732,7 @@ ${result.stderr.trim()}` : ""
     const pending = this.processExecution.discoverCliModels(this.settings, backendId).then((result) => {
       this.cliModelDiscoveryCache.set(backendId, {
         signature: signatureWithSource,
-        expiresAt: Date.now() + (backendId === "codex-cli" ? 3e5 : 5e3),
+        expiresAt: Date.now() + (backendId === "claude-code" ? 5e3 : 3e5),
         result
       });
       return result;
@@ -9175,6 +9750,12 @@ ${result.stderr.trim()}` : ""
       const result2 = await this.processExecution.probeClaudeCode(this.settings);
       this.providerRuntimeState.set("claude-code", { status: "done", result: result2 });
       this.invalidateCliModelDiscovery("claude-code");
+      return result2;
+    }
+    if (profileId === "opencode") {
+      const result2 = await this.processExecution.probeOpenCode(this.settings);
+      this.providerRuntimeState.set("opencode", { status: "done", result: result2 });
+      this.invalidateCliModelDiscovery("opencode");
       return result2;
     }
     const provider = this.createLLMProvider(profileId);
@@ -9517,20 +10098,23 @@ ${result.stderr.trim()}` : ""
     if (backendId === "codex-cli") {
       return this.resolveActionExecutionConfig(action, overrides);
     }
+    const isOpenCode = backendId === "opencode";
     const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
     const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
     const defaultReasoning = REASONING_OPTIONS.some(
-      (option) => option.id === this.settings.claudeReasoningEffort
-    ) ? this.settings.claudeReasoningEffort : DEFAULT_SETTINGS.claudeReasoningEffort;
+      (option) => option.id === (isOpenCode ? this.settings.openCodeReasoningEffort : this.settings.claudeReasoningEffort)
+    ) ? isOpenCode ? this.settings.openCodeReasoningEffort : this.settings.claudeReasoningEffort : isOpenCode ? DEFAULT_SETTINGS.openCodeReasoningEffort : DEFAULT_SETTINGS.claudeReasoningEffort;
+    const configuredModel = isOpenCode ? this.settings.openCodeModel.trim() : this.settings.claudeModel.trim();
+    const configSource = isOpenCode ? this.settings.openCodeConfigSource : this.settings.claudeConfigSource;
     return {
-      backend: "claude-code",
-      model: requestedModel || this.settings.claudeModel.trim(),
+      backend: backendId,
+      model: requestedModel || configuredModel,
       reasoningEffort: REASONING_OPTIONS.some(
         (option) => option.id === requestedReasoning
       ) ? requestedReasoning : defaultReasoning,
       serviceTier: "default",
-      modelSource: requestedModel ? "本次覆盖" : this.settings.claudeModel.trim() ? "Claude 默认" : getClaudeDefaultModelLabel(this.settings.claudeConfigSource),
-      reasoningSource: requestedReasoning ? "本次覆盖" : "Claude 默认"
+      modelSource: requestedModel ? "本次覆盖" : configuredModel ? `${getCliBackendLabel(backendId)} 默认` : isOpenCode ? getOpenCodeDefaultModelLabel(configSource) : getClaudeDefaultModelLabel(configSource),
+      reasoningSource: requestedReasoning ? "本次覆盖" : `${getCliBackendLabel(backendId)} 默认`
     };
   }
   async startTaskRun(action, summary, executionConfig = null) {
@@ -9619,11 +10203,11 @@ ${result.stderr.trim()}` : ""
     if (!action || action.id === "okf-export") {
       checks.push(["OKF exporter", fs4.existsSync(exporter)]);
     }
-    if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id) || backendId === "claude-code" && action.writes && ["code-analysis", "synthesis"].includes(action.id)) {
+    if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id) || backendId !== "codex-cli" && action.writes && ["code-analysis", "synthesis"].includes(action.id)) {
       checks.push(["Vault lint", fs4.existsSync(lintScript)]);
     }
     if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
-      const executable = backendId === "claude-code" ? this.settings.claudeExecutable : this.settings.codexExecutable;
+      const executable = backendId === "claude-code" ? this.settings.claudeExecutable : backendId === "opencode" ? this.settings.openCodeExecutable : this.settings.codexExecutable;
       checks.push([getCliBackendLabel(backendId), fs4.existsSync(executable)]);
     }
     const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
@@ -9943,14 +10527,14 @@ ${result.stderr.trim()}` : ""
     }
     const effectiveConfig = executionConfig ? {
       ...executionConfig,
-      reasoningEffort: executionConfig.reasoningEffort || (executionConfig.backend === "claude-code" ? this.settings.claudeReasoningEffort : this.settings.codexReasoningEffort),
+      reasoningEffort: executionConfig.reasoningEffort || (executionConfig.backend === "claude-code" ? this.settings.claudeReasoningEffort : executionConfig.backend === "opencode" ? this.settings.openCodeReasoningEffort : this.settings.codexReasoningEffort),
       serviceTier: executionConfig.serviceTier || "default"
     } : this.resolveActionExecutionConfig(action);
-    const backendId = effectiveConfig.backend === "claude-code" ? "claude-code" : "codex-cli";
-    const claudeStageWriteAllowed = backendId === "claude-code" && ["code-analysis", "synthesis"].includes(action.id);
-    if (action.writes && backendId !== "codex-cli" && !claudeStageWriteAllowed) {
+    const backendId = effectiveConfig.backend === "claude-code" ? "claude-code" : effectiveConfig.backend === "opencode" ? "opencode" : "codex-cli";
+    const stageWriteAllowed = backendId !== "codex-cli" && ["code-analysis", "synthesis"].includes(action.id);
+    if (action.writes && backendId !== "codex-cli" && !stageWriteAllowed) {
       return Promise.reject(
-        new Error("Claude Code 当前仅开放“代码分析”和“综合分析”的阶段所有权写入")
+        new Error(`${getCliBackendLabel(backendId)} 当前仅开放“代码分析”和“综合分析”的阶段所有权写入`)
       );
     }
     const runtime = this.checkRuntime(action, backendId);

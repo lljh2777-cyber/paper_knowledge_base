@@ -111,6 +111,7 @@ for (const settingsPage of [
 	'renderRuntimeSettings(containerEl)',
 	'renderCodexSettings(containerEl)',
 	'renderClaudeSettings(containerEl)',
+	'renderOpenCodeSettings(containerEl)',
 	'renderAnnotationSettings(containerEl)',
 	'renderDirectApiSettings(containerEl)',
 ]) {
@@ -120,7 +121,9 @@ for (const settingsPage of [
 	);
 }
 assert.ok(
-	settingsSource.includes('type SettingsPage = "home" | "runtime" | "codex" | "claude" | "annotations" | "direct-api"'),
+	settingsSource.includes('type SettingsPage =')
+		&& settingsSource.includes('| "opencode"')
+		&& settingsSource.includes('| "direct-api"'),
 	"settings should retain a dedicated page state for each configuration module",
 );
 assert.ok(
@@ -161,6 +164,26 @@ assert.ok(
 	settingsSource.includes('.addOption("official", "官方 Claude Code")')
 		&& settingsSource.includes('.addOption("cc-switch", "CC Switch")'),
 	"Claude settings should expose explicit official and CC Switch configuration sources",
+);
+assert.ok(
+	settingsSource.includes('.addOption("official", "官方 OpenCode Zen")')
+		&& settingsSource.includes('this.plugin.testProviderConnection("opencode")')
+		&& processExecutionSource.includes('["models", "opencode"]')
+		&& processExecutionSource.includes('"OpenCode models · CC Switch"'),
+	"OpenCode settings should separate official Zen and CC Switch configuration sources",
+);
+assert.ok(
+	processExecutionSource.includes('"--probe-backend"')
+		&& processExecutionSource.includes("spawn(pythonExecutable, args")
+		&& processExecutionSource.includes('"未配置 Python 可执行文件"')
+		&& processExecutionSource.includes("统一 runner 不存在："),
+	"OpenCode connection tests should run through the configured Python runner",
+);
+assert.ok(
+	queryViewSource.includes('attr: { value: "opencode" }')
+		&& queryViewSource.includes('this.executionOverridesByBackend["opencode"]')
+		&& queryViewSource.includes("openCodeModel.parentElement.hidden = !usingOpenCode"),
+	"query settings should expose independent OpenCode model controls",
 );
 
 const plugin = new AgentDashboardPlugin();

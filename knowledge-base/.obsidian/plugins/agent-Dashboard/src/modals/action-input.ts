@@ -2,6 +2,7 @@ import { App, Modal } from "obsidian";
 
 import type { DashboardAction } from "../actions";
 import {
+	getCliBackendLabel,
 	MODEL_OPTIONS,
 	REASONING_OPTIONS,
 	type CliBackendId,
@@ -11,6 +12,8 @@ import {
 	type ClaudeConfigSource,
 	getCodexDefaultModelLabel,
 	type CodexConfigSource,
+	getOpenCodeDefaultModelLabel,
+	type OpenCodeConfigSource,
 } from "../runtime/settings";
 import type {
 	CliModelDiscoveryResult,
@@ -32,6 +35,8 @@ interface ActionInputHost {
 		codexModel: string;
 		claudeConfigSource: ClaudeConfigSource;
 		claudeModel: string;
+		openCodeConfigSource: OpenCodeConfigSource;
+		openCodeModel: string;
 	};
 	resolveActionExecutionConfig(
 		action: DashboardAction,
@@ -142,7 +147,7 @@ export class ActionInputModal extends Modal {
 	}
 
 	renderExecutionControls(parent: HTMLElement): { getOverrides: () => ExecutionOverrides } {
-		const supportsClaudeStageWrite = ["code-analysis", "synthesis"].includes(
+		const supportsStageWriteBackends = ["code-analysis", "synthesis"].includes(
 			this.action.id,
 		);
 		let backendId: CliBackendId = "codex-cli";
@@ -162,7 +167,7 @@ export class ActionInputModal extends Modal {
 		const summary = heading.createSpan({ cls: "agent-dashboard-run-config-summary" });
 
 		let backendSelect: HTMLSelectElement | null = null;
-		if (supportsClaudeStageWrite) {
+		if (supportsStageWriteBackends) {
 			backendSelect = this.createSelectField(section, "执行后端", "运行执行后端");
 			backendSelect.createEl("option", {
 				text: "Codex CLI",
@@ -175,6 +180,13 @@ export class ActionInputModal extends Modal {
 				attr: { value: "claude-code" },
 			});
 			claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
+			const openCodeOption = backendSelect.createEl("option", {
+				text: this.plugin.isCliBackendAvailable("opencode")
+					? "OpenCode · 阶段写入"
+					: "OpenCode · 未配置",
+				attr: { value: "opencode" },
+			});
+			openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
 		}
 
 		const modelSelect = this.createSelectField(section, "模型", "运行模型");
@@ -230,18 +242,26 @@ export class ActionInputModal extends Modal {
 			modelSelect.createEl("option", {
 				text: backendId === "claude-code"
 					? `使用 Claude 默认 · ${actionDefault.model || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
+					: backendId === "opencode"
+						? `使用 OpenCode 默认 · ${actionDefault.model || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}`
 					: `使用 Codex 默认 · ${actionDefault.model
 						? this.plugin.getModelLabel(actionDefault.model)
 						: getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource)}`,
 				attr: { value: "" },
 			});
-			const options = backendId === "claude-code"
+			const options = backendId !== "codex-cli"
 				? [
-					...(this.plugin.getCliModelDiscovery("claude-code")?.models || []),
-					...(this.plugin.settings.claudeModel
+					...(this.plugin.getCliModelDiscovery(backendId)?.models || []),
+					...((backendId === "claude-code"
+						? this.plugin.settings.claudeModel
+						: this.plugin.settings.openCodeModel)
 						? [{
-							id: this.plugin.settings.claudeModel,
-							label: this.plugin.settings.claudeModel,
+							id: backendId === "claude-code"
+								? this.plugin.settings.claudeModel
+								: this.plugin.settings.openCodeModel,
+							label: backendId === "claude-code"
+								? this.plugin.settings.claudeModel
+								: this.plugin.settings.openCodeModel,
 							supportsFast: false,
 						}]
 						: []),
@@ -279,8 +299,8 @@ export class ActionInputModal extends Modal {
 		const syncReasoningDefault = () => {
 			const actionDefault = resolveEffective();
 			reasoningDefaultOption.setText(
-				backendId === "claude-code"
-					? `使用 Claude 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
+				backendId !== "codex-cli"
+					? `使用 ${getCliBackendLabel(backendId)} 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
 					: actionDefault.reasoningEffort
 						? `使用 Codex 默认 · ${this.plugin.getReasoningLabel(actionDefault.reasoningEffort)}`
 						: "使用 CC Switch 当前推理强度",
@@ -317,22 +337,26 @@ export class ActionInputModal extends Modal {
 			boundaryNotice.setText(
 				backendId === "claude-code"
 					? "Claude Code：仅允许当前阶段目录写入，Bash 已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。"
+					: backendId === "opencode"
+						? "OpenCode：仅允许当前阶段写入，Shell 与外部目录访问已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。"
 					: "Codex CLI：按当前项目沙箱和 skill 阶段边界执行。",
 			);
 		};
 		const updateSummary = () => {
 			const effective = resolveEffective(getOverrides());
-			const backendLabel = backendId === "claude-code" ? "Claude Code" : "Codex CLI";
+			const backendLabel = getCliBackendLabel(backendId);
 			const modelLabel = effective.model
 				? this.plugin.getModelLabel(effective.model)
 				: backendId === "claude-code"
 					? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
-					: getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource);
+					: backendId === "opencode"
+						? getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)
+						: getCodexDefaultModelLabel(this.plugin.settings.codexConfigSource);
 			const reasoningLabel = effective.reasoningEffort
 				? this.plugin.getReasoningLabel(effective.reasoningEffort)
 				: "CLI 默认推理";
 			summary.setText(
-				backendId === "claude-code"
+				backendId !== "codex-cli"
 					? `${backendLabel} · ${modelLabel} · ${reasoningLabel}`
 					: `${backendLabel} · ${modelLabel} · ${reasoningLabel} · ${
 						effective.serviceTier === "fast"
@@ -351,7 +375,9 @@ export class ActionInputModal extends Modal {
 		backendSelect?.addEventListener("change", () => {
 			backendId = backendSelect?.value === "claude-code"
 				? "claude-code"
-				: "codex-cli";
+				: backendSelect?.value === "opencode"
+					? "opencode"
+					: "codex-cli";
 			serviceTier = "default";
 			modelSelect.value = "";
 			reasoningSelect.value = "";

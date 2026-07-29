@@ -9,6 +9,7 @@ Agent Dashboard 核心只处理统一任务、统一事件、生命周期和权�
 ```text
 tool-library/scripts/agent_backends/codex_cli.py
 tool-library/scripts/agent_backends/claude_code.py
+tool-library/scripts/agent_backends/opencode.py
 ```
 
 ## 文件边界
@@ -21,6 +22,7 @@ tool-library/scripts/agent_backends/
   registry.py       # 后端发现
   codex_cli.py      # Codex CLI 方言
   claude_code.py    # Claude Code 方言
+  opencode.py       # OpenCode 方言
 
 tool-library/schemas/
   agent_backend_task.schema.json
@@ -85,6 +87,47 @@ CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独�
 必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。`WebSearch` 和
 `WebFetch` 不得出现在批注、代码分析、综合分析或其他非检索任务中。
 
+## OpenCode 当前边界
+
+`opencode` 支持 `official` 与 `cc-switch` 两种配置来源。官方模式显式选择
+`opencode/<model>`，优先通过 `opencode models opencode` 获取 OpenCode Zen
+模型目录，并在目录请求失败时显示带“静态回退”标记的免费模型候选。CC Switch
+模式通过 `opencode models` 读取当前配置可见的全部 provider/model；模型覆盖
+留空时，任务跟随 `~/.config/opencode/opencode.json` 的当前默认模型。插件不
+改写 OpenCode 配置、认证数据或 CC Switch 数据库。
+
+每次任务通过 `OPENCODE_CONFIG_CONTENT` 注入最小权限，而不是依赖全局设置：
+
+- 批注解释不开放文件、Shell 或联网工具。
+- 知识库检索仅开放 `read`、`glob`、`grep`、`list`。
+- 联网搜索在只读权限上额外开放 `websearch`、`webfetch`。
+- 代码分析和综合分析仅开放 `edit`，实际写入仍受阶段所有权白名单、变更审计、
+  后置体检和失败回滚保护。
+- `bash`、外部目录访问、交互提问和子任务始终禁用。
+
+OpenCode 使用 `opencode run --format json`，适配器将 `text`、`tool_use`、
+`step_start`、`step_finish` 和错误事件归一化。第一版不传递图片，因此
+`image_input=false`；模型自身支持视觉不等于 Dashboard 已实现图像传输。
+文献入库、PDF 深读和体检修复等完整写入任务仍拒绝 OpenCode。
+
+OpenCode 设置页独立保存可执行文件、配置来源、模型和推理 variant。批注页
+可以保存独立的 OpenCode 模型和推理参数；查询侧边栏、代码分析与综合分析的
+运行弹窗也可以选择 OpenCode。Direct API 的供应商、模型和凭据不受影响。
+
+模型目录发现仍由插件直接运行 `opencode models`，因为该命令不发起模型推理，
+在 Node 子进程中能够稳定退出。连接测试和实际模型任务都通过统一 Python
+runner 执行，避免 Windows 下 OpenCode/Bun 在 Electron 的管道模式中不输出
+JSONL 或不退出。连接测试使用 `--probe-backend opencode`，不发送 Vault 内容，
+不开放文件、Skill、Shell 或联网工具，并只向 stdout 返回一个结构化 JSON
+结果。runner 负责超时、JSONL 解析、进程树终止和错误分类；插件只保留一个比
+runner 更长的安全看门狗。
+
+OpenCode 连接测试依赖已配置的 Python。插件必须在启动 runner 前分别检查
+Python、runner 和 OpenCode 可执行文件；缺失时返回 `configuration` 错误，
+不得显示成 OpenCode 请求超时。runner 的稳定错误类型包括
+`configuration`、`process-start`、`authentication`、`model-not-found`、
+`rate-limit`、`network`、`timeout`、`protocol` 和 `process-exit`。
+
 ## CLI 模型发现
 
 模型发现属于宿主与 CLI 的适配层，不属于 Direct API Provider：
@@ -97,10 +140,14 @@ CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独�
   `stream-json` 初始化事件校验实际模型；CC Switch 模式读取
   `%USERPROFILE%\.claude\settings.json` 中的当前模型和 Fable、Haiku、Opus、
   Sonnet 映射。
+- OpenCode 官方模式执行 `opencode models opencode`，CC Switch 模式执行
+  `opencode models` 并读取当前 OpenCode 配置中的默认模型。官方 Zen 目录
+  检测失败时可回退到带明确标记的免费模型静态列表。
 - Codex 目录检测失败时回退到插件内置模型表；Claude 无法读取配置时回退到
-  Claude Code 自身默认模型。回退必须在界面明确标记，不能伪装成完整目录。
-- Codex 与 Claude 的运行时模型覆盖必须分别保存。切换后端不得把一种 CLI
-  的模型 ID 传给另一种 CLI。
+  Claude Code 自身默认模型。任何回退都必须在界面明确标记，不能伪装成完整
+  目录。
+- Codex、Claude 与 OpenCode 的运行时模型覆盖必须分别保存。切换后端不得把
+  一种 CLI 的模型 ID 传给另一种 CLI。
 
 ## 适配器职责
 

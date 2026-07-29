@@ -8,7 +8,10 @@ import {
 
 import type AgentDashboardPlugin from "../plugin";
 import { getCliBackendLabel, type CliBackendId } from "../config";
-import { getClaudeDefaultModelLabel } from "../runtime/settings";
+import {
+	getClaudeDefaultModelLabel,
+	getOpenCodeDefaultModelLabel,
+} from "../runtime/settings";
 import type {
 	AnnotationDraft,
 	AnnotationExplanation,
@@ -442,7 +445,7 @@ export class AnnotationService {
 		const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
 		const directProfile = configuredBackend === "auto"
 			? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId)
-			: configuredBackend !== "codex-cli" && configuredBackend !== "claude-code"
+			: !["codex-cli", "claude-code", "opencode"].includes(configuredBackend)
 				? this.plugin.getProviderProfile(configuredBackend)
 				: null;
 		if (directProfile?.lastTest?.ok) {
@@ -475,13 +478,21 @@ export class AnnotationService {
 		});
 		const cliBackend: CliBackendId = configuredBackend === "claude-code"
 			? "claude-code"
-			: "codex-cli";
+			: configuredBackend === "opencode"
+				? "opencode"
+				: "codex-cli";
 		const annotationOverrides = cliBackend === "claude-code"
 			? {
 				model: this.plugin.settings.annotationClaudeModel,
 				reasoningEffort: this.plugin.settings.annotationClaudeReasoningEffort,
 				serviceTier: "default" as const,
 			}
+			: cliBackend === "opencode"
+				? {
+					model: this.plugin.settings.annotationOpenCodeModel,
+					reasoningEffort: this.plugin.settings.annotationOpenCodeReasoningEffort,
+					serviceTier: "default" as const,
+				}
 			: {
 				model: this.plugin.settings.annotationCodexModel,
 				reasoningEffort: this.plugin.settings.annotationCodexReasoningEffort,
@@ -506,8 +517,12 @@ export class AnnotationService {
 		return {
 			text,
 			provider: getCliBackendLabel(cliBackend),
-			model: executionConfig.model || getClaudeDefaultModelLabel(
-				this.plugin.settings.claudeConfigSource,
+			model: executionConfig.model || (
+				cliBackend === "claude-code"
+					? getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)
+					: cliBackend === "opencode"
+						? getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)
+						: this.plugin.settings.codexModel
 			),
 		};
 	}

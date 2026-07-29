@@ -1776,6 +1776,12 @@
 	color: var(--color-orange);
 }
 
+.query-wiki-message-backend.is-opencode {
+	border-color: color-mix(in srgb, var(--color-cyan), transparent 55%);
+	background: color-mix(in srgb, var(--color-cyan), transparent 91%);
+	color: var(--color-cyan);
+}
+
 .query-wiki-message-icon {
 	display: inline-grid;
 	width: 16px;

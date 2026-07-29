@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +33,7 @@ class AgentBackendProtocolTests(unittest.TestCase):
 
         self.assertEqual(
             [item["id"] for item in discovered],
-            ["claude-code", "codex-cli"],
+            ["claude-code", "codex-cli", "opencode"],
         )
         by_id = {item["id"]: item for item in discovered}
         self.assertEqual(by_id["codex-cli"]["schema_version"], "1.0")
@@ -52,11 +53,15 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertTrue(
             by_id["claude-code"]["capabilities"]["web_search"]
         )
+        self.assertTrue(by_id["opencode"]["capabilities"]["structured_output"])
+        self.assertTrue(by_id["opencode"]["capabilities"]["file_write"])
+        self.assertTrue(by_id["opencode"]["capabilities"]["web_search"])
+        self.assertFalse(by_id["opencode"]["capabilities"]["image_input"])
 
     def test_unknown_backend_fails_with_available_ids(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "Available: claude-code, codex-cli",
+            "Available: claude-code, codex-cli, opencode",
         ):
             get_backend("missing-cli")
 
@@ -120,6 +125,192 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertNotIn('model_provider="openai"', switched_command)
         self.assertNotIn('model_reasoning_effort=""', switched_command)
         self.assertNotIn('service_tier="default"', switched_command)
+
+    def test_opencode_adapter_builds_read_only_web_command(self) -> None:
+        backend = get_backend("opencode")
+        request = BackendCommandRequest(
+            action="vault-retrieval",
+            agent="research-vault-retrieval",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="opencode/mimo-v2.5-free",
+            reasoning_effort="medium",
+            service_tier="default",
+            retrieval_mode="web",
+        )
+
+        command = backend.build_command("opencode.exe", request)
+
+        self.assertEqual(command[0:3], ["opencode.exe", "run", "--format"])
+        self.assertIn("json", command)
+        self.assertIn("agent-dashboard:read-only-web", command)
+        self.assertIn("opencode/mimo-v2.5-free", command)
+        self.assertIn("--variant", command)
+
+    def test_opencode_adapter_allows_only_audited_stage_writes(self) -> None:
+        backend = get_backend("opencode")
+        allowed_root = PROJECT_ROOT / "knowledge-base" / "wiki" / "methods"
+        policy = BackendAccessPolicy(
+            mode="workspace-write",
+            write_scope="stage-owned",
+            allowed_roots=(allowed_root,),
+            denied_roots=(PROJECT_ROOT / "tool-library" / "raw",),
+            require_change_manifest=True,
+            rollback_on_failure=True,
+        )
+        request = BackendCommandRequest(
+            action="synthesis",
+            agent="research-vault-synthesis",
+            project_root=PROJECT_ROOT,
+            sandbox="workspace-write",
+            writes=True,
+            model="",
+            reasoning_effort="high",
+            service_tier="default",
+            access_policy=policy,
+        )
+
+        command = backend.build_command("opencode.exe", request)
+
+        self.assertIn("agent-dashboard:stage-write", command)
+        self.assertNotIn("--model", command)
+        rejected = BackendCommandRequest(
+            action="pdf-xray",
+            agent="research-vault-xray",
+            project_root=PROJECT_ROOT,
+            sandbox="workspace-write",
+            writes=True,
+            model="",
+            reasoning_effort="high",
+            service_tier="default",
+            access_policy=policy,
+        )
+        with self.assertRaisesRegex(ValueError, "stage-owned writes"):
+            backend.build_command("opencode.exe", rejected)
+
+    def test_opencode_adapter_parses_text_and_web_events(self) -> None:
+        backend = get_backend("opencode")
+        search = backend.parse_event(
+            {
+                "type": "tool_use",
+                "part": {
+                    "tool": "websearch",
+                    "state": {"input": {"query": "OpenCode Zen free models"}},
+                },
+            }
+        )
+        fetch = backend.parse_event(
+            {
+                "type": "tool_use",
+                "part": {
+                    "tool": "webfetch",
+                    "state": {
+                        "input": {"url": "https://opencode.ai/docs/zen#models"}
+                    },
+                },
+            }
+        )
+        message = backend.parse_event(
+            {"type": "text", "part": {"text": '{"answer":"ok"}'}}
+        )
+
+        self.assertEqual(search.search_queries, ["OpenCode Zen free models"])
+        self.assertEqual(
+            fetch.source_urls,
+            {"https://opencode.ai/docs/zen"},
+        )
+        self.assertEqual(message.final_messages, ['{"answer":"ok"}'])
+
+    def test_opencode_runtime_permissions_are_injected(self) -> None:
+        from run_vault_action import build_command_environment
+
+        env = build_command_environment(
+            [
+                "opencode.exe",
+                "run",
+                "--title",
+                "agent-dashboard:read-only-web",
+            ]
+        )
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+        self.assertEqual(config["permission"]["read"], "allow")
+        self.assertEqual(config["permission"]["websearch"], "allow")
+        self.assertEqual(config["permission"]["edit"], "deny")
+        self.assertEqual(config["permission"]["bash"], "deny")
+
+        no_tools_env = build_command_environment(
+            [
+                "opencode.exe",
+                "run",
+                "--title",
+                "agent-dashboard:no-tools",
+            ]
+        )
+        no_tools = json.loads(no_tools_env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(no_tools["permission"]["skill"], "deny")
+        self.assertEqual(no_tools["permission"]["read"], "deny")
+        self.assertEqual(no_tools["permission"]["websearch"], "deny")
+
+    def test_opencode_probe_returns_normalized_success(self) -> None:
+        from run_vault_action import run_backend_probe
+
+        completed = subprocess.CompletedProcess(
+            ["opencode.exe"],
+            0,
+            (
+                '{"type":"step_start","part":{}}\n'
+                '{"type":"text","part":{"text":"OPENCODE_BACKEND_OK"}}\n'
+                '{"type":"step_finish","part":{}}\n'
+            ),
+            "",
+        )
+        with (
+            mock.patch(
+                "run_vault_action.resolve_executable",
+                return_value="opencode.exe",
+            ),
+            mock.patch(
+                "run_vault_action.run_captured_process",
+                return_value=completed,
+            ),
+        ):
+            result = run_backend_probe(
+                "opencode",
+                "opencode.exe",
+                PROJECT_ROOT,
+                "opencode/mimo-v2.5-free",
+                "medium",
+                "default",
+                "official",
+                60,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["type"], "success")
+        self.assertEqual(result["protocol"], "jsonl")
+        self.assertEqual(result["response_preview"], "OPENCODE_BACKEND_OK")
+
+    def test_opencode_probe_classifies_expected_failures(self) -> None:
+        from run_vault_action import classify_backend_probe_error
+
+        self.assertEqual(
+            classify_backend_probe_error(124, "")[0],
+            "timeout",
+        )
+        self.assertEqual(
+            classify_backend_probe_error(1, "status 401 unauthorized")[0],
+            "authentication",
+        )
+        self.assertEqual(
+            classify_backend_probe_error(1, "model not found")[0],
+            "model-not-found",
+        )
+        self.assertEqual(
+            classify_backend_probe_error(1, "status 429 rate limit")[0],
+            "rate-limit",
+        )
 
     def test_action_access_policy_distinguishes_read_and_write_scopes(
         self,

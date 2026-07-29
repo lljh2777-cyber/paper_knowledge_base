@@ -32,6 +32,8 @@ import {
 	getClaudeConfigSourceLabel,
 	getClaudeDefaultModelLabel,
 	getCodexConfigSourceLabel,
+	getOpenCodeConfigSourceLabel,
+	getOpenCodeDefaultModelLabel,
 } from "../runtime/settings";
 import type {
 	PluginHost,
@@ -51,7 +53,14 @@ interface SettingsPluginHost extends PluginHost {
 	supportsFast(model: string): boolean;
 }
 
-type SettingsPage = "home" | "runtime" | "codex" | "claude" | "annotations" | "direct-api";
+type SettingsPage =
+	| "home"
+	| "runtime"
+	| "codex"
+	| "claude"
+	| "opencode"
+	| "annotations"
+	| "direct-api";
 
 export class AgentDashboardSettingTab extends PluginSettingTab {
 	declare plugin: Plugin & SettingsPluginHost;
@@ -75,6 +84,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				break;
 			case "claude":
 				this.renderClaudeSettings(containerEl);
+				break;
+			case "opencode":
+				this.renderOpenCodeSettings(containerEl);
 				break;
 			case "annotations":
 				this.renderAnnotationSettings(containerEl);
@@ -129,6 +141,19 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			description: "选择官方配置或 CC Switch，并管理模型覆盖和连接测试。",
 			status: `${claudeSourceLabel} · ${this.plugin.settings.claudeModel || "默认模型"} · ${claudeReasoningLabel}`,
 		});
+		const openCodeReasoningLabel = REASONING_OPTIONS.find(
+			(option) => option.id === this.plugin.settings.openCodeReasoningEffort,
+		)?.label || this.plugin.settings.openCodeReasoningEffort;
+		const openCodeSourceLabel = getOpenCodeConfigSourceLabel(
+			this.plugin.settings.openCodeConfigSource,
+		);
+		this.createSettingsNavigationItem(navigation, {
+			page: "opencode",
+			icon: "braces",
+			title: "OpenCode",
+			description: "选择官方 OpenCode Zen 或 CC Switch，并自动识别当前可用模型。",
+			status: `${openCodeSourceLabel} · ${this.plugin.settings.openCodeModel || "默认模型"} · ${openCodeReasoningLabel}`,
+		});
 		const annotationBackendId = this.plugin.settings.annotationBackendId || "auto";
 		const annotationProfile = this.plugin.settings.providerProfiles.find(
 			(profile) => profile.id === annotationBackendId,
@@ -139,6 +164,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				? `Codex · ${this.plugin.settings.annotationCodexModel || "默认模型"}`
 				: annotationBackendId === "claude-code"
 					? `Claude · ${this.plugin.settings.annotationClaudeModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
+					: annotationBackendId === "opencode"
+						? `OpenCode · ${this.plugin.settings.annotationOpenCodeModel || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}`
 					: annotationProfile
 						? `${annotationProfile.name} · ${annotationProfile.model}`
 						: "自动选择";
@@ -206,6 +233,19 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.claudeExecutable)
 					.onChange(async (value) => {
 						this.plugin.settings.claudeExecutable = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("OpenCode 可执行文件")
+			.setDesc("用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。")
+			.addText((text) =>
+				text
+					.setPlaceholder("C:\\Users\\<user>\\.opencode\\bin\\opencode.exe")
+					.setValue(this.plugin.settings.openCodeExecutable)
+					.onChange(async (value) => {
+						this.plugin.settings.openCodeExecutable = value.trim();
+						this.plugin.invalidateCliModelDiscovery("opencode");
 						await this.plugin.saveSettings();
 					})
 			);
@@ -475,6 +515,138 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		}
 	}
 
+	private renderOpenCodeSettings(containerEl: HTMLElement): void {
+		const configSource = this.plugin.settings.openCodeConfigSource;
+		const sourceLabel = getOpenCodeConfigSourceLabel(configSource);
+		const defaultModelLabel = getOpenCodeDefaultModelLabel(configSource);
+		this.createSettingsPageHeader(
+			containerEl,
+			"OpenCode",
+			"选择官方 OpenCode Zen 或 CC Switch 当前配置。两种来源共用 Dashboard 的只读和阶段所有权写入边界。",
+			true,
+		);
+		new Setting(containerEl)
+			.setName("配置来源")
+			.setDesc(
+				configSource === "cc-switch"
+					? "沿用 CC Switch 管理的 OpenCode provider、endpoint、模型和认证配置。"
+					: "显式使用 OpenCode Zen 模型；凭据仍由 OpenCode auth 管理，插件不保存 API Key。",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("official", "官方 OpenCode Zen")
+					.addOption("cc-switch", "CC Switch")
+					.setValue(configSource)
+					.onChange(async (value) => {
+						this.plugin.settings.openCodeConfigSource = value === "cc-switch"
+							? "cc-switch"
+							: "official";
+						if (value === "cc-switch") {
+							this.plugin.settings.openCodeModel = "";
+						} else if (!this.plugin.settings.openCodeModel) {
+							this.plugin.settings.openCodeModel = DEFAULT_SETTINGS.openCodeModel;
+						}
+						this.plugin.invalidateCliModelDiscovery("opencode");
+						this.plugin.providerRuntimeState.delete("opencode");
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+		this.createProviderSectionHeader(
+			containerEl,
+			`${sourceLabel} 配置`,
+			configSource === "cc-switch"
+				? "空模型值跟随 CC Switch 当前选择；也可为 Dashboard 任务设置临时模型覆盖。"
+				: "官方模式默认使用 OpenCode Zen 免费模型。免费可用性和限额以 OpenCode 当前账号与模型目录为准。",
+		);
+		const discovery = this.plugin.getCliModelDiscovery("opencode");
+		const models = discovery?.models || [];
+		new Setting(containerEl)
+			.setName(configSource === "official" ? "默认模型" : "模型覆盖")
+			.setDesc(
+				discovery
+					? `模型来源：${discovery.source}${discovery.complete ? "" : "（回退列表）"}`
+					: `留空时使用${defaultModelLabel}；点击右侧按钮可读取 OpenCode 模型目录。`,
+			)
+			.addDropdown((dropdown) => {
+				dropdown.addOption(
+					"",
+					configSource === "cc-switch"
+						? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}`
+						: `使用官方默认 · ${discovery?.effectiveModel || DEFAULT_SETTINGS.openCodeModel}`,
+				);
+				models.forEach((model) => {
+					dropdown.addOption(
+						model.id,
+						model.description ? `${model.label} · ${model.description}` : model.label,
+					);
+				});
+				const selected = this.plugin.settings.openCodeModel;
+				if (selected && !models.some((model) => model.id === selected)) {
+					dropdown.addOption(selected, `${selected} · 已保存`);
+				}
+				dropdown
+					.setValue(selected)
+					.onChange(async (value) => {
+						this.plugin.settings.openCodeModel = value;
+						await this.plugin.saveSettings();
+					});
+			})
+			.addExtraButton((button) =>
+				button
+					.setIcon("refresh-cw")
+					.setTooltip("重新识别 OpenCode 模型")
+					.onClick(async () => {
+						await this.plugin.discoverCliModels("opencode", true);
+						this.display();
+					})
+			);
+		new Setting(containerEl)
+			.setName("默认推理强度")
+			.setDesc("映射到 OpenCode 的 provider-specific variant；模型不支持时可能由 provider 忽略或报错。")
+			.addDropdown((dropdown) => {
+				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+				dropdown
+					.setValue(this.plugin.settings.openCodeReasoningEffort)
+					.onChange(async (value) => {
+						this.plugin.settings.openCodeReasoningEffort = value;
+						await this.plugin.saveSettings();
+					});
+			});
+		this.createProviderSectionHeader(
+			containerEl,
+			"执行边界",
+			"检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和综合分析可写入阶段目录，并由宿主审计、验证和失败回滚。",
+		);
+		const resultState = this.plugin.providerRuntimeState.get("opencode") || null;
+		new Setting(containerEl)
+			.setName(sourceLabel)
+			.setDesc(
+				"通过统一 Python runner 执行不含 Vault 内容的最小 JSONL 请求，验证 CLI、认证、模型和输出协议。",
+			)
+			.addButton((button) => {
+				const testing = resultState?.status === "testing";
+				button
+					.setButtonText(testing ? "测试中…" : "测试连接")
+					.setDisabled(testing)
+					.onClick(async () => {
+						this.plugin.providerRuntimeState.set("opencode", { status: "testing" });
+						this.display();
+						const result = await this.plugin.testProviderConnection("opencode");
+						this.plugin.providerRuntimeState.set("opencode", { status: "done", result });
+						this.display();
+					});
+			});
+		if (resultState?.result) this.renderConnectionResult(containerEl, resultState.result);
+		if (!discovery) {
+			void this.plugin.discoverCliModels("opencode")
+				.then(() => {
+					if (this.activePage === "opencode") this.display();
+				})
+				.catch(() => undefined);
+		}
+	}
+
 	private renderAnnotationSettings(containerEl: HTMLElement): void {
 		this.createSettingsPageHeader(
 			containerEl,
@@ -493,7 +665,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				dropdown
 					.addOption("auto", "自动选择")
 					.addOption("codex-cli", "Codex CLI")
-					.addOption("claude-code", "Claude Code");
+					.addOption("claude-code", "Claude Code")
+					.addOption("opencode", "OpenCode");
 				verifiedProfiles.forEach((profile) => {
 					dropdown.addOption(profile.id, `Direct API · ${profile.name}`);
 				});
@@ -522,7 +695,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		if (backendId === "codex-cli" || backendId === "claude-code") {
+		if (backendId === "codex-cli" || backendId === "claude-code" || backendId === "opencode") {
 			this.renderAnnotationCliSettings(containerEl, backendId);
 			return;
 		}
@@ -560,6 +733,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		isFallback = false,
 	): void {
 		const isClaude = backendId === "claude-code";
+		const isOpenCode = backendId === "opencode";
 		const usesCodexSwitch = backendId === "codex-cli"
 			&& this.plugin.settings.codexConfigSource === "cc-switch";
 		const title = isFallback
@@ -570,6 +744,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			title,
 			isClaude
 				? `模型留空时使用${getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}；Claude Code 批注不开放任何工具。`
+				: isOpenCode
+					? `模型留空时使用${getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}；OpenCode 批注使用 no-tools 权限配置。`
 				: usesCodexSwitch
 					? "模型留空时沿用 CC Switch 当前 Codex 配置；快速模式仅在显式模型支持时生效。"
 					: "模型留空时使用批注动作默认模型；快速模式仅对支持该服务档位的模型生效。",
@@ -577,9 +753,11 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		const discovery = this.plugin.getCliModelDiscovery(backendId);
 		const selectedModel = isClaude
 			? this.plugin.settings.annotationClaudeModel
-			: this.plugin.settings.annotationCodexModel;
+			: isOpenCode
+				? this.plugin.settings.annotationOpenCodeModel
+				: this.plugin.settings.annotationCodexModel;
 		const models = discovery?.models || (
-			isClaude
+			isClaude || isOpenCode
 				? []
 				: MODEL_OPTIONS.map((option) => ({
 					id: option.id,
@@ -600,6 +778,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					"",
 					isClaude
 						? `使用后端默认 · ${discovery?.effectiveModel || getClaudeDefaultModelLabel(this.plugin.settings.claudeConfigSource)}`
+						: isOpenCode
+							? `使用后端默认 · ${discovery?.effectiveModel || getOpenCodeDefaultModelLabel(this.plugin.settings.openCodeConfigSource)}`
 						: usesCodexSwitch
 							? `使用后端默认 · ${discovery?.effectiveModel || "CC Switch 当前模型"}`
 							: "使用批注默认模型",
@@ -620,6 +800,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						if (isClaude) {
 							this.plugin.settings.annotationClaudeModel = value;
+						} else if (isOpenCode) {
+							this.plugin.settings.annotationOpenCodeModel = value;
 						} else {
 							this.plugin.settings.annotationCodexModel = value;
 							if (
@@ -645,7 +827,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 
 		const reasoningValue = isClaude
 			? this.plugin.settings.annotationClaudeReasoningEffort
-			: this.plugin.settings.annotationCodexReasoningEffort;
+			: isOpenCode
+				? this.plugin.settings.annotationOpenCodeReasoningEffort
+				: this.plugin.settings.annotationCodexReasoningEffort;
 		new Setting(containerEl)
 			.setName("推理强度")
 			.setDesc("仅影响批注解释，不改变查询、深读或综合分析任务。")
@@ -656,6 +840,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						if (isClaude) {
 							this.plugin.settings.annotationClaudeReasoningEffort = value;
+						} else if (isOpenCode) {
+							this.plugin.settings.annotationOpenCodeReasoningEffort = value;
 						} else {
 							this.plugin.settings.annotationCodexReasoningEffort = value;
 						}
@@ -663,7 +849,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					});
 			});
 
-		if (!isClaude) {
+		if (!isClaude && !isOpenCode) {
 			const effectiveModel = selectedModel || this.plugin.settings.codexModel;
 			const fastSupported = this.plugin.supportsFast(effectiveModel);
 			new Setting(containerEl)

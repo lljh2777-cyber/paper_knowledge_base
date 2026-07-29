@@ -5,6 +5,7 @@ import type { ProviderProfile } from "../providers/profile";
 
 export type ClaudeConfigSource = "official" | "cc-switch";
 export type CodexConfigSource = "official" | "cc-switch";
+export type OpenCodeConfigSource = "official" | "cc-switch";
 
 const LEGACY_CODEX_EXECUTABLE =
 	"C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
@@ -20,6 +21,12 @@ const DEFAULT_CLAUDE_EXECUTABLE = path.join(
 	"bin",
 	"claude.exe",
 );
+const DEFAULT_OPENCODE_EXECUTABLE = path.join(
+	process.env.USERPROFILE || "",
+	".opencode",
+	"bin",
+	"opencode.exe",
+);
 
 export interface DashboardSettings {
 	projectRoot: string;
@@ -31,12 +38,18 @@ export interface DashboardSettings {
 	claudeConfigSource: ClaudeConfigSource;
 	claudeModel: string;
 	claudeReasoningEffort: string;
+	openCodeExecutable: string;
+	openCodeConfigSource: OpenCodeConfigSource;
+	openCodeModel: string;
+	openCodeReasoningEffort: string;
 	annotationBackendId: string;
 	annotationCodexModel: string;
 	annotationCodexReasoningEffort: string;
 	annotationCodexServiceTier: "default" | "fast";
 	annotationClaudeModel: string;
 	annotationClaudeReasoningEffort: string;
+	annotationOpenCodeModel: string;
+	annotationOpenCodeReasoningEffort: string;
 	annotationMaxTokens: number;
 	pythonExecutable: string;
 	rscriptExecutable: string;
@@ -45,6 +58,19 @@ export interface DashboardSettings {
 	activeProviderId: string;
 	providerProfiles: ProviderProfile[];
 	providerTimeoutSeconds: number;
+}
+
+export function findPreferredOpenCodeExecutable(): string {
+	const candidates = [
+		String(process.env.OPENCODE_PATH || "").trim(),
+		DEFAULT_OPENCODE_EXECUTABLE,
+		path.join(process.env.USERPROFILE || "", ".local", "bin", "opencode.exe"),
+		path.join(process.env.USERPROFILE || "", "scoop", "shims", "opencode.exe"),
+		path.join(process.env.APPDATA || "", "npm", "opencode.cmd"),
+		path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "opencode.exe"),
+	].filter(Boolean);
+	return candidates.find((candidate) => fs.existsSync(candidate))
+		|| DEFAULT_OPENCODE_EXECUTABLE;
 }
 
 export function findPreferredClaudeExecutable(): string {
@@ -90,6 +116,14 @@ export function getCodexConfigSourceLabel(source: CodexConfigSource): string {
 
 export function getCodexDefaultModelLabel(source: CodexConfigSource): string {
 	return source === "cc-switch" ? "CC Switch 当前模型" : "Codex 官方默认模型";
+}
+
+export function getOpenCodeConfigSourceLabel(source: OpenCodeConfigSource): string {
+	return source === "cc-switch" ? "CC Switch" : "官方 OpenCode Zen";
+}
+
+export function getOpenCodeDefaultModelLabel(source: OpenCodeConfigSource): string {
+	return source === "cc-switch" ? "CC Switch 当前模型" : "OpenCode Zen 默认模型";
 }
 
 export function findPreferredCodexExecutable(): string {
@@ -141,12 +175,18 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	claudeConfigSource: "official",
 	claudeModel: "",
 	claudeReasoningEffort: "medium",
+	openCodeExecutable: findPreferredOpenCodeExecutable(),
+	openCodeConfigSource: "official",
+	openCodeModel: "opencode/mimo-v2.5-free",
+	openCodeReasoningEffort: "medium",
 	annotationBackendId: "auto",
 	annotationCodexModel: "",
 	annotationCodexReasoningEffort: "medium",
 	annotationCodexServiceTier: "default",
 	annotationClaudeModel: "",
 	annotationClaudeReasoningEffort: "medium",
+	annotationOpenCodeModel: "",
+	annotationOpenCodeReasoningEffort: "medium",
 	annotationMaxTokens: 900,
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
