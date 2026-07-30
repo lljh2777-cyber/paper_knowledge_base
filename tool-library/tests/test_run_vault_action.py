@@ -502,6 +502,144 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
 
 
 class ProcessTreeStopTests(unittest.TestCase):
+    def test_all_ai_write_actions_use_the_audited_runner(self) -> None:
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("elif spec.get(\"writes\"):", source)
+        self.assertIn("result = run_audited_write(", source)
+        self.assertNotIn(
+            'backend.backend_id in {"claude-code", "opencode"}\n'
+            "        and spec.get(\"writes\")",
+            source,
+        )
+
+    def test_stopped_codex_write_restores_pre_run_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "knowledge-base" / "wiki" / "methods" / "method.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("before\n", encoding="utf-8")
+            stop_file = root / "stop.signal"
+            child_code = (
+                "import pathlib,sys,time\n"
+                "target=pathlib.Path(sys.argv[1])\n"
+                "target.write_text('partial\\n', encoding='utf-8')\n"
+                "while True: time.sleep(0.1)\n"
+            )
+            result: list[int] = []
+
+            def run() -> None:
+                result.append(
+                    run_vault_action.run_audited_write(
+                        command=[
+                            sys.executable,
+                            "-c",
+                            child_code,
+                            str(target),
+                        ],
+                        project_root=root,
+                        timeout_seconds=30,
+                        prompt="test",
+                        stop_file=stop_file,
+                        backend=run_vault_action.get_backend("codex-cli"),
+                        action="synthesis",
+                        spec={"writes": True},
+                        run_id="codex-stop",
+                        python_value=sys.executable,
+                    )
+                )
+
+            runner = threading.Thread(target=run)
+            runner.start()
+            deadline = time.monotonic() + 5
+            while (
+                target.read_text(encoding="utf-8") != "partial\n"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+            self.assertEqual(target.read_text(encoding="utf-8"), "partial\n")
+            stop_file.write_text("stop\n", encoding="utf-8")
+            runner.join(timeout=10)
+
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(result, [130])
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+            manifest = (
+                root
+                / "tool-library"
+                / "output"
+                / "dashboard-runs"
+                / "changes"
+                / "codex-stop.json"
+            )
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertTrue(payload["rollback"]["succeeded"])
+            self.assertEqual(payload["result_code"], 130)
+
+    def test_successful_codex_write_is_validated_and_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "knowledge-base" / "wiki" / "methods" / "method.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("before\n", encoding="utf-8")
+            lint_script = root / "tool-library" / "scripts" / "lint_vault.py"
+            lint_script.parent.mkdir(parents=True)
+            lint_script.write_text(
+                "from pathlib import Path\n"
+                "import sys\n"
+                "report=Path(sys.argv[sys.argv.index('--report')+1])\n"
+                "report.parent.mkdir(parents=True, exist_ok=True)\n"
+                "report.write_text('{}\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            child_code = (
+                "import pathlib,sys\n"
+                "pathlib.Path(sys.argv[1]).write_text("
+                "'after\\n', encoding='utf-8')\n"
+            )
+
+            result = run_vault_action.run_audited_write(
+                command=[
+                    sys.executable,
+                    "-c",
+                    child_code,
+                    str(target),
+                ],
+                project_root=root,
+                timeout_seconds=30,
+                prompt="test",
+                stop_file=None,
+                backend=run_vault_action.get_backend("codex-cli"),
+                action="synthesis",
+                spec={"writes": True},
+                run_id="codex-success",
+                python_value=sys.executable,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
+            manifest = (
+                root
+                / "tool-library"
+                / "output"
+                / "dashboard-runs"
+                / "changes"
+                / "codex-success.json"
+            )
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(payload["result_code"], 0)
+            self.assertFalse(payload["rollback"]["attempted"])
+            self.assertEqual(payload["validators"][0]["status"], "passed")
+            changed_paths = {item["path"] for item in payload["changes"]}
+            self.assertIn(
+                "knowledge-base/wiki/methods/method.md",
+                changed_paths,
+            )
+            self.assertIn(
+                "tool-library/output/lint/latest.json",
+                changed_paths,
+            )
+
     def test_stop_file_terminates_spawned_process_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

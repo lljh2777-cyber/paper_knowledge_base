@@ -339,7 +339,7 @@ export class ActionInputModal extends Modal {
 					? "Claude Code：仅允许当前阶段目录写入，Bash 已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。"
 					: backendId === "opencode"
 						? "OpenCode：仅允许当前阶段写入，Shell 与外部目录访问已禁用；结束后生成变更清单并执行知识库体检，越界或失败时回滚。"
-					: "Codex CLI：按当前项目沙箱和 skill 阶段边界执行。",
+					: "Codex CLI：按操作拥有的目录执行；运行前建立快照，停止、失败、越界或后置体检失败时自动回滚。",
 			);
 		};
 		const updateSummary = () => {

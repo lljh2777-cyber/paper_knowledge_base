@@ -55,11 +55,17 @@ const queryViewSource = fs.readFileSync(
 	path.join(pluginSourceRoot, "views/query-wiki.ts"),
 	"utf8",
 );
+const dashboardViewSource = fs.readFileSync(
+	path.join(pluginSourceRoot, "views/dashboard.ts"),
+	"utf8",
+);
 const pluginStyles = fs.readFileSync(
 	path.resolve(pluginSourceRoot, "../styles.css"),
 	"utf8",
 );
 const entrySource = fs.readFileSync(path.join(pluginSourceRoot, "main.ts"), "utf8").trim();
+assert.match(dashboardViewSource, /rollbackEvent\?\.status === "rolled-back"/);
+assert.match(dashboardViewSource, /自动回滚不完整，请检查变更清单/);
 assert.strictEqual(
 	entrySource,
 	'export { default } from "./plugin";',

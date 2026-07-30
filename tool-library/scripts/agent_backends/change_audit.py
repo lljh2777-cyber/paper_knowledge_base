@@ -246,7 +246,7 @@ class WorkspaceChangeAudit:
         if any(_is_within(path, root) for root in self.policy.denied_roots):
             return False, "path is inside a denied root"
         if not any(_is_within(path, root) for root in self.policy.allowed_roots):
-            return False, "path is outside the stage-owned roots"
+            return False, "path is outside the action-owned roots"
         if kind == "deleted":
             return False, "file deletion is not permitted in stage-owned mode"
         if current is not None and current.kind == "symlink":
@@ -263,7 +263,11 @@ class WorkspaceChangeAudit:
             paths.update(self._walk_root(root))
         snapshot: dict[Path, FileState] = {}
         for path in paths:
-            state = self._read_state(path)
+            retain_backup = not any(
+                _is_within(path, root)
+                for root in self.policy.denied_roots
+            )
+            state = self._read_state(path, retain_backup=retain_backup)
             if state is not None:
                 snapshot[path] = state
         return snapshot
@@ -323,7 +327,11 @@ class WorkspaceChangeAudit:
             )
         return files
 
-    def _read_state(self, path: Path) -> FileState | None:
+    def _read_state(
+        self,
+        path: Path,
+        retain_backup: bool = True,
+    ) -> FileState | None:
         if path.is_symlink():
             target = os.readlink(path).encode("utf-8")
             return FileState(
@@ -340,7 +348,11 @@ class WorkspaceChangeAudit:
             content = path.read_bytes()
         except OSError:
             return None
-        backup = content if size <= _MAX_BACKUP_BYTES else None
+        backup = (
+            content
+            if retain_backup and size <= _MAX_BACKUP_BYTES
+            else None
+        )
         return FileState(
             path=path,
             kind="file",

@@ -615,6 +615,11 @@ export class DashboardView extends ItemView {
 				&& result.stdout.includes("Post-repair vault lint:");
 			const interrupted = result.exitCode === 130
 				|| (result.events || []).some((event) => event.type === "status" && event.stage === "stopped");
+			const rollbackEvent = [...(result.events || [])]
+				.reverse()
+				.find((event) => event.type === "change-manifest");
+			const rollbackCompleted = rollbackEvent?.status === "rolled-back";
+			const rollbackIncomplete = rollbackEvent?.status === "rollback-incomplete";
 			const status = interrupted
 				? "interrupted"
 				: result.exitCode === 0 || lintCompletedWithFindings || repairCompletedWithFindings
@@ -624,14 +629,32 @@ export class DashboardView extends ItemView {
 				status,
 				exitCode: result.exitCode,
 				output,
-				error: status === "failed" ? `进程退出码：${result.exitCode}` : status === "interrupted" ? "任务已手动停止" : "",
+				error: status === "failed"
+					? `进程退出码：${result.exitCode}`
+					: status === "interrupted"
+						? rollbackIncomplete
+							? "任务已手动停止，但自动回滚不完整，请检查变更清单"
+							: rollbackCompleted
+								? "任务已手动停止，修改已自动回滚"
+								: "任务已手动停止"
+						: "",
 			});
 			const completionMessage = lintCompletedWithFindings
 				? "知识库体检已完成，发现待处理项"
 				: repairCompletedWithFindings
 					? "体检修复已完成，仍有待处理项"
 					: `${action.label}已完成`;
-			new Notice(status === "done" ? completionMessage : status === "interrupted" ? `${action.label}已停止` : `${action.label}执行失败`);
+			new Notice(
+				status === "done"
+					? completionMessage
+					: status === "interrupted"
+						? rollbackIncomplete
+							? `${action.label}已停止，但回滚不完整`
+							: rollbackCompleted
+								? `${action.label}已停止，修改已回滚`
+								: `${action.label}已停止`
+						: `${action.label}执行失败`,
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			completedRun = await this.plugin.finishTaskRun(run.id, {

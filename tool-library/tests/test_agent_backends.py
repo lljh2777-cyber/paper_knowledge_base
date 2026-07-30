@@ -354,6 +354,15 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertTrue(stage_policy.require_change_manifest)
         self.assertEqual(full_policy.write_scope, "full")
         self.assertTrue(full_policy.rollback_on_failure)
+        self.assertNotIn(PROJECT_ROOT.resolve(), full_policy.allowed_roots)
+        self.assertIn(
+            (PROJECT_ROOT / "knowledge-base" / "wiki" / "sources").resolve(),
+            full_policy.allowed_roots,
+        )
+        self.assertIn(
+            (PROJECT_ROOT / "tool-library" / "output" / "lint").resolve(),
+            full_policy.allowed_roots,
+        )
 
     def test_access_policy_rejects_inconsistent_mode_and_scope(self) -> None:
         with self.assertRaisesRegex(ValueError, "read-only access"):
@@ -892,6 +901,35 @@ class AgentBackendProtocolTests(unittest.TestCase):
             self.assertEqual(audit.violations()[0].kind, "deleted")
             self.assertTrue(audit.rollback()["succeeded"])
             self.assertEqual(target.read_text(encoding="utf-8"), "content\n")
+
+    def test_change_audit_does_not_retain_denied_raw_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed_root = root / "knowledge-base" / "wiki" / "methods"
+            denied_root = root / "tool-library" / "raw"
+            allowed_root.mkdir(parents=True)
+            denied_root.mkdir(parents=True)
+            raw_file = denied_root / "source.pdf"
+            raw_file.write_bytes(b"immutable-source")
+            policy = BackendAccessPolicy(
+                mode="workspace-write",
+                write_scope="stage-owned",
+                allowed_roots=(allowed_root,),
+                denied_roots=(denied_root,),
+                rollback_on_failure=True,
+            )
+            audit = WorkspaceChangeAudit(
+                project_root=root,
+                policy=policy,
+                run_id="raw-memory",
+                action="synthesis",
+                backend_id="codex-cli",
+            )
+
+            audit.capture()
+
+            self.assertIn(raw_file.resolve(), audit.baseline)
+            self.assertIsNone(audit.baseline[raw_file.resolve()].backup)
 
 
 if __name__ == "__main__":

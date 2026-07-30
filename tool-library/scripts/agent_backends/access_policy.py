@@ -8,7 +8,27 @@ from typing import Any
 from .base import BackendAccessPolicy
 
 
-_STAGE_OWNED_ROOTS: dict[str, tuple[str, ...]] = {
+_ACTION_WRITE_ROOTS: dict[str, tuple[str, ...]] = {
+    "paper-ingest": (
+        "tool-library/metadata",
+        "tool-library/references.bib",
+        "tool-library/output/reports",
+        "knowledge-base/文献索引.md",
+        "knowledge-base/字段补全检查.md",
+        "knowledge-base/wiki/index.md",
+        "knowledge-base/wiki/log.md",
+    ),
+    "pdf-xray": (
+        "knowledge-base/wiki/sources",
+        "knowledge-base/wiki/assets/figures",
+        "knowledge-base/文献索引.md",
+        "knowledge-base/研究主题索引.md",
+        "knowledge-base/研究方法索引.md",
+        "knowledge-base/字段补全检查.md",
+        "knowledge-base/wiki/index.md",
+        "knowledge-base/wiki/log.md",
+        "tool-library/output/reports",
+    ),
     "code-analysis": (
         "knowledge-base/wiki/code",
         "knowledge-base/代码项目索引.md",
@@ -22,18 +42,29 @@ _STAGE_OWNED_ROOTS: dict[str, tuple[str, ...]] = {
         "knowledge-base/wiki/projects",
         "knowledge-base/wiki/mocs",
         "knowledge-base/wiki/synthesis",
+        "knowledge-base/wiki/code",
+        "knowledge-base/代码项目索引.md",
         "knowledge-base/研究主题索引.md",
         "knowledge-base/研究方法索引.md",
         "knowledge-base/wiki/index.md",
         "knowledge-base/wiki/log.md",
     ),
+    "vault-lint-fix": (
+        "knowledge-base/wiki",
+        "knowledge-base/文献索引.md",
+        "knowledge-base/研究主题索引.md",
+        "knowledge-base/研究方法索引.md",
+        "knowledge-base/代码项目索引.md",
+        "knowledge-base/R知识索引.md",
+        "knowledge-base/Linux与命令行索引.md",
+        "knowledge-base/字段补全检查.md",
+        "knowledge-base/.obsidian/graph.json",
+        "tool-library/metadata",
+        "tool-library/references.bib",
+    ),
 }
 
-_FULL_WRITE_ACTIONS = {
-    "paper-ingest",
-    "pdf-xray",
-    "vault-lint-fix",
-}
+_FULL_WRITE_ACTIONS = {"paper-ingest", "pdf-xray", "vault-lint-fix"}
 
 
 def build_action_access_policy(
@@ -58,26 +89,22 @@ def build_action_access_policy(
             ),
         )
 
-    if action in _STAGE_OWNED_ROOTS:
+    if action in _ACTION_WRITE_ROOTS:
         allowed_roots = tuple(
             (root / relative).resolve()
-            for relative in _STAGE_OWNED_ROOTS[action]
+            for relative in (
+                *_ACTION_WRITE_ROOTS[action],
+                "tool-library/output/lint",
+            )
         )
         return BackendAccessPolicy(
             mode="workspace-write",
-            write_scope="stage-owned",
+            write_scope=(
+                "full"
+                if action in _FULL_WRITE_ACTIONS
+                else "stage-owned"
+            ),
             allowed_roots=allowed_roots,
-            denied_roots=((root / "tool-library" / "raw").resolve(),),
-            post_validators=("vault-lint",),
-            require_change_manifest=True,
-            rollback_on_failure=True,
-        )
-
-    if action in _FULL_WRITE_ACTIONS:
-        return BackendAccessPolicy(
-            mode="workspace-write",
-            write_scope="full",
-            allowed_roots=(root,),
             denied_roots=((root / "tool-library" / "raw").resolve(),),
             post_validators=("vault-lint",),
             require_change_manifest=True,

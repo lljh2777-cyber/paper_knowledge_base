@@ -100,7 +100,12 @@ export interface DashboardProcessEvent {
 	type: string;
 	stage?: string;
 	mode?: string;
+	status?: string;
 	label?: string;
+	path?: string;
+	change_count?: number;
+	violation_count?: number;
+	rollback_error_count?: number;
 	delta?: string;
 	payload?: Record<string, unknown>;
 }

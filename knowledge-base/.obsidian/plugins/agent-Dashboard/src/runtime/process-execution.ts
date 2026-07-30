@@ -779,9 +779,10 @@ export class ProcessExecutionService {
 			timer = window.setTimeout(() => {
 				timedOut = true;
 				this.requestVaultActionStop(runId);
+				const cleanupGraceMs = action.writes ? 60000 : 10000;
 				window.setTimeout(() => {
 					if (this.state.activeProcesses.get(runId) === child && !child.killed) child.kill();
-				}, 10000);
+				}, cleanupGraceMs);
 			}, (timeoutSeconds + 15) * 1000);
 			child.stdin.end(input, "utf8");
 		});

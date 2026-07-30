@@ -60,7 +60,7 @@ sources / methods / concepts / code / projects / synthesis
 | PDF 深读 | `paper_xray` 智能体 | 完成全文证据检查后才允许标记为 `x-ray` |
 | 代码分析 | Codex CLI、Claude Code 或 OpenCode | 默认静态阅读；Claude/OpenCode 仅能在阶段目录白名单内写入知识页面 |
 | 知识库检索 | Codex CLI、Claude Code、OpenCode 或 Direct API | 只读检索与连续对话；Claude/OpenCode 仅在“联网搜索”模式开放网络工具 |
-| 综合分析 | Codex CLI、Claude Code 或 OpenCode | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面；非 Codex 后端执行后置审计 |
+| 综合分析 | Codex CLI、Claude Code 或 OpenCode | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面；所有 CLI 后端均执行变更审计 |
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
@@ -79,7 +79,7 @@ sources / methods / concepts / code / projects / synthesis
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
 
-CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入，并由宿主生成变更清单、审计路径、执行后置体检和失败回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
+CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入。所有 AI 写入任务都由宿主在运行前建立操作级快照，完成后生成变更清单并执行知识库体检；手动停止、进程失败、越界写入或验证失败时自动回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
 
 OpenCode 的模型目录由插件直接运行 `opencode models` 获取；连接测试和实际任务统一通过 Python runner 执行。这样可以统一处理 JSONL、超时、Windows 进程树终止和错误分类。若 Python 或 runner 路径无效，设置页会显示明确的配置错误，而不会误报为 OpenCode 超时。
 

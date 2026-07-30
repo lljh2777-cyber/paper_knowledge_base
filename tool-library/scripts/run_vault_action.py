@@ -1971,7 +1971,7 @@ def _project_relative(path: Path, project_root: Path) -> str:
         return str(path)
 
 
-def run_audited_stage_write(
+def run_audited_write(
     command: list[str],
     project_root: Path,
     timeout_seconds: int,
@@ -1983,7 +1983,7 @@ def run_audited_stage_write(
     run_id: str,
     python_value: str,
 ) -> int:
-    """Run a stage-owned write with host audit, validation, and rollback."""
+    """Run an allow-listed write with host audit, validation, and rollback."""
 
     policy = build_action_access_policy(action, spec, project_root)
     safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", run_id).strip("-")
@@ -1996,8 +1996,55 @@ def run_audited_stage_write(
         action=action,
         backend_id=backend.backend_id,
     )
+
+    def rollback_and_emit(
+        result_code: int,
+        violations: list[Any],
+        reason: str,
+    ) -> bool:
+        rollback = audit.rollback()
+        rollback_succeeded = bool(rollback["succeeded"])
+        manifest = audit.write_manifest(result_code)
+        emit_dashboard_event(
+            {
+                "type": "change-manifest",
+                "status": (
+                    "rolled-back"
+                    if rollback_succeeded
+                    else "rollback-incomplete"
+                ),
+                "path": _project_relative(manifest, project_root),
+                "change_count": len(audit.changes),
+                "violation_count": len(violations),
+                "rollback_error_count": len(rollback["errors"]),
+                "label": (
+                    "任务修改已自动回滚"
+                    if rollback_succeeded
+                    else "自动回滚不完整，请检查变更清单"
+                ),
+            }
+        )
+        print(
+            f"{reason} "
+            + (
+                "Captured changes were rolled back."
+                if rollback_succeeded
+                else "Rollback was incomplete; inspect the change manifest."
+            ),
+            file=sys.stderr,
+        )
+        return rollback_succeeded
+
     print("Capturing pre-run workspace snapshot.", file=sys.stderr)
     audit.capture()
+    if stop_requested(stop_file):
+        audit.inspect()
+        rollback_and_emit(
+            130,
+            audit.violations(),
+            "Task was stopped before the model process started.",
+        )
+        return 130
     if backend.backend_id == "opencode":
         result = run_structured_backend_process(
             command,
@@ -2019,23 +2066,11 @@ def run_audited_stage_write(
     violations = audit.violations()
     if result != 0 or violations:
         if policy.rollback_on_failure:
-            rollback = audit.rollback()
-            print(
-                "Stage changes rolled back."
-                if rollback["succeeded"]
-                else "Stage rollback was incomplete; inspect the manifest.",
-                file=sys.stderr,
+            rollback_and_emit(
+                result if result != 0 else 2,
+                violations,
+                "Task stopped, failed, or crossed its write boundary.",
             )
-        manifest = audit.write_manifest(result if result != 0 else 2)
-        emit_dashboard_event(
-            {
-                "type": "change-manifest",
-                "status": "rolled-back",
-                "path": _project_relative(manifest, project_root),
-                "change_count": len(audit.changes),
-                "violation_count": len(violations),
-            }
-        )
         if violations:
             print("Write boundary violations:", file=sys.stderr)
             for violation in violations:
@@ -2047,6 +2082,7 @@ def run_audited_stage_write(
                 )
         return result if result != 0 else 2
 
+    accepted_result_code = 0
     for validator in policy.post_validators:
         if validator != "vault-lint":
             audit.add_validator(
@@ -2055,16 +2091,10 @@ def run_audited_stage_write(
                 "failed",
                 "unknown post-validator",
             )
-            audit.rollback()
-            manifest = audit.write_manifest(2)
-            emit_dashboard_event(
-                {
-                    "type": "change-manifest",
-                    "status": "rolled-back",
-                    "path": _project_relative(manifest, project_root),
-                    "change_count": len(audit.changes),
-                    "violation_count": 0,
-                }
+            rollback_and_emit(
+                2,
+                [],
+                "Unknown post-validator.",
             )
             return 2
         python = resolve_executable(python_value, "Python")
@@ -2078,19 +2108,17 @@ def run_audited_stage_write(
                 "failed",
                 f"validator not found: {lint_script}",
             )
-            audit.rollback()
-            manifest = audit.write_manifest(2)
-            emit_dashboard_event(
-                {
-                    "type": "change-manifest",
-                    "status": "rolled-back",
-                    "path": _project_relative(manifest, project_root),
-                    "change_count": len(audit.changes),
-                    "violation_count": 0,
-                }
+            rollback_and_emit(
+                2,
+                [],
+                "Post-validator was unavailable.",
             )
             return 2
-        print("\nPost-write vault lint:")
+        print(
+            "\nPost-repair vault lint:"
+            if action == "vault-lint-fix"
+            else "\nPost-write vault lint:"
+        )
         lint_result = run_process(
             [
                 python,
@@ -2114,6 +2142,8 @@ def run_audited_stage_write(
                 lint_result,
                 "passed" if lint_result == 0 else "completed-with-findings",
             )
+            if action == "vault-lint-fix" and lint_result == 1:
+                accepted_result_code = 1
             continue
         audit.add_validator(
             validator,
@@ -2121,20 +2151,25 @@ def run_audited_stage_write(
             "failed",
             "validator execution failed or was stopped",
         )
-        audit.rollback()
-        manifest = audit.write_manifest(lint_result)
-        emit_dashboard_event(
-            {
-                "type": "change-manifest",
-                "status": "rolled-back",
-                "path": _project_relative(manifest, project_root),
-                "change_count": len(audit.changes),
-                "violation_count": 0,
-            }
+        audit.inspect()
+        rollback_and_emit(
+            lint_result,
+            audit.violations(),
+            "Post-validator failed or was stopped.",
         )
         return lint_result
 
-    manifest = audit.write_manifest(0)
+    audit.inspect()
+    post_validation_violations = audit.violations()
+    if post_validation_violations:
+        rollback_and_emit(
+            2,
+            post_validation_violations,
+            "Post-validation changes crossed the action write boundary.",
+        )
+        return 2
+
+    manifest = audit.write_manifest(accepted_result_code)
     emit_dashboard_event(
         {
             "type": "change-manifest",
@@ -2144,7 +2179,7 @@ def run_audited_stage_write(
             "violation_count": 0,
         }
     )
-    return 0
+    return accepted_result_code
 
 
 def dry_run_payload(
@@ -2523,11 +2558,8 @@ def main() -> int:
             stop_file,
             backend,
         )
-    elif (
-        backend.backend_id in {"claude-code", "opencode"}
-        and spec.get("writes")
-    ):
-        result = run_audited_stage_write(
+    elif spec.get("writes"):
+        result = run_audited_write(
             command=command,
             project_root=project_root,
             timeout_seconds=args.timeout_seconds,
@@ -2557,7 +2589,7 @@ def main() -> int:
                 prompt,
                 stop_file,
             )
-    if result != 0 or not spec.get("post_validate"):
+    if result != 0 or not spec.get("post_validate") or spec.get("writes"):
         return result
 
     python = resolve_executable(args.python, "Python")

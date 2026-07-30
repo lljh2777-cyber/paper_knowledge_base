@@ -4,6 +4,18 @@
 
 Agent Dashboard 核心只处理统一任务、统一事件、生命周期和权限边界，不直接理解 Codex CLI、Claude Code、OpenCode 或其他工具的专有参数。每种命令行工具通过独立适配器完成命令构造和事件解析。
 
+所有 AI 写入任务共用宿主审计事务，不以 CLI 类型区分。runner 在模型进程启动
+前按操作拥有的目录建立文件快照；手动停止、超时、进程失败、越界写入、删除
+操作或后置体检失败时恢复被修改/删除的文件并移除本轮新建文件。回滚结果写入
+`tool-library/output/dashboard-runs/changes/<run-id>.json`。若个别文件因体积、
+权限或类型变化无法恢复，事件状态必须为 `rollback-incomplete`，界面不得显示
+为完整回滚。
+
+快照范围按操作确定，避免扫描整个项目：入库覆盖 metadata、BibTeX、文献索引
+和日志；PDF 深读覆盖 source note、论文图像及相关索引；代码分析和综合分析
+覆盖各自阶段目录；体检修复覆盖 wiki、顶层索引、metadata 和允许修复的
+Obsidian 图谱配置。`tool-library/raw/` 只做不可变源检查，不作为正常写入范围。
+
 当前协议版本为 `1.0`。内置实现是：
 
 ```text
