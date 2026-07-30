@@ -100,8 +100,15 @@ assert.match(popoverSource, /手动批注/);
 assert.match(popoverSource, /AI 解释/);
 assert.match(popoverSource, /MarkdownRenderer\.render/);
 assert.match(popoverSource, /cancel\.addEventListener\("click", \(\) => this\.renderChooser\(\)\)/);
+assert.match(popoverSource, /data-agent-drag-handle/);
+assert.match(popoverSource, /header\.addEventListener\("pointerdown"/);
+assert.match(popoverSource, /document\.addEventListener\("pointermove"/);
+assert.match(popoverSource, /private clampPosition/);
+assert.match(popoverSource, /if \(this\.manualPosition\)/);
 assert.doesNotMatch(popoverSource, /text:\s*"关闭"/);
 assert.match(styles, /a\.internal-link\[data-href\^="wiki\/annotations\/"\]/);
+assert.match(styles, /\.agent-annotation-header[\s\S]*cursor:\s*grab/);
+assert.match(styles, /\.agent-annotation-popover\.is-dragging[\s\S]*cursor:\s*grabbing/);
 const repairedTableSource = fs.readFileSync(
 	path.join(projectRoot, "knowledge-base/wiki/sources/cho_pan-cancer_2026.md"),
 	"utf8",

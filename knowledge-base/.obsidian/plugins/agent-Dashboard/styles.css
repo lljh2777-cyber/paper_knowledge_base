@@ -3624,6 +3624,9 @@
 	gap: 12px;
 	padding-bottom: 11px;
 	border-bottom: 1px solid var(--background-modifier-border);
+	cursor: grab;
+	touch-action: none;
+	user-select: none;
 }
 
 .agent-annotation-header > div {
@@ -3648,6 +3651,11 @@
 
 .agent-annotation-header button {
 	flex: 0 0 auto;
+	cursor: pointer;
+}
+
+.agent-annotation-popover.is-dragging .agent-annotation-header {
+	cursor: grabbing;
 }
 
 .agent-annotation-choice-list {

@@ -46,6 +46,10 @@ export class AnnotationPopover extends Component {
 	private closed = true;
 	private outsideListener: ((event: PointerEvent) => void) | null = null;
 	private keyListener: ((event: KeyboardEvent) => void) | null = null;
+	private resizeListener: (() => void) | null = null;
+	private dragMoveListener: ((event: PointerEvent) => void) | null = null;
+	private dragEndListener: ((event: PointerEvent) => void) | null = null;
+	private manualPosition: { left: number; top: number } | null = null;
 
 	constructor(options: AnnotationPopoverOptions) {
 		super();
@@ -79,6 +83,8 @@ export class AnnotationPopover extends Component {
 				this.requestClose();
 			}
 		};
+		this.resizeListener = () => this.position();
+		window.addEventListener("resize", this.resizeListener);
 		window.setTimeout(() => {
 			if (this.closed) return;
 			document.addEventListener("pointerdown", this.outsideListener!, true);
@@ -102,6 +108,12 @@ export class AnnotationPopover extends Component {
 			document.removeEventListener("keydown", this.keyListener, true);
 			this.keyListener = null;
 		}
+		if (this.resizeListener) {
+			window.removeEventListener("resize", this.resizeListener);
+			this.resizeListener = null;
+		}
+		this.stopDragging();
+		this.manualPosition = null;
 		this.element?.remove();
 		this.element = null;
 		this.unload();
@@ -449,7 +461,10 @@ export class AnnotationPopover extends Component {
 	}
 
 	private renderHeader(parent: HTMLElement, selectedText: string, subtitle: string): void {
-		const header = parent.createDiv({ cls: "agent-annotation-header" });
+		const header = parent.createDiv({
+			cls: "agent-annotation-header",
+			attr: { "data-agent-drag-handle": "true" },
+		});
 		const title = header.createDiv();
 		title.createEl("strong", { text: selectedText.slice(0, 120) });
 		title.createSpan({ text: subtitle });
@@ -462,6 +477,7 @@ export class AnnotationPopover extends Component {
 		});
 		setIcon(close, "x");
 		close.addEventListener("click", () => this.requestClose());
+		header.addEventListener("pointerdown", (event) => this.startDragging(event));
 	}
 
 	private renderTextSection(
@@ -503,6 +519,68 @@ export class AnnotationPopover extends Component {
 		return this.element;
 	}
 
+	private startDragging(event: PointerEvent): void {
+		if (event.button !== 0 || !this.element) return;
+		const target = event.target;
+		if (
+			!(target instanceof Element)
+			|| target.closest("button, input, textarea, select, a")
+		) {
+			return;
+		}
+		event.preventDefault();
+		this.stopDragging();
+		const pointerId = event.pointerId;
+		const box = this.element.getBoundingClientRect();
+		const origin = { left: box.left, top: box.top };
+		const start = { x: event.clientX, y: event.clientY };
+		this.manualPosition = origin;
+		this.element.classList.add("is-dragging");
+		this.dragMoveListener = (moveEvent) => {
+			if (moveEvent.pointerId !== pointerId || !this.element) return;
+			moveEvent.preventDefault();
+			const next = this.clampPosition(
+				origin.left + moveEvent.clientX - start.x,
+				origin.top + moveEvent.clientY - start.y,
+			);
+			this.manualPosition = next;
+			this.element.style.left = `${next.left}px`;
+			this.element.style.top = `${next.top}px`;
+		};
+		this.dragEndListener = (endEvent) => {
+			if (endEvent.pointerId !== pointerId) return;
+			this.stopDragging();
+		};
+		document.addEventListener("pointermove", this.dragMoveListener, true);
+		document.addEventListener("pointerup", this.dragEndListener, true);
+		document.addEventListener("pointercancel", this.dragEndListener, true);
+	}
+
+	private stopDragging(): void {
+		if (this.dragMoveListener) {
+			document.removeEventListener("pointermove", this.dragMoveListener, true);
+			this.dragMoveListener = null;
+		}
+		if (this.dragEndListener) {
+			document.removeEventListener("pointerup", this.dragEndListener, true);
+			document.removeEventListener("pointercancel", this.dragEndListener, true);
+			this.dragEndListener = null;
+		}
+		this.element?.classList.remove("is-dragging");
+	}
+
+	private clampPosition(left: number, top: number): { left: number; top: number } {
+		if (!this.element) return { left, top };
+		const margin = 12;
+		const box = this.element.getBoundingClientRect();
+		const maxLeft = Math.max(margin, window.innerWidth - box.width - margin);
+		const maxTop = Math.max(margin, window.innerHeight - box.height - margin);
+		return {
+			left: Math.min(Math.max(margin, left), maxLeft),
+			top: Math.min(Math.max(margin, top), maxTop),
+		};
+	}
+
 	private position(): void {
 		if (!this.element) return;
 		window.requestAnimationFrame(() => {
@@ -512,6 +590,16 @@ export class AnnotationPopover extends Component {
 			const width = Math.min(520, window.innerWidth - margin * 2);
 			this.element.style.width = `${Math.max(300, width)}px`;
 			const box = this.element.getBoundingClientRect();
+			if (this.manualPosition) {
+				const next = this.clampPosition(
+					this.manualPosition.left,
+					this.manualPosition.top,
+				);
+				this.manualPosition = next;
+				this.element.style.left = `${next.left}px`;
+				this.element.style.top = `${next.top}px`;
+				return;
+			}
 			const left = Math.min(
 				Math.max(margin, this.anchorRect.left),
 				Math.max(margin, window.innerWidth - box.width - margin),
