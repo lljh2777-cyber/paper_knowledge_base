@@ -270,6 +270,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--python", default=DEFAULT_PYTHON)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
+    parser.add_argument(
+        "--retrieval-mode",
+        choices=("vault", "web"),
+        default="vault",
+        help="Enable live web tools for allow-listed read-only actions.",
+    )
     parser.add_argument("--stop-file", type=Path)
     parser.add_argument(
         "--run-id",
@@ -394,9 +400,41 @@ def spawn_managed_process(
     command: list[str],
     **options: Any,
 ) -> subprocess.Popen[Any]:
-    process = subprocess.Popen(command, **options)
+    prepared_command = prepare_cli_command(command)
+    process = subprocess.Popen(prepared_command, **options)
     attach_windows_job(process)
     return process
+
+
+def prepare_cli_command(command: list[str]) -> list[str]:
+    """Run npm Windows shims without enabling shell command parsing."""
+
+    if os.name != "nt" or not command:
+        return command
+    executable = Path(command[0])
+    if executable.suffix.lower() not in {".cmd", ".bat"}:
+        return command
+    powershell_shim = executable.with_suffix(".ps1")
+    if not powershell_shim.is_file():
+        return command
+    powershell = (
+        Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    return [
+        str(powershell),
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(powershell_shim),
+        *command[1:],
+    ]
 
 
 def build_command_environment(command: list[str]) -> dict[str, str]:
@@ -2283,6 +2321,8 @@ def main() -> int:
         raw_user_input,
         project_root,
     )
+    if args.action == "annotation-explain":
+        retrieval_mode = args.retrieval_mode
 
     if args.dry_run:
         print(
@@ -2351,7 +2391,7 @@ def main() -> int:
             f"{backend.label} does not declare structured-output capability"
         )
     if (
-        args.action == "vault-retrieval"
+        args.action in {"vault-retrieval", "annotation-explain"}
         and retrieval_mode == "web"
         and not backend.capabilities.web_search
     ):

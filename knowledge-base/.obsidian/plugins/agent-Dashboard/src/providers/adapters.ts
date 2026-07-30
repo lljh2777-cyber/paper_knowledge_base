@@ -456,8 +456,9 @@ export class OpenAICompatibleProvider extends LLMProvider {
 					"当前配置没有启用 Qwen3.7-Plus Chat Completions 联网搜索",
 				);
 			}
-			const strategy = ["turbo", "max", "agent"].includes(webSearch.searchStrategy)
-				? webSearch.searchStrategy
+			const requestedStrategy = request.webSearchStrategy || webSearch.searchStrategy;
+			const strategy = ["turbo", "max", "agent"].includes(requestedStrategy)
+				? requestedStrategy
 				: "turbo";
 			const searchOptions: NonNullable<ProviderRequestBody["search_options"]> = {
 				forced_search: webSearch.forcedSearch !== false,
@@ -484,7 +485,8 @@ export class OpenAICompatibleProvider extends LLMProvider {
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request),
-			timeoutMs: webSearchTimeout ? webSearchTimeout * 1000 : undefined,
+			timeoutMs: options.timeoutMs
+				|| (webSearchTimeout ? webSearchTimeout * 1000 : undefined),
 			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");

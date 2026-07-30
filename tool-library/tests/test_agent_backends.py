@@ -312,6 +312,22 @@ class AgentBackendProtocolTests(unittest.TestCase):
             "rate-limit",
         )
 
+    def test_windows_npm_cli_shim_uses_powershell_without_shell(self) -> None:
+        from run_vault_action import prepare_cli_command
+
+        with mock.patch("pathlib.Path.is_file", return_value=True):
+            command = prepare_cli_command(
+                [r"C:\Users\example\AppData\Roaming\npm\claude.cmd", "--version"]
+            )
+
+        self.assertTrue(command[0].lower().endswith("powershell.exe"))
+        self.assertIn("-File", command)
+        self.assertIn(
+            r"C:\Users\example\AppData\Roaming\npm\claude.ps1",
+            command,
+        )
+        self.assertEqual(command[-1], "--version")
+
     def test_action_access_policy_distinguishes_read_and_write_scopes(
         self,
     ) -> None:
@@ -515,6 +531,75 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn("WebSearch", denied)
         self.assertIn("WebFetch", denied)
         self.assertEqual(command[-2:], ["--output-format", "text"])
+
+    def test_claude_annotation_web_mode_only_opens_web_tools(self) -> None:
+        backend = get_backend("claude-code")
+        request = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            retrieval_mode="web",
+            access_policy=BackendAccessPolicy(
+                mode="read-only",
+                write_scope="none",
+                allowed_roots=(PROJECT_ROOT,),
+            ),
+        )
+
+        command = backend.build_command("claude.exe", request)
+
+        tools = command[command.index("--tools") + 1]
+        denied = command[command.index("--disallowedTools") + 1]
+        self.assertEqual(tools, "WebSearch,WebFetch")
+        self.assertNotIn("Read", tools)
+        self.assertNotIn("WebSearch", denied)
+        self.assertIn("Write", denied)
+
+    def test_codex_annotation_web_mode_enables_live_search_without_schema(
+        self,
+    ) -> None:
+        backend = get_backend("codex-cli")
+        request = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+            service_tier="default",
+            retrieval_mode="web",
+        )
+
+        command = backend.build_command("codex.exe", request)
+
+        self.assertIn('web_search="live"', command)
+        self.assertNotIn("--output-schema", command)
+        self.assertNotIn("--json", command)
+
+    def test_opencode_annotation_web_mode_uses_read_only_web_profile(self) -> None:
+        backend = get_backend("opencode")
+        request = BackendCommandRequest(
+            action="annotation-explain",
+            agent="annotation-assistant",
+            project_root=PROJECT_ROOT,
+            sandbox="read-only",
+            writes=False,
+            model="",
+            reasoning_effort="medium",
+            service_tier="default",
+            retrieval_mode="web",
+        )
+
+        command = backend.build_command("opencode.exe", request)
+
+        title = command[command.index("--title") + 1]
+        self.assertEqual(title, "agent-dashboard:read-only-web")
 
     def test_claude_adapter_separates_official_and_cc_switch_settings(self) -> None:
         backend = get_backend("claude-code")

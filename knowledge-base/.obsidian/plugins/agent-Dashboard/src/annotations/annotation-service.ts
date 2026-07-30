@@ -12,6 +12,7 @@ import {
 	getClaudeDefaultModelLabel,
 	getOpenCodeDefaultModelLabel,
 } from "../runtime/settings";
+import { profileSupportsDirectWebSearch } from "../providers/profile";
 import type {
 	AnnotationDraft,
 	AnnotationExplanation,
@@ -428,10 +429,18 @@ export class AnnotationService {
 		selection: Pick<AnnotationSelection, "selectedText" | "section" | "context" | "sourcePath">,
 		registerCancel: (cancel: () => void) => void,
 	): Promise<AnnotationExplanation> {
+		const webSearchEnabled = this.plugin.settings.annotationWebSearchEnabled === true;
+		const webSearchTimeoutSeconds = Math.max(
+			15,
+			Math.min(45, this.plugin.settings.annotationWebSearchTimeoutSeconds || 30),
+		);
 		const system = [
 			"你是论文阅读批注助手。",
 			"请用简体中文解释选中的词句在当前段落和文章语境中具体指什么。",
 			"目标是帮助读者理解，不做跨文献综述，不创建知识节点，不修改文件。",
+			webSearchEnabled
+				? "允许进行浅层联网查证：最多围绕 2 个检索问题，最多采用 3 个权威来源，不追踪来源中的二级链接；优先回答当前语境，不扩展成专题调研。"
+				: "不要联网搜索；仅根据提供的段落、文章语境和模型已有知识解释。",
 			"直接给出清晰的初步解释，通常 2 至 4 个短段落；不要使用 Markdown 标题或列表，不要输出流程报告、证据分类或客套话。",
 		].join("\n");
 		const user = [
@@ -443,12 +452,23 @@ export class AnnotationService {
 			selection.context,
 		].filter(Boolean).join("\n");
 		const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
-		const directProfile = configuredBackend === "auto"
+		const selectedDirectProfile = configuredBackend === "auto"
 			? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId)
 			: !["codex-cli", "claude-code", "opencode"].includes(configuredBackend)
 				? this.plugin.getProviderProfile(configuredBackend)
 				: null;
+		const directProfile = webSearchEnabled
+			&& configuredBackend === "auto"
+			&& selectedDirectProfile
+			&& !profileSupportsDirectWebSearch(selectedDirectProfile)
+			? null
+			: selectedDirectProfile;
 		if (directProfile?.lastTest?.ok) {
+			if (webSearchEnabled && !profileSupportsDirectWebSearch(directProfile)) {
+				throw new Error(
+					"当前 Direct API 配置未通过联网搜索测试；请关闭批注联网搜索，或改用支持联网的 Qwen3.7-Plus/Codex CLI/Claude Code/OpenCode 后端",
+				);
+			}
 			const provider = this.plugin.createLLMProvider(directProfile);
 			const result = await provider.complete(
 				{
@@ -458,8 +478,13 @@ export class AnnotationService {
 						{ role: "user", content: user },
 					],
 					maxTokens: this.plugin.settings.annotationMaxTokens,
+					webSearch: webSearchEnabled,
+					webSearchStrategy: webSearchEnabled ? "turbo" : undefined,
 				},
-				{ registerCancel },
+				{
+					registerCancel,
+					timeoutMs: webSearchEnabled ? webSearchTimeoutSeconds * 1000 : undefined,
+				},
 			);
 			const text = String(result.text || "").trim();
 			if (!text) throw new Error("模型返回了空解释");
@@ -503,6 +528,10 @@ export class AnnotationService {
 			cliBackend,
 			annotationOverrides,
 		);
+		executionConfig.retrievalMode = webSearchEnabled ? "web" : "vault";
+		executionConfig.timeoutSeconds = webSearchEnabled
+			? webSearchTimeoutSeconds
+			: undefined;
 		const result = await this.plugin.runVaultAction(
 			runId,
 			action,

@@ -137,8 +137,12 @@ class ClaudeCodeBackend:
             )
 
         needs_vault_read = request.action == "vault-retrieval"
+        is_web_annotation = (
+            request.action == "annotation-explain"
+            and request.retrieval_mode == "web"
+        )
         allows_web = (
-            needs_vault_read
+            (needs_vault_read or is_web_annotation)
             and request.retrieval_mode == "web"
         )
         command = [
@@ -184,10 +188,10 @@ class ClaudeCodeBackend:
                     ),
                 ]
             )
-        elif needs_vault_read:
+        elif needs_vault_read or is_web_annotation:
             retrieval_tools = ",".join(
                 [
-                    _READ_TOOLS,
+                    *([_READ_TOOLS] if needs_vault_read else ()),
                     *(_WEB_TOOLS if allows_web else ()),
                 ]
             )

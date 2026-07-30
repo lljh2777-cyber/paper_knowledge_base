@@ -24,16 +24,20 @@ import {
 	modelIsQwen37Plus,
 	normalizeAssignedSites,
 	profileHasConfiguredQwenWebSearch,
+	profileSupportsDirectWebSearch,
 	type ProviderProfile,
 } from "../providers/profile";
 import type { ProviderModel } from "../providers/shared";
 import {
 	DEFAULT_SETTINGS,
+	describeCliExecutable,
+	detectCliExecutable,
 	getClaudeConfigSourceLabel,
 	getClaudeDefaultModelLabel,
 	getCodexConfigSourceLabel,
 	getOpenCodeConfigSourceLabel,
 	getOpenCodeDefaultModelLabel,
+	type CliExecutableKind,
 } from "../runtime/settings";
 import type {
 	PluginHost,
@@ -212,43 +216,39 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
-		new Setting(containerEl)
-			.setName("Codex 可执行文件")
-			.setDesc("用于文献、代码、检索和综合任务。默认自动选择当前 Codex 应用携带的最新 CLI；手动填写的外部路径会保留。")
-			.addText((text) =>
-				text
-					.setPlaceholder("codex.exe")
-					.setValue(this.plugin.settings.codexExecutable)
-					.onChange(async (value) => {
-						this.plugin.settings.codexExecutable = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Claude Code 可执行文件")
-			.setDesc("用于只读知识库检索与批注解释。原生安装通常位于用户目录的 .local\\bin\\claude.exe。")
-			.addText((text) =>
-				text
-					.setPlaceholder("C:\\Users\\<user>\\.local\\bin\\claude.exe")
-					.setValue(this.plugin.settings.claudeExecutable)
-					.onChange(async (value) => {
-						this.plugin.settings.claudeExecutable = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("OpenCode 可执行文件")
-			.setDesc("用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。")
-			.addText((text) =>
-				text
-					.setPlaceholder("C:\\Users\\<user>\\.opencode\\bin\\opencode.exe")
-					.setValue(this.plugin.settings.openCodeExecutable)
-					.onChange(async (value) => {
-						this.plugin.settings.openCodeExecutable = value.trim();
-						this.plugin.invalidateCliModelDiscovery("opencode");
-						await this.plugin.saveSettings();
-					})
-			);
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "codex",
+			name: "Codex 可执行文件",
+			description: "用于文献、代码、检索和综合任务；有效的手动路径不会在启动时被覆盖。",
+			placeholder: "codex.exe",
+			getValue: () => this.plugin.settings.codexExecutable,
+			setValue: (value) => {
+				this.plugin.settings.codexExecutable = value;
+				this.plugin.invalidateCliModelDiscovery("codex-cli");
+			},
+		});
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "claude",
+			name: "Claude Code 可执行文件",
+			description: "用于知识库检索、批注解释和受审计的阶段所有权写入。",
+			placeholder: "claude.exe",
+			getValue: () => this.plugin.settings.claudeExecutable,
+			setValue: (value) => {
+				this.plugin.settings.claudeExecutable = value;
+				this.plugin.invalidateCliModelDiscovery("claude-code");
+			},
+		});
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "opencode",
+			name: "OpenCode 可执行文件",
+			description: "用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。",
+			placeholder: "opencode.exe",
+			getValue: () => this.plugin.settings.openCodeExecutable,
+			setValue: (value) => {
+				this.plugin.settings.openCodeExecutable = value;
+				this.plugin.invalidateCliModelDiscovery("opencode");
+			},
+		});
 		new Setting(containerEl)
 			.setName("Python 可执行文件")
 			.setDesc("用于统一 runner、知识库体检和 Python 代码练习。")
@@ -312,6 +312,66 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					new Notice(result.message, 8000);
 				})
 			);
+	}
+
+	private renderCliExecutableSetting(
+		containerEl: HTMLElement,
+		options: {
+			kind: CliExecutableKind;
+			name: string;
+			description: string;
+			placeholder: string;
+			getValue: () => string;
+			setValue: (value: string) => void;
+		},
+	): void {
+		const setting = new Setting(containerEl).setName(options.name);
+		const refreshDescription = (): void => {
+			const detection = describeCliExecutable(
+				options.kind,
+				options.getValue(),
+			);
+			setting.setDesc(
+				`${options.description} 自动检测来源：${detection.sourceLabel}。`,
+			);
+		};
+		setting.addText((text) =>
+			text
+				.setPlaceholder(options.placeholder)
+				.setValue(options.getValue())
+				.onChange(async (value) => {
+					options.setValue(value.trim());
+					refreshDescription();
+					await this.plugin.saveSettings();
+				})
+		);
+		setting.addButton((button) =>
+			button
+				.setButtonText("重新检测")
+				.setTooltip(`重新检测 ${options.name}`)
+				.onClick(async () => {
+					const detected = detectCliExecutable(
+						options.kind,
+						options.getValue(),
+					);
+					if (!detected.found) {
+						new Notice(
+							`未检测到 ${options.name}；已保留当前手动路径。`,
+							6000,
+						);
+						refreshDescription();
+						return;
+					}
+					options.setValue(detected.executable);
+					await this.plugin.saveSettings();
+					new Notice(
+						`${options.name}：${detected.sourceLabel}`,
+						5000,
+					);
+					this.display();
+				})
+		);
+		refreshDescription();
 	}
 
 	private renderCodexSettings(containerEl: HTMLElement): void {
@@ -651,7 +711,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsPageHeader(
 			containerEl,
 			"批注 AI",
-			"单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读，不开放文件或联网工具。",
+			"单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读；联网仅按浅层、短时预算开放。",
 			true,
 		);
 		const verifiedProfiles = this.plugin.settings.providerProfiles.filter(
@@ -678,6 +738,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						this.display();
 					});
 			});
+		this.renderAnnotationWebSearchSettings(containerEl, backendId, verifiedProfiles);
 
 		if (backendId === "auto") {
 			const activeProfile = verifiedProfiles.find(
@@ -725,6 +786,68 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					})
 			);
 		this.renderAnnotationTokenSetting(containerEl, true);
+	}
+
+	private renderAnnotationWebSearchSettings(
+		containerEl: HTMLElement,
+		backendId: string,
+		verifiedProfiles: ProviderProfile[],
+	): void {
+		const directProfile = backendId === "auto"
+			? verifiedProfiles.find(
+				(profile) => profile.id === this.plugin.settings.activeProviderId,
+			)
+			: verifiedProfiles.find((profile) => profile.id === backendId);
+		const directApiUnsupported = Boolean(
+			directProfile && !profileSupportsDirectWebSearch(directProfile),
+		);
+		new Setting(containerEl)
+			.setName("浅层联网解释")
+			.setDesc(
+				directApiUnsupported
+					? backendId === "auto"
+						? `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；自动模式启用后将回退到 Codex CLI。`
+						: `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；启用后批注请求会明确报错，不会伪装成联网结果。`
+					: "关闭时只解释当前段落。启用后最多围绕 2 个检索问题、采用不超过 3 个权威来源，不追踪二级链接。",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.annotationWebSearchEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationWebSearchEnabled = value;
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+		if (!this.plugin.settings.annotationWebSearchEnabled) return;
+
+		const timeoutSetting = new Setting(containerEl)
+			.setName("联网时间上限")
+			.setDesc(
+				`仅限制单次批注解释的联网与生成总时间。当前：${this.plugin.settings.annotationWebSearchTimeoutSeconds} 秒。`,
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(15, 45, 5)
+					.setDynamicTooltip()
+					.setValue(this.plugin.settings.annotationWebSearchTimeoutSeconds)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationWebSearchTimeoutSeconds = value;
+						timeoutSetting.setDesc(`仅限制单次批注解释的联网与生成总时间。当前：${value} 秒。`);
+						await this.plugin.saveSettings();
+					})
+			);
+		timeoutSetting.settingEl.addClass("agent-dashboard-provider-setting-emphasis");
+
+		new Setting(containerEl)
+			.setName("搜索深度")
+			.setDesc("固定为浅层：Direct API 强制 turbo；CLI 后端仅临时开放联网工具，并受上述总时间限制。")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("shallow", "浅层（固定）")
+					.setValue("shallow")
+					.setDisabled(true)
+			);
 	}
 
 	private renderAnnotationCliSettings(

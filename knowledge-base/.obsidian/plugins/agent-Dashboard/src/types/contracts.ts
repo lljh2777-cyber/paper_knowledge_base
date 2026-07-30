@@ -45,6 +45,8 @@ export interface CodexExecutionConfig extends ExecutionConfig {
 	backend?: CliBackendId;
 	reasoningEffort: ReasoningEffort | string;
 	serviceTier: ServiceTier;
+	retrievalMode?: QueryRetrievalMode;
+	timeoutSeconds?: number;
 }
 
 export interface CliDiscoveredModel {
@@ -234,10 +236,12 @@ export interface ProviderChatRequest {
 	messages: readonly ChatMessage[];
 	maxTokens?: number;
 	webSearch?: boolean;
+	webSearchStrategy?: "turbo" | "max" | "agent";
 }
 
 export interface ProviderRequestOptions {
 	registerCancel?: (cancel: () => void) => void;
+	timeoutMs?: number;
 }
 
 export interface ProviderCompletion {

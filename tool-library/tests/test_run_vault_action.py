@@ -256,6 +256,25 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertIn("Return only the user-facing explanation", prompt)
         self.assertNotIn("files created or updated", prompt)
 
+    def test_annotation_web_mode_is_forwarded_without_vault_retrieval(
+        self,
+    ) -> None:
+        backend = run_vault_action.get_backend("codex-cli")
+        command = run_vault_action.build_backend_command(
+            backend,
+            "codex.exe",
+            Path("D:/vault"),
+            "annotation-explain",
+            run_vault_action.ACTION_SPECS["annotation-explain"],
+            "gpt-5.6-terra",
+            "medium",
+            "default",
+            retrieval_mode="web",
+        )
+
+        self.assertIn('web_search="live"', command)
+        self.assertNotIn("--output-schema", command)
+
     def test_keyword_payload_parser_accepts_json_and_deduplicates(self) -> None:
         keywords = run_vault_action.parse_keyword_payload(
             '```json\n{"keywords":["SingleR","细胞注释","singler",""]}\n```'

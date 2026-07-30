@@ -32,6 +32,34 @@ tool-library/schemas/
 
 新增 CLI 时，应增加一个适配器文件并在 `registry.py` 注册。不要在 Dashboard 的视图、按钮或结果弹窗中增加工具名称判断。
 
+## CLI 可执行文件检测
+
+Codex CLI、Claude Code 和 OpenCode 共用统一检测器。自动检测顺序固定为：
+
+```text
+后端专用环境变量
+→ 常见安装目录
+→ 系统 PATH 扫描与 where.exe/which
+→ 已保存的有效手动路径
+```
+
+环境变量分别为 `CODEX_CLI_PATH`、`CLAUDE_CODE_PATH` 和 `OPENCODE_PATH`。
+常见目录覆盖 Codex App 托管 CLI、用户 `.local/bin`、npm 全局 shim、Scoop
+shim 和 WinGet Links。检测结果必须返回路径、来源、来源标签和是否存在，不能
+只返回一个无法解释的字符串。
+
+Windows npm 安装通常返回 `.cmd` shim。Node 直连步骤和 Python runner 应优先
+调用同目录的 npm `.ps1` shim，并继续使用参数数组和 `shell: false`；不得为了
+兼容包管理器而拼接可注入的 Shell 命令字符串。
+
+设置页显示当前路径的“自动检测来源”，并提供“重新检测”按钮。启动时保留用户
+已填写的手动路径，即使路径暂时失效也不擅自替换；Codex App 托管路径可以在
+启动时更新到最新版本。用户主动点击“重新检测”时才按完整顺序重新选择，全部
+失败则保留当前手动值并明确提示未检测到。
+
+默认配置不得包含开发者用户名或机器专用绝对路径。没有检测到 CLI 时使用空值，
+由设置页引导用户重新检测或手动填写。
+
 ## Codex CLI 配置来源
 
 `codex-cli` 支持 `official` 与 `cc-switch` 两种来源。官方模式在模型发现和
@@ -48,8 +76,10 @@ provider 与官方 Codex 之间直接切换，CC Switch 应启用保留官方登
 
 `claude-code` 的知识库检索使用 `plan` 权限模式。知识库模式仅开放
 `Read`、`Glob`、`Grep`；联网搜索模式在相同只读边界上额外开放
-`WebSearch`、`WebFetch`。批注解释和关键词扩展使用 `dontAsk` 且不开放任何
-工具。所有只读任务都显式禁用 `Edit`、`Write`、`NotebookEdit`、`Bash`；
+`WebSearch`、`WebFetch`。批注解释使用 `dontAsk`，默认不开放工具；只有用户
+启用批注的浅层联网选项时，才临时开放 `WebSearch`、`WebFetch`，不同时开放
+Vault 读取工具。关键词扩展不开放任何工具。所有只读任务都显式禁用
+`Edit`、`Write`、`NotebookEdit`、`Bash`；
 非联网模式还显式禁用 `WebSearch`、`WebFetch`。
 Claude Code 支持两种配置来源。`official` 只加载 `project,local` 设置，避免
 用户级兼容 endpoint 覆盖官方认证与模型；`cc-switch` 加载
@@ -85,7 +115,8 @@ CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独�
 识别出的候选。
 代码分析和综合分析的运行弹窗可切换 Codex CLI 或 Claude Code；Claude 模式
 必须显示阶段写入边界，且不得暴露 Fast/service tier 控件。`WebSearch` 和
-`WebFetch` 不得出现在批注、代码分析、综合分析或其他非检索任务中。
+`WebFetch` 不得出现在代码分析、综合分析或其他写入任务中；批注仅允许上述
+受短时预算限制的浅层联网例外。
 
 ## OpenCode 当前边界
 
@@ -98,7 +129,8 @@ CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独�
 
 每次任务通过 `OPENCODE_CONFIG_CONTENT` 注入最小权限，而不是依赖全局设置：
 
-- 批注解释不开放文件、Shell 或联网工具。
+- 批注解释默认不开放文件、Shell 或联网工具；启用浅层联网时只增加
+  `websearch`、`webfetch`。
 - 知识库检索仅开放 `read`、`glob`、`grep`、`list`。
 - 联网搜索在只读权限上额外开放 `websearch`、`webfetch`。
 - 代码分析和综合分析仅开放 `edit`，实际写入仍受阶段所有权白名单、变更审计、
@@ -113,6 +145,11 @@ OpenCode 使用 `opencode run --format json`，适配器将 `text`、`tool_use`�
 OpenCode 设置页独立保存可执行文件、配置来源、模型和推理 variant。批注页
 可以保存独立的 OpenCode 模型和推理参数；查询侧边栏、代码分析与综合分析的
 运行弹窗也可以选择 OpenCode。Direct API 的供应商、模型和凭据不受影响。
+
+批注联网解释固定为浅层策略：最多围绕 2 个检索问题，采用不超过 3 个权威
+来源，不追踪来源中的二级链接；总时间上限只能在 15–45 秒内设置，默认 30
+秒。Direct API 强制使用 Qwen `turbo` 搜索策略；CLI 后端由统一 runner 在
+超时后终止进程树。关闭开关时，三种 CLI 都显式禁用联网工具。
 
 模型目录发现仍由插件直接运行 `opencode models`，因为该命令不发起模型推理，
 在 Node 子进程中能够稳定退出。连接测试和实际模型任务都通过统一 Python

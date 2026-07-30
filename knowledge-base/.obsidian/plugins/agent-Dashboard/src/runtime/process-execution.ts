@@ -56,6 +56,42 @@ function asRecord(value: unknown): Record<string, unknown> {
 		: {};
 }
 
+function prepareCliSpawn(
+	executable: string,
+	args: string[],
+): { executable: string; args: string[] } {
+	if (
+		process.platform !== "win32"
+		|| !/\.(?:cmd|bat)$/i.test(executable)
+	) {
+		return { executable, args };
+	}
+	const powershellShim = executable.replace(/\.(?:cmd|bat)$/i, ".ps1");
+	if (!fs.existsSync(powershellShim)) {
+		return { executable, args };
+	}
+	const powershellExecutable = path.join(
+		process.env.SystemRoot || "C:\\Windows",
+		"System32",
+		"WindowsPowerShell",
+		"v1.0",
+		"powershell.exe",
+	);
+	return {
+		executable: powershellExecutable,
+		args: [
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-File",
+			powershellShim,
+			...args,
+		],
+	};
+}
+
 function createClaudeProcessEnv(settings: DashboardSettings): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
@@ -156,7 +192,8 @@ export class ProcessExecutionService {
 				"app-server",
 				"--stdio",
 			];
-			const child = spawn(executable, appServerArgs, {
+			const invocation = prepareCliSpawn(executable, appServerArgs);
+			const child = spawn(invocation.executable, invocation.args, {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,
@@ -396,7 +433,8 @@ export class ProcessExecutionService {
 			let settled = false;
 			let timer = 0;
 			const args = useOfficialConfig ? ["models", "opencode"] : ["models"];
-			const child = spawn(executable, args, {
+			const invocation = prepareCliSpawn(executable, args);
+			const child = spawn(invocation.executable, invocation.args, {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,
@@ -589,8 +627,13 @@ export class ProcessExecutionService {
 		const projectRoot = settings.projectRoot;
 		const runner = path.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
 		const timeoutSeconds = Math.max(
-			60,
-			Math.min(14400, Number(settings.taskTimeoutMinutes) * 60 || 3600),
+			10,
+			Math.min(
+				14400,
+				Number(executionConfig.timeoutSeconds)
+					|| Number(settings.taskTimeoutMinutes) * 60
+					|| 3600,
+			),
 		);
 		const stopPath = path.join(
 			projectRoot,
@@ -635,6 +678,8 @@ export class ProcessExecutionService {
 			settings.pythonExecutable,
 			"--timeout-seconds",
 			String(timeoutSeconds),
+			"--retrieval-mode",
+			executionConfig.retrievalMode === "web" ? "web" : "vault",
 			"--stop-file",
 			stopPath,
 			"--run-id",
@@ -813,7 +858,8 @@ export class ProcessExecutionService {
 			let stderr = "";
 			let settled = false;
 			let timer = 0;
-			const child = spawn(executable, ["--version"], {
+			const invocation = prepareCliSpawn(executable, ["--version"]);
+			const child = spawn(invocation.executable, invocation.args, {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,
@@ -914,7 +960,8 @@ export class ProcessExecutionService {
 				args.push("--model", settings.claudeModel.trim());
 			}
 			args.push("仅回复：CLAUDE_BACKEND_OK");
-			const child = spawn(executable, args, {
+			const invocation = prepareCliSpawn(executable, args);
+			const child = spawn(invocation.executable, invocation.args, {
 				cwd: settings.projectRoot,
 				shell: false,
 				windowsHide: true,

@@ -158,16 +158,16 @@ class CodexCliBackend:
             command.extend(
                 ["-c", f'service_tier="{effective_service_tier}"']
             )
-        if request.action == "vault-retrieval":
-            if request.output_schema is None:
-                raise ValueError("vault retrieval requires an output schema")
+        if request.action in {"vault-retrieval", "annotation-explain"}:
             web_search_mode = (
                 "live" if request.retrieval_mode == "web" else "disabled"
             )
+            command.extend(["-c", f'web_search="{web_search_mode}"'])
+        if request.action == "vault-retrieval":
+            if request.output_schema is None:
+                raise ValueError("vault retrieval requires an output schema")
             command.extend(
                 [
-                    "-c",
-                    f'web_search="{web_search_mode}"',
                     "--json",
                     "--output-schema",
                     str(request.output_schema),

@@ -101,6 +101,14 @@ assert.deepEqual(
 );
 assert.equal(hooks.profileSupportsDirectWebSearch(profile), true);
 assert.equal(profile.webSearch.timeoutSeconds, 75);
+profile.webSearch.searchStrategy = "agent";
+const shallowSearchBody = provider.chatBody({
+	model: profile.model,
+	messages,
+	webSearch: true,
+	webSearchStrategy: "turbo",
+});
+assert.equal(shallowSearchBody.search_options.search_strategy, "turbo");
 
 const links = hooks.extractModelProvidedWebSources(
 	"参考 [阿里云联网搜索](https://help.aliyun.com/zh/model-studio/web-search)。",
@@ -138,8 +146,10 @@ assert.throws(
 		model: profile.model,
 		messages,
 		webSearch: true,
+	}, {
+		timeoutMs: 30000,
 	});
-	assert.equal(capturedOptions.timeoutMs, 75000);
+	assert.equal(capturedOptions.timeoutMs, 30000);
 
 	const DashboardPlugin = sandbox.module.exports;
 	const plugin = Object.create(DashboardPlugin.prototype);

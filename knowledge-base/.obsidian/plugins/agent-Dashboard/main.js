@@ -164,43 +164,194 @@ var ACTION_BY_ID = new Map(ACTIONS.map((action) => [action.id, action]));
 // src/runtime/settings.ts
 var fs = __toESM(require("node:fs"));
 var path = __toESM(require("node:path"));
-var LEGACY_CODEX_EXECUTABLE = "C:\\Users\\Thomas Wade\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
-var MANAGED_CODEX_BIN_ROOT = path.join(
-  process.env.LOCALAPPDATA || "",
-  "OpenAI",
-  "Codex",
-  "bin"
-);
-var DEFAULT_CLAUDE_EXECUTABLE = path.join(
-  process.env.USERPROFILE || "",
-  ".local",
-  "bin",
-  "claude.exe"
-);
-var DEFAULT_OPENCODE_EXECUTABLE = path.join(
-  process.env.USERPROFILE || "",
-  ".opencode",
-  "bin",
-  "opencode.exe"
-);
+var import_node_child_process = require("node:child_process");
+var MANAGED_CODEX_BIN_ROOT = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "OpenAI", "Codex", "bin") : "";
+var CLI_ENVIRONMENT_VARIABLES = {
+  codex: "CODEX_CLI_PATH",
+  claude: "CLAUDE_CODE_PATH",
+  opencode: "OPENCODE_PATH"
+};
+var CLI_COMMAND_NAMES = {
+  codex: "codex",
+  claude: "claude",
+  opencode: "opencode"
+};
+function joinFromEnvironment(base, ...segments) {
+  return base ? path.join(base, ...segments) : "";
+}
+function normalizeExecutablePath(value) {
+  const text = String(value || "").trim().replace(/^"(.*)"$/, "$1");
+  if (!text) return "";
+  try {
+    return path.resolve(text);
+  } catch {
+    return text;
+  }
+}
+function isExecutableFile(value) {
+  const executable = normalizeExecutablePath(value);
+  if (!executable) return false;
+  try {
+    return fs.statSync(executable).isFile();
+  } catch {
+    return false;
+  }
+}
+function uniqueExistingFiles(candidates) {
+  const seen = /* @__PURE__ */ new Set();
+  return candidates.map(normalizeExecutablePath).filter((candidate) => {
+    if (!candidate || !isExecutableFile(candidate)) return false;
+    const key = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function managedCodexCandidates() {
+  if (!MANAGED_CODEX_BIN_ROOT || !fs.existsSync(MANAGED_CODEX_BIN_ROOT)) {
+    return [];
+  }
+  const candidates = [path.join(MANAGED_CODEX_BIN_ROOT, "codex.exe")];
+  try {
+    fs.readdirSync(MANAGED_CODEX_BIN_ROOT, { withFileTypes: true }).filter((entry) => entry.isDirectory()).forEach((entry) => {
+      candidates.push(
+        path.join(MANAGED_CODEX_BIN_ROOT, entry.name, "codex.exe")
+      );
+    });
+  } catch (error) {
+    console.warn("Agent Dashboard could not scan the managed Codex CLI directory", error);
+  }
+  return uniqueExistingFiles(candidates).sort((left, right) => {
+    try {
+      return fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+}
+function commonCliCandidates(kind) {
+  const userProfile = process.env.USERPROFILE;
+  const appData = process.env.APPDATA;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (kind === "codex") {
+    return [
+      ...managedCodexCandidates(),
+      joinFromEnvironment(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe"),
+      joinFromEnvironment(userProfile, ".local", "bin", "codex.exe"),
+      joinFromEnvironment(userProfile, "scoop", "shims", "codex.exe"),
+      joinFromEnvironment(appData, "npm", "codex.cmd"),
+      joinFromEnvironment(localAppData, "Microsoft", "WinGet", "Links", "codex.exe")
+    ];
+  }
+  if (kind === "claude") {
+    return [
+      joinFromEnvironment(userProfile, ".local", "bin", "claude.exe"),
+      joinFromEnvironment(userProfile, "scoop", "shims", "claude.exe"),
+      joinFromEnvironment(appData, "npm", "claude.cmd"),
+      joinFromEnvironment(localAppData, "AnthropicClaude", "claude.exe"),
+      joinFromEnvironment(localAppData, "Microsoft", "WinGet", "Links", "claude.exe")
+    ];
+  }
+  return [
+    joinFromEnvironment(userProfile, ".opencode", "bin", "opencode.exe"),
+    joinFromEnvironment(userProfile, ".local", "bin", "opencode.exe"),
+    joinFromEnvironment(userProfile, "scoop", "shims", "opencode.exe"),
+    joinFromEnvironment(appData, "npm", "opencode.cmd"),
+    joinFromEnvironment(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe")
+  ];
+}
+function findExecutableOnPath(command) {
+  const pathEntries = String(process.env.PATH || "").split(path.delimiter).map((entry) => entry.trim().replace(/^"(.*)"$/, "$1")).filter(Boolean);
+  const extensions = process.platform === "win32" ? String(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").map((extension) => extension.toLowerCase()) : [""];
+  for (const directory of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      if (isExecutableFile(candidate)) return normalizeExecutablePath(candidate);
+    }
+  }
+  try {
+    const locator = process.platform === "win32" ? "where.exe" : "which";
+    const output = (0, import_node_child_process.execFileSync)(locator, [command], {
+      encoding: "utf8",
+      timeout: 3e3,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    return output.split(/\r?\n/).map((line) => normalizeExecutablePath(line)).find((candidate) => isExecutableFile(candidate)) || "";
+  } catch {
+    return "";
+  }
+}
+function detectionResult(executable, source, sourceLabel, found = true) {
+  return { executable, source, sourceLabel, found };
+}
+function detectCliExecutable(kind, manualPath = "") {
+  const environmentVariable = CLI_ENVIRONMENT_VARIABLES[kind];
+  const environmentPath = normalizeExecutablePath(process.env[environmentVariable]);
+  if (isExecutableFile(environmentPath)) {
+    return detectionResult(
+      environmentPath,
+      "environment",
+      `环境变量 ${environmentVariable}`
+    );
+  }
+  const commonPath = uniqueExistingFiles(commonCliCandidates(kind))[0] || "";
+  if (commonPath) {
+    return detectionResult(commonPath, "common", "常见安装目录");
+  }
+  const pathExecutable = findExecutableOnPath(CLI_COMMAND_NAMES[kind]);
+  if (pathExecutable) {
+    return detectionResult(pathExecutable, "path", "系统 PATH / where.exe");
+  }
+  const normalizedManualPath = normalizeExecutablePath(manualPath);
+  if (isExecutableFile(normalizedManualPath)) {
+    return detectionResult(normalizedManualPath, "manual", "手动路径");
+  }
+  return detectionResult(
+    normalizedManualPath,
+    "missing",
+    normalizedManualPath ? "手动路径（文件不存在）" : "未检测到",
+    false
+  );
+}
+function describeCliExecutable(kind, executable) {
+  const normalized = normalizeExecutablePath(executable);
+  if (!normalized) {
+    return detectionResult("", "missing", "未配置", false);
+  }
+  if (!isExecutableFile(normalized)) {
+    return detectionResult(
+      normalized,
+      "missing",
+      "手动路径（文件不存在）",
+      false
+    );
+  }
+  const environmentVariable = CLI_ENVIRONMENT_VARIABLES[kind];
+  if (normalizeExecutablePath(process.env[environmentVariable]).toLowerCase() === normalized.toLowerCase()) {
+    return detectionResult(
+      normalized,
+      "environment",
+      `环境变量 ${environmentVariable}`
+    );
+  }
+  const commonPaths = uniqueExistingFiles(commonCliCandidates(kind)).map((candidate) => candidate.toLowerCase());
+  if (commonPaths.includes(normalized.toLowerCase())) {
+    return detectionResult(normalized, "common", "常见安装目录");
+  }
+  const pathExecutable = findExecutableOnPath(CLI_COMMAND_NAMES[kind]);
+  if (pathExecutable && pathExecutable.toLowerCase() === normalized.toLowerCase()) {
+    return detectionResult(normalized, "path", "系统 PATH / where.exe");
+  }
+  return detectionResult(normalized, "manual", "手动路径");
+}
 function findPreferredOpenCodeExecutable() {
-  const candidates = [
-    String(process.env.OPENCODE_PATH || "").trim(),
-    DEFAULT_OPENCODE_EXECUTABLE,
-    path.join(process.env.USERPROFILE || "", ".local", "bin", "opencode.exe"),
-    path.join(process.env.USERPROFILE || "", "scoop", "shims", "opencode.exe"),
-    path.join(process.env.APPDATA || "", "npm", "opencode.cmd"),
-    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "opencode.exe")
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || DEFAULT_OPENCODE_EXECUTABLE;
+  const detected = detectCliExecutable("opencode");
+  return detected.found ? detected.executable : "";
 }
 function findPreferredClaudeExecutable() {
-  const candidates = [
-    String(process.env.CLAUDE_CODE_PATH || "").trim(),
-    DEFAULT_CLAUDE_EXECUTABLE,
-    path.join(process.env.LOCALAPPDATA || "", "AnthropicClaude", "claude.exe")
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || DEFAULT_CLAUDE_EXECUTABLE;
+  const detected = detectCliExecutable("claude");
+  return detected.found ? detected.executable : "";
 }
 function inferLegacyClaudeConfigSource() {
   const settingsPath = path.join(
@@ -237,35 +388,24 @@ function getOpenCodeDefaultModelLabel(source) {
   return source === "cc-switch" ? "CC Switch 当前模型" : "OpenCode Zen 默认模型";
 }
 function findPreferredCodexExecutable() {
-  const candidates = /* @__PURE__ */ new Set();
-  if (process.env.CODEX_CLI_PATH) candidates.add(process.env.CODEX_CLI_PATH);
-  if (fs.existsSync(MANAGED_CODEX_BIN_ROOT)) {
-    const direct = path.join(MANAGED_CODEX_BIN_ROOT, "codex.exe");
-    if (fs.existsSync(direct)) candidates.add(direct);
-    try {
-      fs.readdirSync(MANAGED_CODEX_BIN_ROOT, { withFileTypes: true }).filter((entry) => entry.isDirectory()).forEach((entry) => {
-        const executable = path.join(MANAGED_CODEX_BIN_ROOT, entry.name, "codex.exe");
-        if (fs.existsSync(executable)) candidates.add(executable);
-      });
-    } catch (error) {
-      console.warn("Agent Dashboard could not scan the managed Codex CLI directory", error);
-    }
-  }
-  if (fs.existsSync(LEGACY_CODEX_EXECUTABLE)) candidates.add(LEGACY_CODEX_EXECUTABLE);
-  return [...candidates].map((executable) => {
-    try {
-      return { executable, mtime: fs.statSync(executable).mtimeMs };
-    } catch {
-      return { executable, mtime: 0 };
-    }
-  }).sort((a, b) => b.mtime - a.mtime)[0]?.executable || LEGACY_CODEX_EXECUTABLE;
+  const detected = detectCliExecutable("codex");
+  return detected.found ? detected.executable : "";
 }
 function isManagedCodexExecutable(executable) {
-  if (!executable) return false;
+  if (!executable || !MANAGED_CODEX_BIN_ROOT) return false;
   const normalized = path.resolve(String(executable)).toLowerCase();
-  const legacy = path.resolve(LEGACY_CODEX_EXECUTABLE).toLowerCase();
   const managedRoot = path.resolve(MANAGED_CODEX_BIN_ROOT).toLowerCase();
-  return normalized === legacy || normalized === managedRoot || normalized.startsWith(`${managedRoot}${path.sep}`);
+  const desktopInstall = normalizeExecutablePath(
+    joinFromEnvironment(
+      process.env.LOCALAPPDATA,
+      "Programs",
+      "OpenAI",
+      "Codex",
+      "bin",
+      "codex.exe"
+    )
+  ).toLowerCase();
+  return normalized === managedRoot || normalized.startsWith(`${managedRoot}${path.sep}`) || Boolean(desktopInstall && normalized === desktopInstall);
 }
 var DEFAULT_SETTINGS = {
   projectRoot: "",
@@ -290,6 +430,8 @@ var DEFAULT_SETTINGS = {
   annotationOpenCodeModel: "",
   annotationOpenCodeReasoningEffort: "medium",
   annotationMaxTokens: 900,
+  annotationWebSearchEnabled: false,
+  annotationWebSearchTimeoutSeconds: 30,
   pythonExecutable: "D:\\python\\python.exe",
   rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
   codePracticeTimeoutSeconds: 30,
@@ -792,12 +934,41 @@ function normalizeProviderModelList(payload) {
 // src/runtime/process-execution.ts
 var fs2 = __toESM(require("node:fs"));
 var path2 = __toESM(require("node:path"));
-var import_node_child_process = require("node:child_process");
+var import_node_child_process2 = require("node:child_process");
 function appendOutput(current, chunk, limit) {
   return `${current}${chunk.toString()}`.slice(-limit);
 }
 function asRecord4(value) {
   return value !== null && typeof value === "object" ? value : {};
+}
+function prepareCliSpawn(executable, args) {
+  if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(executable)) {
+    return { executable, args };
+  }
+  const powershellShim = executable.replace(/\.(?:cmd|bat)$/i, ".ps1");
+  if (!fs2.existsSync(powershellShim)) {
+    return { executable, args };
+  }
+  const powershellExecutable = path2.join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  return {
+    executable: powershellExecutable,
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      powershellShim,
+      ...args
+    ]
+  };
 }
 function createClaudeProcessEnv(settings) {
   const env = {
@@ -886,7 +1057,8 @@ var ProcessExecutionService = class {
         "app-server",
         "--stdio"
       ];
-      const child = (0, import_node_child_process.spawn)(executable, appServerArgs, {
+      const invocation = prepareCliSpawn(executable, appServerArgs);
+      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1091,7 +1263,8 @@ var ProcessExecutionService = class {
       let settled = false;
       let timer = 0;
       const args = useOfficialConfig ? ["models", "opencode"] : ["models"];
-      const child = (0, import_node_child_process.spawn)(executable, args, {
+      const invocation = prepareCliSpawn(executable, args);
+      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1209,7 +1382,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let stdout = "";
       let stderr = "";
       let settled = false;
-      const child = (0, import_node_child_process.spawn)(settings.pythonExecutable, args, {
+      const child = (0, import_node_child_process2.spawn)(settings.pythonExecutable, args, {
         cwd: projectRoot,
         shell: false,
         windowsHide: true,
@@ -1267,8 +1440,11 @@ Execution interrupted before the plugin restarted.`.trim();
     const projectRoot = settings.projectRoot;
     const runner = path2.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
     const timeoutSeconds = Math.max(
-      60,
-      Math.min(14400, Number(settings.taskTimeoutMinutes) * 60 || 3600)
+      10,
+      Math.min(
+        14400,
+        Number(executionConfig.timeoutSeconds) || Number(settings.taskTimeoutMinutes) * 60 || 3600
+      )
     );
     const stopPath = path2.join(
       projectRoot,
@@ -1301,6 +1477,8 @@ Execution interrupted before the plugin restarted.`.trim();
       settings.pythonExecutable,
       "--timeout-seconds",
       String(timeoutSeconds),
+      "--retrieval-mode",
+      executionConfig.retrievalMode === "web" ? "web" : "vault",
       "--stop-file",
       stopPath,
       "--run-id",
@@ -1325,7 +1503,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let settled = false;
       let timedOut = false;
       let timer = 0;
-      const child = (0, import_node_child_process.spawn)(settings.pythonExecutable, args, {
+      const child = (0, import_node_child_process2.spawn)(settings.pythonExecutable, args, {
         cwd: projectRoot,
         shell: false,
         windowsHide: true,
@@ -1411,7 +1589,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let stderr = "";
       let settled = false;
       let timer = 0;
-      const child = (0, import_node_child_process.spawn)(options.executable, options.args, {
+      const child = (0, import_node_child_process2.spawn)(options.executable, options.args, {
         cwd: options.cwd,
         shell: false,
         windowsHide: true,
@@ -1473,7 +1651,8 @@ Execution interrupted before the plugin restarted.`.trim();
       let stderr = "";
       let settled = false;
       let timer = 0;
-      const child = (0, import_node_child_process.spawn)(executable, ["--version"], {
+      const invocation = prepareCliSpawn(executable, ["--version"]);
+      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1563,7 +1742,8 @@ Execution interrupted before the plugin restarted.`.trim();
         args.push("--model", settings.claudeModel.trim());
       }
       args.push("仅回复：CLAUDE_BACKEND_OK");
-      const child = (0, import_node_child_process.spawn)(executable, args, {
+      const invocation = prepareCliSpawn(executable, args);
+      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true,
@@ -1734,7 +1914,7 @@ Execution interrupted before the plugin restarted.`.trim();
         String(runnerTimeoutSeconds)
       ];
       if (configuredModel) args.push("--backend-model", configuredModel);
-      const child = (0, import_node_child_process.spawn)(pythonExecutable, args, {
+      const child = (0, import_node_child_process2.spawn)(pythonExecutable, args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true,
@@ -1984,25 +2164,39 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Codex 可执行文件").setDesc("用于文献、代码、检索和综合任务。默认自动选择当前 Codex 应用携带的最新 CLI；手动填写的外部路径会保留。").addText(
-      (text) => text.setPlaceholder("codex.exe").setValue(this.plugin.settings.codexExecutable).onChange(async (value) => {
-        this.plugin.settings.codexExecutable = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Claude Code 可执行文件").setDesc("用于只读知识库检索与批注解释。原生安装通常位于用户目录的 .local\\bin\\claude.exe。").addText(
-      (text) => text.setPlaceholder("C:\\Users\\<user>\\.local\\bin\\claude.exe").setValue(this.plugin.settings.claudeExecutable).onChange(async (value) => {
-        this.plugin.settings.claudeExecutable = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("OpenCode 可执行文件").setDesc("用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。").addText(
-      (text) => text.setPlaceholder("C:\\Users\\<user>\\.opencode\\bin\\opencode.exe").setValue(this.plugin.settings.openCodeExecutable).onChange(async (value) => {
-        this.plugin.settings.openCodeExecutable = value.trim();
+    this.renderCliExecutableSetting(containerEl, {
+      kind: "codex",
+      name: "Codex 可执行文件",
+      description: "用于文献、代码、检索和综合任务；有效的手动路径不会在启动时被覆盖。",
+      placeholder: "codex.exe",
+      getValue: () => this.plugin.settings.codexExecutable,
+      setValue: (value) => {
+        this.plugin.settings.codexExecutable = value;
+        this.plugin.invalidateCliModelDiscovery("codex-cli");
+      }
+    });
+    this.renderCliExecutableSetting(containerEl, {
+      kind: "claude",
+      name: "Claude Code 可执行文件",
+      description: "用于知识库检索、批注解释和受审计的阶段所有权写入。",
+      placeholder: "claude.exe",
+      getValue: () => this.plugin.settings.claudeExecutable,
+      setValue: (value) => {
+        this.plugin.settings.claudeExecutable = value;
+        this.plugin.invalidateCliModelDiscovery("claude-code");
+      }
+    });
+    this.renderCliExecutableSetting(containerEl, {
+      kind: "opencode",
+      name: "OpenCode 可执行文件",
+      description: "用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。",
+      placeholder: "opencode.exe",
+      getValue: () => this.plugin.settings.openCodeExecutable,
+      setValue: (value) => {
+        this.plugin.settings.openCodeExecutable = value;
         this.plugin.invalidateCliModelDiscovery("opencode");
-        await this.plugin.saveSettings();
-      })
-    );
+      }
+    });
     new import_obsidian.Setting(containerEl).setName("Python 可执行文件").setDesc("用于统一 runner、知识库体检和 Python 代码练习。").addText(
       (text) => text.setPlaceholder("D:\\python\\python.exe").setValue(this.plugin.settings.pythonExecutable).onChange(async (value) => {
         this.plugin.settings.pythonExecutable = value.trim();
@@ -2039,6 +2233,49 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         new import_obsidian.Notice(result.message, 8e3);
       })
     );
+  }
+  renderCliExecutableSetting(containerEl, options) {
+    const setting = new import_obsidian.Setting(containerEl).setName(options.name);
+    const refreshDescription = () => {
+      const detection = describeCliExecutable(
+        options.kind,
+        options.getValue()
+      );
+      setting.setDesc(
+        `${options.description} 自动检测来源：${detection.sourceLabel}。`
+      );
+    };
+    setting.addText(
+      (text) => text.setPlaceholder(options.placeholder).setValue(options.getValue()).onChange(async (value) => {
+        options.setValue(value.trim());
+        refreshDescription();
+        await this.plugin.saveSettings();
+      })
+    );
+    setting.addButton(
+      (button) => button.setButtonText("重新检测").setTooltip(`重新检测 ${options.name}`).onClick(async () => {
+        const detected = detectCliExecutable(
+          options.kind,
+          options.getValue()
+        );
+        if (!detected.found) {
+          new import_obsidian.Notice(
+            `未检测到 ${options.name}；已保留当前手动路径。`,
+            6e3
+          );
+          refreshDescription();
+          return;
+        }
+        options.setValue(detected.executable);
+        await this.plugin.saveSettings();
+        new import_obsidian.Notice(
+          `${options.name}：${detected.sourceLabel}`,
+          5e3
+        );
+        this.display();
+      })
+    );
+    refreshDescription();
   }
   renderCodexSettings(containerEl) {
     const configSource = this.plugin.settings.codexConfigSource;
@@ -2269,7 +2506,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     this.createSettingsPageHeader(
       containerEl,
       "批注 AI",
-      "单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读，不开放文件或联网工具。",
+      "单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读；联网仅按浅层、短时预算开放。",
       true
     );
     const verifiedProfiles = this.plugin.settings.providerProfiles.filter(
@@ -2287,6 +2524,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         this.display();
       });
     });
+    this.renderAnnotationWebSearchSettings(containerEl, backendId, verifiedProfiles);
     if (backendId === "auto") {
       const activeProfile = verifiedProfiles.find(
         (profile2) => profile2.id === this.plugin.settings.activeProviderId
@@ -2320,6 +2558,37 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     this.renderAnnotationTokenSetting(containerEl, true);
+  }
+  renderAnnotationWebSearchSettings(containerEl, backendId, verifiedProfiles) {
+    const directProfile = backendId === "auto" ? verifiedProfiles.find(
+      (profile) => profile.id === this.plugin.settings.activeProviderId
+    ) : verifiedProfiles.find((profile) => profile.id === backendId);
+    const directApiUnsupported = Boolean(
+      directProfile && !profileSupportsDirectWebSearch(directProfile)
+    );
+    new import_obsidian.Setting(containerEl).setName("浅层联网解释").setDesc(
+      directApiUnsupported ? backendId === "auto" ? `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；自动模式启用后将回退到 Codex CLI。` : `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；启用后批注请求会明确报错，不会伪装成联网结果。` : "关闭时只解释当前段落。启用后最多围绕 2 个检索问题、采用不超过 3 个权威来源，不追踪二级链接。"
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.annotationWebSearchEnabled).onChange(async (value) => {
+        this.plugin.settings.annotationWebSearchEnabled = value;
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    if (!this.plugin.settings.annotationWebSearchEnabled) return;
+    const timeoutSetting = new import_obsidian.Setting(containerEl).setName("联网时间上限").setDesc(
+      `仅限制单次批注解释的联网与生成总时间。当前：${this.plugin.settings.annotationWebSearchTimeoutSeconds} 秒。`
+    ).addSlider(
+      (slider) => slider.setLimits(15, 45, 5).setDynamicTooltip().setValue(this.plugin.settings.annotationWebSearchTimeoutSeconds).onChange(async (value) => {
+        this.plugin.settings.annotationWebSearchTimeoutSeconds = value;
+        timeoutSetting.setDesc(`仅限制单次批注解释的联网与生成总时间。当前：${value} 秒。`);
+        await this.plugin.saveSettings();
+      })
+    );
+    timeoutSetting.settingEl.addClass("agent-dashboard-provider-setting-emphasis");
+    new import_obsidian.Setting(containerEl).setName("搜索深度").setDesc("固定为浅层：Direct API 强制 turbo；CLI 后端仅临时开放联网工具，并受上述总时间限制。").addDropdown(
+      (dropdown) => dropdown.addOption("shallow", "浅层（固定）").setValue("shallow").setDisabled(true)
+    );
   }
   renderAnnotationCliSettings(containerEl, backendId, isFallback = false) {
     const isClaude = backendId === "claude-code";
@@ -7575,10 +7844,16 @@ var AnnotationService = class {
     };
   }
   async generateExplanation(selection, registerCancel) {
+    const webSearchEnabled = this.plugin.settings.annotationWebSearchEnabled === true;
+    const webSearchTimeoutSeconds = Math.max(
+      15,
+      Math.min(45, this.plugin.settings.annotationWebSearchTimeoutSeconds || 30)
+    );
     const system = [
       "你是论文阅读批注助手。",
       "请用简体中文解释选中的词句在当前段落和文章语境中具体指什么。",
       "目标是帮助读者理解，不做跨文献综述，不创建知识节点，不修改文件。",
+      webSearchEnabled ? "允许进行浅层联网查证：最多围绕 2 个检索问题，最多采用 3 个权威来源，不追踪来源中的二级链接；优先回答当前语境，不扩展成专题调研。" : "不要联网搜索；仅根据提供的段落、文章语境和模型已有知识解释。",
       "直接给出清晰的初步解释，通常 2 至 4 个短段落；不要使用 Markdown 标题或列表，不要输出流程报告、证据分类或客套话。"
     ].join("\n");
     const user = [
@@ -7590,8 +7865,14 @@ var AnnotationService = class {
       selection.context
     ].filter(Boolean).join("\n");
     const configuredBackend = this.plugin.settings.annotationBackendId || "auto";
-    const directProfile = configuredBackend === "auto" ? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId) : !["codex-cli", "claude-code", "opencode"].includes(configuredBackend) ? this.plugin.getProviderProfile(configuredBackend) : null;
+    const selectedDirectProfile = configuredBackend === "auto" ? this.plugin.getProviderProfile(this.plugin.settings.activeProviderId) : !["codex-cli", "claude-code", "opencode"].includes(configuredBackend) ? this.plugin.getProviderProfile(configuredBackend) : null;
+    const directProfile = webSearchEnabled && configuredBackend === "auto" && selectedDirectProfile && !profileSupportsDirectWebSearch(selectedDirectProfile) ? null : selectedDirectProfile;
     if (directProfile?.lastTest?.ok) {
+      if (webSearchEnabled && !profileSupportsDirectWebSearch(directProfile)) {
+        throw new Error(
+          "当前 Direct API 配置未通过联网搜索测试；请关闭批注联网搜索，或改用支持联网的 Qwen3.7-Plus/Codex CLI/Claude Code/OpenCode 后端"
+        );
+      }
       const provider = this.plugin.createLLMProvider(directProfile);
       const result2 = await provider.complete(
         {
@@ -7600,9 +7881,14 @@ var AnnotationService = class {
             { role: "system", content: system },
             { role: "user", content: user }
           ],
-          maxTokens: this.plugin.settings.annotationMaxTokens
+          maxTokens: this.plugin.settings.annotationMaxTokens,
+          webSearch: webSearchEnabled,
+          webSearchStrategy: webSearchEnabled ? "turbo" : void 0
         },
-        { registerCancel }
+        {
+          registerCancel,
+          timeoutMs: webSearchEnabled ? webSearchTimeoutSeconds * 1e3 : void 0
+        }
       );
       const text2 = String(result2.text || "").trim();
       if (!text2) throw new Error("模型返回了空解释");
@@ -7637,6 +7923,8 @@ var AnnotationService = class {
       cliBackend,
       annotationOverrides
     );
+    executionConfig.retrievalMode = webSearchEnabled ? "web" : "vault";
+    executionConfig.timeoutSeconds = webSearchEnabled ? webSearchTimeoutSeconds : void 0;
     const result = await this.plugin.runVaultAction(
       runId,
       action,
@@ -8191,7 +8479,8 @@ var OpenAICompatibleProvider = class extends LLMProvider {
           "当前配置没有启用 Qwen3.7-Plus Chat Completions 联网搜索"
         );
       }
-      const strategy = ["turbo", "max", "agent"].includes(webSearch.searchStrategy) ? webSearch.searchStrategy : "turbo";
+      const requestedStrategy = request.webSearchStrategy || webSearch.searchStrategy;
+      const strategy = ["turbo", "max", "agent"].includes(requestedStrategy) ? requestedStrategy : "turbo";
       const searchOptions = {
         forced_search: webSearch.forcedSearch !== false,
         search_strategy: strategy
@@ -8211,7 +8500,7 @@ var OpenAICompatibleProvider = class extends LLMProvider {
       method: "POST",
       headers: await this.headers(),
       body: this.chatBody(request),
-      timeoutMs: webSearchTimeout ? webSearchTimeout * 1e3 : void 0,
+      timeoutMs: options.timeoutMs || (webSearchTimeout ? webSearchTimeout * 1e3 : void 0),
       registerCancel: options.registerCancel
     });
     const payload = this.requireJson(result, "文本生成");
@@ -9543,8 +9832,8 @@ ${result.stderr.trim()}` : ""
     });
     const preferredCodexExecutable = findPreferredCodexExecutable();
     const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
-    if (!configuredCodexExecutable || !fs4.existsSync(configuredCodexExecutable) || isManagedCodexExecutable(configuredCodexExecutable)) {
-      if (configuredCodexExecutable !== preferredCodexExecutable) {
+    if (!configuredCodexExecutable || isManagedCodexExecutable(configuredCodexExecutable)) {
+      if (preferredCodexExecutable && configuredCodexExecutable !== preferredCodexExecutable) {
         this.settings.codexExecutable = preferredCodexExecutable;
         changed = true;
       }

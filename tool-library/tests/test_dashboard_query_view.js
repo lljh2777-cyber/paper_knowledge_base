@@ -106,6 +106,10 @@ const processExecutionSource = fs.readFileSync(
 	path.join(pluginSourceRoot, "runtime/process-execution.ts"),
 	"utf8",
 );
+const runtimeSettingsSource = fs.readFileSync(
+	path.join(pluginSourceRoot, "runtime/settings.ts"),
+	"utf8",
+);
 for (const settingsPage of [
 	'renderSettingsHome(containerEl)',
 	'renderRuntimeSettings(containerEl)',
@@ -178,6 +182,38 @@ assert.ok(
 		&& processExecutionSource.includes('"未配置 Python 可执行文件"')
 		&& processExecutionSource.includes("统一 runner 不存在："),
 	"OpenCode connection tests should run through the configured Python runner",
+);
+assert.ok(
+	runtimeSettingsSource.includes('"CODEX_CLI_PATH"')
+		&& runtimeSettingsSource.includes('"CLAUDE_CODE_PATH"')
+		&& runtimeSettingsSource.includes('"OPENCODE_PATH"')
+		&& runtimeSettingsSource.includes("process.env.PATH")
+		&& runtimeSettingsSource.includes('"where.exe"'),
+	"CLI executable detection should support environment variables and system PATH",
+);
+assert.ok(
+	runtimeSettingsSource.includes('"scoop", "shims", "claude.exe"')
+		&& runtimeSettingsSource.includes('"npm", "claude.cmd"')
+		&& runtimeSettingsSource.includes('"scoop", "shims", "opencode.exe"')
+		&& runtimeSettingsSource.includes('"npm", "codex.cmd"'),
+	"CLI executable detection should include common package-manager locations",
+);
+assert.ok(
+	!runtimeSettingsSource.includes("C:\\\\Users\\\\Thomas Wade"),
+	"CLI defaults must not contain a user-specific executable path",
+);
+assert.ok(
+	settingsSource.includes('"重新检测"')
+		&& settingsSource.includes("自动检测来源：")
+		&& settingsSource.includes("describeCliExecutable")
+		&& settingsSource.includes("detectCliExecutable"),
+	"runtime settings should display detection sources and provide re-detection controls",
+);
+assert.ok(
+	processExecutionSource.includes("prepareCliSpawn")
+		&& processExecutionSource.includes('replace(/\\.(?:cmd|bat)$/i, ".ps1")')
+		&& processExecutionSource.includes('"powershell.exe"'),
+	"Windows npm CLI shims should execute through their PowerShell wrapper without shell mode",
 );
 assert.ok(
 	queryViewSource.includes('attr: { value: "opencode" }')

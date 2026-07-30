@@ -102,12 +102,12 @@ class OpenCodeBackend:
             )
 
         allows_web = (
-            request.action == "vault-retrieval"
+            request.action in {"vault-retrieval", "annotation-explain"}
             and request.retrieval_mode == "web"
         )
         if is_stage_write:
             permission_profile = "stage-write"
-        elif request.action == "vault-retrieval":
+        elif request.action == "vault-retrieval" or allows_web:
             permission_profile = "read-only-web" if allows_web else "read-only"
         else:
             permission_profile = "no-tools"

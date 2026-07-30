@@ -732,10 +732,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
 		if (
 			!configuredCodexExecutable
-			|| !fs.existsSync(configuredCodexExecutable)
 			|| isManagedCodexExecutable(configuredCodexExecutable)
 		) {
-			if (configuredCodexExecutable !== preferredCodexExecutable) {
+			if (
+				preferredCodexExecutable
+				&& configuredCodexExecutable !== preferredCodexExecutable
+			) {
 				this.settings.codexExecutable = preferredCodexExecutable;
 				changed = true;
 			}
