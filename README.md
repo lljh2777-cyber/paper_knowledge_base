@@ -69,6 +69,18 @@ papers / sources / methods / concepts / code / projects / synthesis
 
 “文献入库”固定使用 MinerU precision `extract` 并输出 `md,json`，不使用会将图表替换为占位符的 `flash-extract`。常用层可选择 VLM、Pipeline 或 Auto 模型，并配置语言、OCR、公式、表格和是否附带原 PDF；高级层可限制 1-based 页码范围与请求超时。提取先进入 `tool-library/output/mineru-runs/`，通过 Markdown、JSON、页码和资产检查后才发布。
 
+文献入库按以下阶段执行：
+
+```text
+PDF / DOI / Zotero 条目
+  → 身份与元数据核验、重复检查
+  → 可选：MinerU 生成并验证原文阅读包
+  → 可选：基于原始 PDF 或已验证 article.md 创建初步 Wiki
+  → 更新文献元数据、索引和处理日志
+```
+
+两个输出彼此独立：只生成原文阅读包不会自动产生论文结论；只创建初步 Wiki 也不会被标记为全文深读。已有同名 `papers/<citekey>/` 包不会被原地覆盖，冲突会停止并交由用户确认。MinerU 处理涉及向所配置的服务上传文档，首次使用前应确认文档允许发送到该服务。
+
 阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code、OpenCode 或已验证 Direct API，并配置批注专用模型、推理强度和输出长度。普通解释可自由选择 Agent 或 Direct API；启用浅层联网后仅使用 Agent，最多围绕 2 个检索问题、采用不超过 3 个权威来源，单次总时间限制为 15–45 秒。
 
 ### 模型后端
@@ -85,6 +97,12 @@ Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭
 CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入。所有 AI 写入任务都由宿主在运行前建立操作级快照，完成后生成变更清单并执行知识库体检；手动停止、进程失败、越界写入或验证失败时自动回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
 
 OpenCode 的模型目录由插件直接运行 `opencode models` 获取；连接测试和实际任务统一通过 Python runner 执行。这样可以统一处理 JSONL、超时、Windows 进程树终止和错误分类。若 Python 或 runner 路径无效，设置页会显示明确的配置错误，而不会误报为 OpenCode 超时。
+
+### 任务状态与失败恢复
+
+Dashboard 将任务区分为完成、完成但有待处理项、失败和已停止。知识库体检默认使用退出码 `0` 表示没有 error（仍可能包含 warning 或 info），退出码 `1` 表示检查正常完成但发现 error；启用 `--strict` 时 warning 也会令命令返回 `1`。这些情况都不代表 runner 故障，结果弹窗仍会显示完整报告和可用的“提出方案并修复”入口。启动脚本、权限检查或报告生成异常才会标记为失败。
+
+AI 写入任务开始前会记录操作范围内的文件状态，结束后生成变更清单并执行后置检查。手动停止、Agent 异常退出、越界写入或后置验证失败时，runner 会尝试恢复本轮修改；结果弹窗会明确显示是否已回滚以及是否仍需人工检查。确定性体检和 OKF 导出不经过模型。
 
 ## Skills 与智能体
 
@@ -212,6 +230,14 @@ cd paper_knowledge_base
 3. Codex CLI、Claude Code 或 OpenCode 的配置来源、模型与连接状态。
 4. 可选的 Direct API Provider、SecretStorage 凭据、模型列表和连接测试。
 
+建议首次启用后依次执行：
+
+1. 在“运行环境”中重新检测 Python 与计划使用的 CLI，确认检测来源和路径正确。
+2. 对每个启用的 Agent 或 Direct API 配置运行一次不包含 Vault 内容的连接测试。
+3. 运行“知识库体检”，确认完整报告能够显示；发现待处理项不会阻止其他只读功能。
+4. 需要生成论文原文包时，先执行 `mineru-open-api auth`，再在设置中确认 MinerU CLI 可用。
+5. 使用一篇可公开上传的短 PDF 验证入库流程，再处理受版权、伦理或数据协议约束的材料。
+
 `.codex/config.toml` 是项目级 Codex 配置，只作用于本项目。开始处理真实文献前，请先阅读 [AGENTS.md](AGENTS.md) 中的安全、证据和写入边界。
 
 ## 常用命令
@@ -221,6 +247,8 @@ cd paper_knowledge_base
 ```powershell
 D:\python\python.exe tool-library\scripts\lint_vault.py
 ```
+
+该命令返回 `1` 时通常表示体检完成但存在 error；请根据终端中的 `Vault lint: score` 判断结果，不要只按非零退出码认定脚本故障。Dashboard 还会通过 `--report tool-library/output/lint/latest.json` 保存结构化报告。
 
 输出完整 JSON 报告：
 
