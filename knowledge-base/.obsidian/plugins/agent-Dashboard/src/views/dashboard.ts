@@ -12,6 +12,7 @@ import {
 	ACTIONS,
 	ACTION_BY_ID,
 	type DashboardAction,
+	type DashboardActionOptions,
 } from "../actions";
 import { VIEW_TYPE, isCliBackendId } from "../config";
 import {
@@ -19,6 +20,7 @@ import {
 	type ExecutionOverrides,
 } from "../modals/action-input";
 import { TaskResultModal } from "../modals/task-result";
+import { serializeActionRequest } from "../runtime/action-request";
 import {
 	DashboardDataService,
 	type DashboardVaultChange,
@@ -575,8 +577,8 @@ export class DashboardView extends ItemView {
 			return;
 		}
 		if (action.ai || action.requiresInput) {
-			new ActionInputModal(this.app, this.plugin, action, ({ input, overrides }) => {
-				void this.executeAction(action, input, overrides);
+			new ActionInputModal(this.app, this.plugin, action, ({ input, overrides, options: actionOptions }) => {
+				void this.executeAction(action, input, overrides, actionOptions);
 			}, options).open();
 			return;
 		}
@@ -587,8 +589,16 @@ export class DashboardView extends ItemView {
 		action: DashboardAction,
 		input: string,
 		executionOverrides: ExecutionOverrides = {},
+		actionOptions: DashboardActionOptions = {},
 	): Promise<void> {
 		const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || action.description;
+		const requestPayload = serializeActionRequest(
+			action,
+			input,
+			actionOptions,
+			this.plugin.settings.mineruExecutable,
+			this.plugin.settings.mineruBaseUrl,
+		);
 		const backendId = executionOverrides.backend === "claude-code"
 			? "claude-code"
 			: executionOverrides.backend === "opencode"
@@ -605,7 +615,7 @@ export class DashboardView extends ItemView {
 		await this.loadAndRender();
 		let completedRun;
 		try {
-			const result = await this.plugin.runVaultAction(run.id, action, input, executionConfig);
+			const result = await this.plugin.runVaultAction(run.id, action, requestPayload, executionConfig);
 			const output = this.formatProcessOutput(result);
 			const lintCompletedWithFindings = action.id === "vault-lint"
 				&& result.exitCode === 1

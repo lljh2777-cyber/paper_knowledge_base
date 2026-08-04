@@ -1,6 +1,9 @@
 import { App, Modal } from "obsidian";
 
-import type { DashboardAction } from "../actions";
+import type {
+	DashboardAction,
+	DashboardActionOptions,
+} from "../actions";
 import {
 	getCliBackendLabel,
 	MODEL_OPTIONS,
@@ -10,6 +13,7 @@ import {
 import {
 	getClaudeDefaultModelLabel,
 	type ClaudeConfigSource,
+	describeCliExecutable,
 	getCodexDefaultModelLabel,
 	type CodexConfigSource,
 	getOpenCodeDefaultModelLabel,
@@ -27,6 +31,7 @@ export type { ExecutionOverrides } from "../types/contracts";
 export interface ActionInputResult {
 	input: string;
 	overrides: ExecutionOverrides | Record<string, never>;
+	options: DashboardActionOptions;
 }
 
 interface ActionInputHost {
@@ -37,6 +42,7 @@ interface ActionInputHost {
 		claudeModel: string;
 		openCodeConfigSource: OpenCodeConfigSource;
 		openCodeModel: string;
+		mineruExecutable: string;
 	};
 	resolveActionExecutionConfig(
 		action: DashboardAction,
@@ -96,6 +102,11 @@ export class ActionInputModal extends Modal {
 				text: "运行后，所选执行后端可在该 skill 拥有的范围内更新项目文件。提交此表单即确认本次写入授权。",
 			});
 		}
+		let syncSubmitState = () => undefined;
+		const actionOptions = this.renderActionOptions(
+			contentEl,
+			() => syncSubmitState(),
+		);
 		let input: HTMLTextAreaElement | null = null;
 		if (this.action.requiresInput) {
 			input = contentEl.createEl("textarea", {
@@ -120,16 +131,19 @@ export class ActionInputModal extends Modal {
 		submit.type = "button";
 		submit.disabled = this.action.requiresInput && !this.initialInput.trim();
 
-		const syncSubmitState = () => {
-			submit.disabled = this.action.requiresInput && (!input || input.value.trim().length === 0);
+		syncSubmitState = () => {
+			const missingInput = this.action.requiresInput
+				&& (!input || input.value.trim().length === 0);
+			submit.disabled = missingInput || !actionOptions.isValid();
 		};
 		const submitAction = () => {
 			const value = input ? input.value.trim() : "";
-			if (this.action.requiresInput && !value) return;
+			if ((this.action.requiresInput && !value) || !actionOptions.isValid()) return;
 			this.close();
 			this.onSubmit({
 				input: value,
 				overrides: controls ? controls.getOverrides() : {},
+				options: actionOptions.getOptions(),
 			});
 		};
 		if (input) {
@@ -143,7 +157,358 @@ export class ActionInputModal extends Modal {
 		}
 		cancel.addEventListener("click", () => this.close());
 		submit.addEventListener("click", submitAction);
+		syncSubmitState();
 		window.setTimeout(() => (input || submit).focus(), 0);
+	}
+
+	renderActionOptions(
+		parent: HTMLElement,
+		onChange: () => void,
+	): {
+		getOptions: () => DashboardActionOptions;
+		isValid: () => boolean;
+	} {
+		if (this.action.id === "paper-ingest") {
+			const section = parent.createEl("section", {
+				cls: "agent-dashboard-action-options",
+				attr: { "aria-label": "文献入库输出" },
+			});
+			section.createEl("h3", { text: "本次输出" });
+			section.createEl("p", {
+				cls: "agent-dashboard-action-options-description",
+				text: "身份核验、去重和元数据准备始终执行；以下两个输出可以独立选择。",
+			});
+			const mineruAvailable = describeCliExecutable(
+				"mineru",
+				this.plugin.settings.mineruExecutable,
+			).found;
+			const markdownOption = this.createCheckboxOption(
+				section,
+				"生成原文 Markdown",
+				"使用 MinerU precision extract 生成 article.md、结构化 JSON、图片和可验证的提取记录。",
+				true,
+			);
+			const mineruWarning = !mineruAvailable
+				? section.createEl("p", {
+					cls: "agent-dashboard-action-options-warning",
+					text: "未检测到 MinerU CLI。若要生成原文 Markdown，请先在插件设置的运行环境中配置 mineru-open-api。",
+				})
+				: null;
+
+			const mineruPanel = section.createDiv({
+				cls: "agent-dashboard-mineru-options",
+				attr: { "aria-label": "MinerU 提取设置" },
+			});
+			const panelHeading = mineruPanel.createDiv({
+				cls: "agent-dashboard-mineru-heading",
+			});
+			panelHeading.createEl("strong", { text: "MinerU 高精度提取" });
+			panelHeading.createSpan({ text: "固定输出 Markdown + JSON；不使用会丢失图表的 flash-extract。" });
+
+			const mineruGrid = mineruPanel.createDiv({
+				cls: "agent-dashboard-mineru-grid",
+			});
+			const createSelectField = (
+				parentEl: HTMLElement,
+				title: string,
+				description: string,
+				options: Array<{ value: string; label: string }>,
+				value: string,
+			) => {
+				const field = parentEl.createDiv({
+					cls: "agent-dashboard-mineru-field",
+				});
+				const copy = field.createDiv();
+				copy.createEl("strong", { text: title });
+				copy.createSpan({ text: description });
+				const select = field.createEl("select", {
+					attr: { "aria-label": title },
+				});
+				options.forEach((option) => select.createEl("option", {
+					text: option.label,
+					attr: { value: option.value },
+				}));
+				select.value = value;
+				return { field, select };
+			};
+			const createNumberField = (
+				parentEl: HTMLElement,
+				title: string,
+				description: string,
+				value: number,
+				min: number,
+				max: number,
+				step: number,
+			) => {
+				const field = parentEl.createDiv({
+					cls: "agent-dashboard-mineru-field",
+				});
+				const copy = field.createDiv();
+				copy.createEl("strong", { text: title });
+				copy.createSpan({ text: description });
+				const input = field.createEl("input", {
+					attr: {
+						type: "number",
+						min: String(min),
+						max: String(max),
+						step: String(step),
+						value: String(value),
+						"aria-label": title,
+					},
+				});
+				return { field, input };
+			};
+
+			const model = createSelectField(
+				mineruGrid,
+				"解析模型",
+				"VLM 对复杂版面和上标引用更准确；Pipeline 更保守。",
+				[
+					{ value: "vlm", label: "VLM · 推荐" },
+					{ value: "pipeline", label: "Pipeline · 保守提取" },
+					{ value: "auto", label: "Auto · 服务端选择" },
+				],
+				"vlm",
+			);
+			const language = createSelectField(
+				mineruGrid,
+				"文档语言",
+				"影响文本识别；英文论文建议选择 English。",
+				[
+					{ value: "en", label: "English" },
+					{ value: "ch", label: "中文 + English" },
+					{ value: "ch_server", label: "中文 / 繁体 / 日文" },
+					{ value: "japan", label: "日本語" },
+					{ value: "korean", label: "한국어" },
+					{ value: "latin", label: "Latin 语系" },
+					{ value: "arabic", label: "Arabic 语系" },
+					{ value: "cyrillic", label: "Cyrillic 语系" },
+					{ value: "devanagari", label: "Devanagari 语系" },
+				],
+				"en",
+			);
+			const includeSourcePdf = this.createCheckboxOption(
+				mineruPanel,
+				"在原文包中附带 PDF",
+				"将原 PDF 复制到 _extraction/source.pdf；默认只记录来源路径和 SHA-256。",
+				false,
+			);
+			const ocr = this.createCheckboxOption(
+				mineruPanel,
+				"扫描件 OCR",
+				"仅扫描版或无文本层 PDF 开启；普通数字 PDF 保持关闭。",
+				false,
+			);
+			const formula = this.createCheckboxOption(
+				mineruPanel,
+				"识别公式",
+				"保留数学公式识别。",
+				true,
+			);
+			const table = this.createCheckboxOption(
+				mineruPanel,
+				"识别表格",
+				"生成可搜索的 HTML 表格并保留表格裁图证据。",
+				true,
+			);
+
+			const advanced = mineruPanel.createEl("details", {
+				cls: "agent-dashboard-mineru-advanced",
+			});
+			advanced.createEl("summary", { text: "页面范围与超时" });
+			const advancedGrid = advanced.createDiv({
+				cls: "agent-dashboard-mineru-grid",
+			});
+			const timeout = createNumberField(
+				advancedGrid,
+				"提取超时（秒）",
+				"单篇请求上限，范围 60–1800 秒。",
+				600,
+				60,
+				1800,
+				30,
+			);
+			const pages = advancedGrid.createDiv({
+				cls: "agent-dashboard-mineru-field",
+			});
+			const pagesCopy = pages.createDiv();
+			pagesCopy.createEl("strong", { text: "页面范围" });
+			pagesCopy.createSpan({ text: "从 1 开始，例如 1-10,15；留空提取全文。" });
+			const pagesInput = pages.createEl("input", {
+				attr: {
+					type: "text",
+					placeholder: "1-10,15",
+					"aria-label": "MinerU 页面范围",
+				},
+			});
+			mineruPanel.createEl("p", {
+				cls: "agent-dashboard-action-options-description",
+				text: "文档会上传到 MinerU 服务端处理。Token 由 MinerU CLI 管理，插件不保存密钥；批量模式和非 Markdown 输出不在单篇入库中开放。",
+			});
+
+			const wikiOption = this.createCheckboxOption(
+				section,
+				"创建初步文章 Wiki",
+				"创建或更新 wiki/sources 下的 abstract-level 文章节点。",
+				true,
+			);
+			const sourceField = section.createDiv({
+				cls: "agent-dashboard-action-options-field",
+			});
+			const sourceCopy = sourceField.createDiv();
+			sourceCopy.createEl("strong", { text: "文章 Wiki 内容来源" });
+			sourceCopy.createEl("span", {
+				text: "自动模式优先使用本次或已有的已验证 article.md，否则回退到原始 PDF。",
+			});
+			const sourceSelect = sourceField.createEl("select", {
+				attr: { "aria-label": "文章 Wiki 内容来源" },
+			});
+			sourceSelect.createEl("option", { text: "自动选择", attr: { value: "auto" } });
+			sourceSelect.createEl("option", { text: "原始 PDF", attr: { value: "pdf" } });
+			sourceSelect.createEl("option", { text: "已有 article.md", attr: { value: "article" } });
+
+			const normalizePages = (): string | null => {
+				const text = pagesInput.value.trim().replace(/，/g, ",");
+				if (!text) return "";
+				const tokens = text.split(/[,\s]+/).filter(Boolean);
+				for (const token of tokens) {
+					const match = /^(\d+)(?:-(\d+))?$/.exec(token);
+					if (!match) return null;
+					const start = Number(match[1]);
+					const end = Number(match[2] || match[1]);
+					if (start < 1 || end < start) return null;
+				}
+				return tokens.join(",");
+			};
+			const isNumberInRange = (input: HTMLInputElement, min: number, max: number) => {
+				return Number.isFinite(input.valueAsNumber)
+					&& input.valueAsNumber >= min
+					&& input.valueAsNumber <= max;
+			};
+
+			const sync = () => {
+				const markdownEnabled = markdownOption.checked;
+				mineruPanel.hidden = !markdownEnabled;
+				if (mineruWarning) mineruWarning.hidden = !markdownEnabled;
+				sourceSelect.disabled = !wikiOption.checked;
+				section.toggleClass(
+					"is-invalid",
+					(!markdownOption.checked && !wikiOption.checked)
+						|| (markdownOption.checked && !mineruAvailable),
+				);
+				onChange();
+			};
+			markdownOption.addEventListener("change", sync);
+			wikiOption.addEventListener("change", sync);
+			sourceSelect.addEventListener("change", onChange);
+			for (const control of [
+				model.select,
+				language.select,
+				includeSourcePdf,
+				ocr,
+				formula,
+				table,
+				pagesInput,
+				timeout.input,
+			]) {
+				control.addEventListener("change", sync);
+				control.addEventListener("input", sync);
+			}
+			sync();
+
+			return {
+				getOptions: () => ({
+					createArticleMarkdown: markdownOption.checked,
+					createArticleWiki: wikiOption.checked,
+					articleWikiSource: sourceSelect.value === "pdf"
+						? "pdf"
+						: sourceSelect.value === "article"
+							? "article"
+							: "auto",
+					mineruModel: model.select.value === "pipeline"
+						? "pipeline"
+						: model.select.value === "auto"
+							? "auto"
+							: "vlm",
+					mineruLanguage: language.select.value,
+					mineruOcr: ocr.checked,
+					mineruFormula: formula.checked,
+					mineruTable: table.checked,
+					mineruPages: normalizePages() || "",
+					mineruTimeoutSeconds: timeout.input.valueAsNumber,
+					mineruIncludeSourcePdf: includeSourcePdf.checked,
+				}),
+				isValid: () => {
+					if (!markdownOption.checked && !wikiOption.checked) return false;
+					if (!markdownOption.checked) return true;
+					return mineruAvailable
+						&& normalizePages() !== null
+						&& isNumberInRange(timeout.input, 60, 1800)
+						&& Number.isInteger(timeout.input.valueAsNumber);
+				},
+			};
+		}
+
+		if (this.action.id === "pdf-xray") {
+			const section = parent.createEl("section", {
+				cls: "agent-dashboard-action-options",
+				attr: { "aria-label": "PDF 深读来源" },
+			});
+			section.createEl("h3", { text: "深读来源" });
+			section.createEl("p", {
+				cls: "agent-dashboard-action-options-description",
+				text: "运行时严格使用所选来源，不会在未说明的情况下切换。",
+			});
+			const group = section.createDiv({
+				cls: "agent-dashboard-source-choice",
+				attr: { role: "radiogroup", "aria-label": "PDF 深读来源" },
+			});
+			const groupName = `pdf-xray-source-${Date.now()}`;
+			const pdf = this.createRadioOption(group, groupName, "pdf", "原始 PDF", true);
+			const article = this.createRadioOption(group, groupName, "article", "已有 article.md", false);
+			pdf.addEventListener("change", onChange);
+			article.addEventListener("change", onChange);
+			return {
+				getOptions: () => ({ pdfXraySource: article.checked ? "article" : "pdf" }),
+				isValid: () => pdf.checked || article.checked,
+			};
+		}
+
+		return {
+			getOptions: () => ({}),
+			isValid: () => true,
+		};
+	}
+
+	createCheckboxOption(
+		parent: HTMLElement,
+		title: string,
+		description: string,
+		checked: boolean,
+	): HTMLInputElement {
+		const label = parent.createEl("label", { cls: "agent-dashboard-checkbox-option" });
+		const input = label.createEl("input", { attr: { type: "checkbox" } });
+		input.checked = checked;
+		const copy = label.createDiv();
+		copy.createEl("strong", { text: title });
+		copy.createEl("span", { text: description });
+		return input;
+	}
+
+	createRadioOption(
+		parent: HTMLElement,
+		name: string,
+		value: string,
+		labelText: string,
+		checked: boolean,
+	): HTMLInputElement {
+		const label = parent.createEl("label", { cls: "agent-dashboard-radio-option" });
+		const input = label.createEl("input", {
+			attr: { type: "radio", name, value },
+		});
+		input.checked = checked;
+		label.createSpan({ text: labelText });
+		return input;
 	}
 
 	renderExecutionControls(parent: HTMLElement): { getOverrides: () => ExecutionOverrides } {

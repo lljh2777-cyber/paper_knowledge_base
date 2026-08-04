@@ -2,13 +2,13 @@
 
 这是一个面向科研论文、代码项目和可复用技术知识的本地优先工作区。项目将 Obsidian 知识库、Codex 智能体工作流、确定性 Python 工具和自研 Agent Dashboard 插件组合在一起，用于完成文献入库、PDF 深读、代码分析、知识检索、跨文献综合、知识库体检和结构化导出。
 
-项目并不把聊天记录当作知识库。可复用结论会被整理为带来源、处理深度、链接关系和索引的 Markdown 页面；原始 PDF、本地元数据、API 凭据和个人知识内容默认留在本机。
+项目并不把聊天记录当作知识库。可复用结论会被整理为带来源、处理深度、链接关系和索引的 Markdown 页面；本地元数据、API 凭据和个人知识内容默认留在本机。使用 MinerU 转换时，所选文档会发送到配置的 MinerU 服务端处理。
 
 ## 核心能力
 
-- **文献工作流**：管理 DOI、URL、Zotero、BibTeX、RIS 和本地 PDF，执行去重、元数据规范化、全文转换和 source note 写作。
+- **文献工作流**：管理 DOI、URL、Zotero、BibTeX、RIS 和本地 PDF；“文献入库”可独立生成经过验证的 MinerU 原文包、创建初步文章 Wiki，或同时执行。
 - **证据分层**：明确区分 `metadata-only`、`abstract-level` 和 `x-ray`，防止把摘要阅读包装成全文深读。
-- **PDF 深读**：检查全文、方法、数据、图表、局限和证据链，并将关键图像嵌入对应的 source note。
+- **PDF 深读**：可选择原始 PDF 或已有 `article.md`，检查全文、方法、数据、图表、局限和证据链，并将关键图像嵌入对应的 source note。
 - **代码知识化**：静态分析 R/Python 项目，以“关键代码片段 + 中文解释”的形式生成项目页和脚本页。
 - **知识关联**：通过 source、method、concept、dataset、project、code、R 和 Linux 页面连接论文、方法与实现。
 - **透明检索**：使用“词法种子 → 图扩展 → 无匹配回退”的只读检索级联，展示实际检查过的 Vault 页面。
@@ -33,12 +33,13 @@ Agent Dashboard（Obsidian 插件）
         │   ├── Claude Code
         │   └── OpenCode
         ├── Direct API Provider
+        ├── MinerU precision 文档提取
         ├── Python/R 本地执行器
         └── 检索、体检和 OKF 确定性脚本
         │
         ▼
 Obsidian Research Vault
-sources / methods / concepts / code / projects / synthesis
+papers / sources / methods / concepts / code / projects / synthesis
 ```
 
 工作区分为两层：
@@ -56,17 +57,19 @@ sources / methods / concepts / code / projects / synthesis
 
 | 操作 | 执行方式 | 主要边界 |
 |---|---|---|
-| 文献入库 | Codex CLI | 更新入库元数据、索引和日志，不生成论文结论 |
-| PDF 深读 | `paper_xray` 智能体 | 完成全文证据检查后才允许标记为 `x-ray` |
+| 文献入库 | Codex CLI + MinerU | 始终核验身份和去重；可选生成 `papers/<citekey>/article.md` 原文包、创建 `abstract-level` 初步 Wiki，或同时执行 |
+| PDF 深读 | `paper_xray` 智能体 | 严格使用所选的原始 PDF 或已有 `article.md`；完成全文证据检查后才允许标记为 `x-ray` |
 | 代码分析 | Codex CLI、Claude Code 或 OpenCode | 默认静态阅读；Claude/OpenCode 仅能在阶段目录白名单内写入知识页面 |
-| 知识库检索 | Codex CLI、Claude Code、OpenCode 或 Direct API | 只读检索与连续对话；Claude/OpenCode 仅在“联网搜索”模式开放网络工具 |
+| 知识库检索 | Codex CLI、Claude Code、OpenCode 或 Direct API | 知识库模式可自由选择 Agent 或 Direct API；联网模式仅使用 Agent，所有查询均保持只读 |
 | 综合分析 | Codex CLI、Claude Code 或 OpenCode | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面；所有 CLI 后端均执行变更审计 |
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
 | 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
 
-阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code、OpenCode 或已验证 Direct API，并配置批注专用模型、推理强度和输出长度。可选的浅层联网解释最多围绕 2 个检索问题、采用不超过 3 个权威来源，单次总时间限制为 15–45 秒；默认关闭。
+“文献入库”固定使用 MinerU precision `extract` 并输出 `md,json`，不使用会将图表替换为占位符的 `flash-extract`。常用层可选择 VLM、Pipeline 或 Auto 模型，并配置语言、OCR、公式、表格和是否附带原 PDF；高级层可限制 1-based 页码范围与请求超时。提取先进入 `tool-library/output/mineru-runs/`，通过 Markdown、JSON、页码和资产检查后才发布。
+
+阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code、OpenCode 或已验证 Direct API，并配置批注专用模型、推理强度和输出长度。普通解释可自由选择 Agent 或 Direct API；启用浅层联网后仅使用 Agent，最多围绕 2 个检索问题、采用不超过 3 个权威来源，单次总时间限制为 15–45 秒。
 
 ### 模型后端
 
@@ -75,9 +78,9 @@ sources / methods / concepts / code / projects / synthesis
 1. **Codex CLI**：可在设置中选择官方 Codex 或 CC Switch。官方模式显式使用 OpenAI provider 和 Dashboard 的官方模型策略；CC Switch 模式沿用当前 `~/.codex/config.toml`，插件不改写供应商或凭据文件。
 2. **Claude Code**：可在设置中选择官方 Claude Code 或 CC Switch 配置来源。查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和综合分析支持受审计的阶段所有权写入。
 3. **OpenCode**：可选择官方 OpenCode Zen 或 CC Switch。官方模式默认提供当前内置的免费 Zen 模型候选并动态运行 `opencode models opencode` 校验；CC Switch 模式读取当前 OpenCode 全局配置和模型。查询与批注保持只读，代码分析和综合分析支持受审计的阶段所有权写入。第一版不传递图片。
-4. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio。
+4. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio，定位为只读知识库助手。
 
-Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。Qwen3.7-Plus 可在通过能力测试后使用供应商原生联网搜索。
+Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。插件只向 Direct API 发送确定性检索筛选出的 Vault 页面和用户明确附加的图片；Direct API 不联网、不执行 Skill、不调用工具、不写入文件。知识库模式允许用户在 Direct API 与 Agent 之间自由选择，联网搜索、运行工具和文件修改则由 Agent 承担。
 
 CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入。所有 AI 写入任务都由宿主在运行前建立操作级快照，完成后生成变更清单并执行知识库体检；手动停止、进程失败、越界写入或验证失败时自动回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
 
@@ -122,6 +125,15 @@ knowledge-base/
   代码项目索引.md
   R知识索引.md
   Linux与命令行索引.md
+  papers/         MinerU 生成并由项目验证的原文阅读包
+    <citekey>/
+      article.md
+      images/
+      mineru-result.json      阅读顺序、版面元素与资源路径
+      _extraction/
+        manifest.json         来源哈希、MinerU 版本与提取参数
+        validation.json       Markdown、JSON、页码和资产检查
+        source.pdf            可选的原始 PDF 副本
   wiki/
     sources/       单篇论文或来源
     methods/       方法、模型、协议和统计流程
@@ -164,6 +176,7 @@ knowledge-base/
 - Python 3
 - R / `Rscript`，仅代码练习或 R 工作流需要
 - Node.js 与 pnpm/npm，仅开发插件时需要
+- `mineru-open-api` CLI，仅在“文献入库”生成原文 Markdown 时需要
 
 本工作区约定使用：
 
@@ -171,7 +184,7 @@ knowledge-base/
 D:\python\python.exe
 ```
 
-Python、Rscript、各 CLI 可执行文件和项目根目录都可以在 Agent Dashboard 设置中调整。Codex CLI、Claude Code 和 OpenCode 会依次检查专用环境变量、常见安装目录、系统 PATH/`where.exe`，最后保留有效的手动路径；设置页会显示检测来源并允许重新检测。
+Python、Rscript、各 CLI 可执行文件、MinerU 私有服务地址和项目根目录都可以在 Agent Dashboard 设置中调整。MinerU CLI 可通过 `MINERU_CLI_PATH`、常见安装目录、系统 PATH/`where.exe` 或手动路径检测；Token 由 `mineru-open-api auth` 或 `MINERU_TOKEN` 管理，不写入插件配置。Codex CLI、Claude Code 和 OpenCode 使用同样的分层路径检测策略。
 
 ### 2. 获取项目
 
@@ -195,7 +208,7 @@ cd paper_knowledge_base
 在 Agent Dashboard 设置中依次检查：
 
 1. 项目根目录。
-2. Python、Rscript 和计划使用的 CLI 路径。
+2. Python、Rscript、MinerU 和计划使用的 Agent CLI 路径。
 3. Codex CLI、Claude Code 或 OpenCode 的配置来源、模型与连接状态。
 4. 可选的 Direct API Provider、SecretStorage 凭据、模型列表和连接测试。
 
@@ -267,7 +280,7 @@ Git 默认忽略：
 
 - Agent Dashboard 当前为桌面端插件，不支持 Obsidian Mobile。
 - 知识库检索不是向量数据库；当前核心是词法检索、wikilink 图扩展和可解释回退。
-- Direct API 联网来源的可验证程度取决于供应商协议。Qwen OpenAI 兼容接口可能只在回答正文中返回链接，插件会将其标记为模型提供、尚未独立核验。
+- Direct API 固定为知识库内只读推理；需要联网、运行工具或写入知识页面时必须切换到 Agent。
 - 代码练习使用独立进程和累计重放模拟 notebook 单元格，不是持久 Jupyter/R 内核。
 - 仓库不会公开提交个人论文库、PDF、API Key 或本地 Zotero 数据。
 

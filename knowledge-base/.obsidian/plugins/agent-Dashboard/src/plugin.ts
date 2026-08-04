@@ -15,6 +15,7 @@ import {
 	DEFAULT_SETTINGS,
 	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
+	findPreferredMineruExecutable,
 	findPreferredOpenCodeExecutable,
 	getClaudeDefaultModelLabel,
 	getCodexDefaultModelLabel,
@@ -73,7 +74,6 @@ import {
 } from "./providers/adapters";
 import {
 	normalizeProviderProfile,
-	profileSupportsDirectWebSearch,
 } from "./providers/profile";
 import {
 	ProviderConnectionError,
@@ -702,14 +702,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		}
 		this.querySessions = this.querySessions.map((session) => {
 			const queryBackendId = this.resolveQueryBackendId(session.queryBackendId);
-			const queryProfile = isCliBackendId(queryBackendId)
-				? null
-				: this.getProviderProfile(queryBackendId);
 			const retrievalMode = (
 				queryBackendId === "codex-cli"
 				|| queryBackendId === "claude-code"
 				|| queryBackendId === "opencode"
-				|| profileSupportsDirectWebSearch(queryProfile)
 			)
 				? session.retrievalMode
 				: "vault";
@@ -762,6 +758,17 @@ export default class AgentDashboardPlugin extends Plugin {
 			this.settings.openCodeExecutable = preferredOpenCodeExecutable;
 			changed = true;
 		}
+		const preferredMineruExecutable = findPreferredMineruExecutable();
+		const configuredMineruExecutable = String(this.settings.mineruExecutable || "").trim();
+		if (!configuredMineruExecutable && preferredMineruExecutable) {
+			this.settings.mineruExecutable = preferredMineruExecutable;
+			changed = true;
+		}
+		const legacySettings = this.settings as unknown as Record<string, unknown>;
+		if ("paper2mdRoot" in legacySettings) {
+			delete legacySettings.paper2mdRoot;
+			changed = true;
+		}
 		if (!["official", "cc-switch"].includes(String(storedSettings.openCodeConfigSource || ""))) {
 			this.settings.openCodeConfigSource = "official";
 			changed = true;
@@ -790,6 +797,15 @@ export default class AgentDashboardPlugin extends Plugin {
 			)
 		) {
 			this.settings.annotationBackendId = "auto";
+			changed = true;
+		}
+		if (
+			this.settings.annotationWebSearchEnabled === true
+			&& !["auto", "codex-cli", "claude-code", "opencode"].includes(
+				this.settings.annotationBackendId,
+			)
+		) {
+			this.settings.annotationBackendId = "codex-cli";
 			changed = true;
 		}
 		if (!REASONING_OPTIONS.some((option) => option.id === this.settings.annotationCodexReasoningEffort)) {
@@ -1031,9 +1047,6 @@ export default class AgentDashboardPlugin extends Plugin {
 					message: String(result.message || "").slice(0, 500),
 					responseTimeMs: Number(result.responseTimeMs || 0),
 					streamingVerified: result.streaming?.verified === true,
-					webSearchVerified: result.webSearch?.verified === true,
-					webSearchError: String(result.webSearch?.error || "").slice(0, 500),
-					webSearchPreview: String(result.webSearch?.preview || "").slice(0, 160),
 					testedAt: String(result.testedAt || new Date().toISOString()),
 				};
 				profile.updatedAt = new Date().toISOString();
@@ -1594,6 +1607,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		if (!action) {
 			checks.push(["Code practice runner", fs.existsSync(practiceRunner)]);
 			checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs.existsSync(this.settings.rscriptExecutable)]);
+			checks.push(["MinerU CLI", Boolean(this.settings.mineruExecutable) && fs.existsSync(this.settings.mineruExecutable)]);
 		}
 		if (!action || action.id === "okf-export") {
 			checks.push(["OKF exporter", fs.existsSync(exporter)]);
@@ -1648,14 +1662,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		text: string,
 		evidence: VaultEvidencePacket[],
 		trace: RetrievalTrace,
-		mode: QueryRetrievalMode,
 		profile: ProviderProfile,
 	): UnknownRecord {
 		return this.directQueryService.buildRetrievalResult(
 			text,
 			evidence,
 			trace,
-			mode,
 			profile,
 		);
 	}
@@ -2008,14 +2020,12 @@ export default class AgentDashboardPlugin extends Plugin {
 		priorMessages: QueryMessage[],
 		evidence: VaultEvidencePacket[],
 		attachments: VaultImageAttachment[] = [],
-		mode: QueryRetrievalMode = "vault",
 	): ChatMessage[] {
 		return this.directQueryService.buildMessages(
 			question,
 			priorMessages,
 			evidence,
 			attachments,
-			mode,
 		);
 	}
 

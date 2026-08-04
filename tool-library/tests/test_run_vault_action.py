@@ -240,6 +240,172 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(retrieval_mode, "vault")
         self.assertEqual(attachments, [])
 
+    def test_paper_ingest_options_are_normalized_as_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mineru = Path(temp_dir) / "mineru-open-api.cmd"
+            mineru.write_text("@echo off\n", encoding="utf-8")
+            raw_input = json.dumps(
+                {
+                    "kind": "dashboard-action-request",
+                    "version": 1,
+                    "action": "paper-ingest",
+                    "request": r"D:\Papers\example.pdf",
+                    "options": {
+                        "createArticleMarkdown": True,
+                        "createArticleWiki": True,
+                        "articleWikiSource": "auto",
+                    },
+                    "toolConfig": {"mineruExecutable": str(mineru)},
+                }
+            )
+
+            request, context, retrieval_mode, attachments = (
+                run_vault_action.normalize_action_input(
+                    "paper-ingest",
+                    raw_input,
+                )
+            )
+
+        self.assertIn("generate_original_markdown: yes", request)
+        self.assertIn("create_initial_article_wiki: yes", request)
+        self.assertIn("article_wiki_source: auto", request)
+        self.assertIn(f"mineru_executable: {mineru.resolve()}", request)
+        self.assertIn("mineru_mode: precision-extract", request)
+        self.assertIn("mineru_formats: md,json", request)
+        self.assertIn("mineru_model: vlm", request)
+        self.assertIn("mineru_language: en", request)
+        self.assertIn("mineru_ocr: no", request)
+        self.assertIn("mineru_formula: yes", request)
+        self.assertIn("mineru_table: yes", request)
+        self.assertIn("mineru_pages: <all>", request)
+        self.assertIn("mineru_timeout_seconds: 600", request)
+        self.assertIn(r"D:\Papers\example.pdf", request)
+        self.assertEqual(context, "")
+        self.assertEqual(retrieval_mode, "vault")
+        self.assertEqual(attachments, [])
+
+    def test_paper_ingest_rejects_empty_output_selection(self) -> None:
+        raw_input = json.dumps(
+            {
+                "kind": "dashboard-action-request",
+                "version": 1,
+                "action": "paper-ingest",
+                "request": r"D:\Papers\example.pdf",
+                "options": {
+                    "createArticleMarkdown": False,
+                    "createArticleWiki": False,
+                    "articleWikiSource": "auto",
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least one selected output"):
+            run_vault_action.normalize_action_input("paper-ingest", raw_input)
+
+    def test_paper_ingest_rejects_missing_mineru_cli(self) -> None:
+        raw_input = json.dumps(
+            {
+                "kind": "dashboard-action-request",
+                "version": 1,
+                "action": "paper-ingest",
+                "request": r"D:\Papers\example.pdf",
+                "options": {
+                    "createArticleMarkdown": True,
+                    "createArticleWiki": False,
+                    "articleWikiSource": "auto",
+                },
+                "toolConfig": {"mineruExecutable": ""},
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "not configured"):
+            run_vault_action.normalize_action_input("paper-ingest", raw_input)
+
+    def test_paper_ingest_normalizes_mineru_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mineru = Path(temp_dir) / "mineru-open-api.cmd"
+            mineru.write_text("@echo off\n", encoding="utf-8")
+            raw_input = json.dumps(
+                {
+                    "kind": "dashboard-action-request",
+                    "version": 1,
+                    "action": "paper-ingest",
+                    "request": r"D:\Papers\example.pdf",
+                    "options": {
+                        "createArticleMarkdown": True,
+                        "createArticleWiki": False,
+                        "mineruModel": "pipeline",
+                        "mineruLanguage": "ch",
+                        "mineruOcr": True,
+                        "mineruFormula": False,
+                        "mineruTable": True,
+                        "mineruPages": "1-3,5",
+                        "mineruTimeoutSeconds": 900,
+                        "mineruIncludeSourcePdf": True,
+                    },
+                    "toolConfig": {
+                        "mineruExecutable": str(mineru),
+                        "mineruBaseUrl": "https://mineru.example.test/",
+                    },
+                }
+            )
+
+            request, _, _, _ = run_vault_action.normalize_action_input(
+                "paper-ingest",
+                raw_input,
+            )
+
+        self.assertIn("mineru_model: pipeline", request)
+        self.assertIn("mineru_language: ch", request)
+        self.assertIn("mineru_ocr: yes", request)
+        self.assertIn("mineru_formula: no", request)
+        self.assertIn("mineru_table: yes", request)
+        self.assertIn("mineru_pages: 1-3,5", request)
+        self.assertIn("mineru_timeout_seconds: 900", request)
+        self.assertIn("mineru_include_source_pdf: yes", request)
+        self.assertIn("mineru_base_url: https://mineru.example.test/", request)
+
+    def test_paper_ingest_rejects_invalid_mineru_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mineru = Path(temp_dir) / "mineru-open-api.cmd"
+            mineru.write_text("@echo off\n", encoding="utf-8")
+            raw_input = json.dumps(
+                {
+                    "kind": "dashboard-action-request",
+                    "version": 1,
+                    "action": "paper-ingest",
+                    "request": r"D:\Papers\example.pdf",
+                    "options": {
+                        "createArticleMarkdown": True,
+                        "createArticleWiki": False,
+                        "mineruPages": "0-2",
+                    },
+                    "toolConfig": {"mineruExecutable": str(mineru)},
+                }
+            )
+
+            with self.assertRaisesRegex(ValueError, "page numbers start at 1"):
+                run_vault_action.normalize_action_input("paper-ingest", raw_input)
+
+    def test_pdf_xray_preserves_selected_source(self) -> None:
+        raw_input = json.dumps(
+            {
+                "kind": "dashboard-action-request",
+                "version": 1,
+                "action": "pdf-xray",
+                "request": "knowledge-base/papers/example/article.md",
+                "options": {"pdfXraySource": "article"},
+            }
+        )
+
+        request, _, _, _ = run_vault_action.normalize_action_input(
+            "pdf-xray",
+            raw_input,
+        )
+
+        self.assertIn("deep_read_source: article", request)
+        self.assertIn("knowledge-base/papers/example/article.md", request)
+
     def test_annotation_explanation_is_read_only_and_returns_only_explanation(
         self,
     ) -> None:
@@ -693,6 +859,28 @@ class ProcessTreeStopTests(unittest.TestCase):
             time.sleep(0.2)
             self.assertFalse(process_is_alive(int(pids["parent"])))
             self.assertFalse(process_is_alive(int(pids["child"])))
+
+    def test_run_process_forwards_child_output_for_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            child_code = (
+                "import sys\n"
+                "print('Vault lint: score 68/100, 3 error(s)')\n"
+                "print('lint diagnostic', file=sys.stderr)\n"
+                "raise SystemExit(1)\n"
+            )
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = run_vault_action.run_process(
+                    [sys.executable, "-c", child_code],
+                    Path(directory),
+                    30,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertIn("Vault lint: score 68/100", stdout.getvalue())
+            self.assertIn("lint diagnostic", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -346,6 +346,11 @@ class AgentBackendProtocolTests(unittest.TestCase):
             {"writes": True},
             PROJECT_ROOT,
         )
+        ingest_policy = build_action_access_policy(
+            "paper-ingest",
+            {"writes": True},
+            PROJECT_ROOT,
+        )
 
         self.assertEqual(read_policy.mode, "read-only")
         self.assertEqual(read_policy.write_scope, "none")
@@ -362,6 +367,19 @@ class AgentBackendProtocolTests(unittest.TestCase):
         self.assertIn(
             (PROJECT_ROOT / "tool-library" / "output" / "lint").resolve(),
             full_policy.allowed_roots,
+        )
+        self.assertIn(
+            (PROJECT_ROOT / "knowledge-base" / "papers").resolve(),
+            ingest_policy.allowed_roots,
+        )
+        self.assertIn(
+            (
+                PROJECT_ROOT
+                / "tool-library"
+                / "output"
+                / "mineru-runs"
+            ).resolve(),
+            ingest_policy.allowed_roots,
         )
 
     def test_access_policy_rejects_inconsistent_mode_and_scope(self) -> None:

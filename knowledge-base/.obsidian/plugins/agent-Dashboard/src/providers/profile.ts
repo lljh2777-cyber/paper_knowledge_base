@@ -21,56 +21,6 @@ export function modelHasKnownVisionSupport(model: unknown): boolean {
 	);
 }
 
-export function modelIsQwen37Plus(model: unknown): boolean {
-	return /^qwen3\.7-plus(?:$|-)/i.test(String(model || "").trim());
-}
-
-export function profileHasConfiguredQwenWebSearch(profile: unknown): boolean {
-	const source = asRecord(profile);
-	const webSearch = asRecord(source.webSearch);
-	return source.type === "openai-compatible"
-		&& modelIsQwen37Plus(source.model)
-		&& webSearch.enabled === true
-		&& webSearch.protocol === "qwen-chat-completions";
-}
-
-export function profileSupportsDirectWebSearch(profile: unknown): boolean {
-	const source = asRecord(profile);
-	return profileHasConfiguredQwenWebSearch(source)
-		&& asRecord(source.lastTest).webSearchVerified === true;
-}
-
-export function normalizeAssignedSites(value: unknown): string[] {
-	const seen = new Set<string>();
-	const sites: string[] = [];
-	const values = Array.isArray(value)
-		? value
-		: String(value || "").split(/[\s,，;；]+/);
-	for (const item of values) {
-		const raw = String(item || "").trim().toLowerCase();
-		if (!raw) continue;
-		let hostname = raw;
-		try {
-			hostname = new URL(raw.includes("://") ? raw : `https://${raw}`).hostname.toLowerCase();
-		} catch {
-			continue;
-		}
-		if (
-			!hostname
-			|| hostname === "localhost"
-			|| !hostname.includes(".")
-			|| !/^[a-z0-9.-]+$/i.test(hostname)
-			|| seen.has(hostname)
-		) {
-			continue;
-		}
-		seen.add(hostname);
-		sites.push(hostname);
-		if (sites.length >= 25) break;
-	}
-	return sites;
-}
-
 export function profileSupportsQueryImage(profile: unknown): boolean {
 	const source = asRecord(profile);
 	return source.type === "openai-compatible"
@@ -91,15 +41,6 @@ export interface ProviderProfile {
 		vision: boolean;
 		visionConfigured: boolean;
 	};
-	webSearch: {
-		enabled: boolean;
-		configured: boolean;
-		protocol: "qwen-chat-completions";
-		forcedSearch: boolean;
-		searchStrategy: "turbo" | "max" | "agent";
-		assignedSites: string[];
-		timeoutSeconds: number;
-	};
 	lastTest: {
 		ok: boolean;
 		type: string;
@@ -109,9 +50,6 @@ export interface ProviderProfile {
 		message: string;
 		responseTimeMs: number;
 		streamingVerified: boolean;
-		webSearchVerified: boolean;
-		webSearchError: string;
-		webSearchPreview: string;
 		testedAt: string;
 	} | null;
 	createdAt: string;
@@ -130,15 +68,6 @@ export function makeProviderProfile(type: unknown = "openai"): ProviderProfile {
 		secretId: "",
 		timeoutSeconds: 20,
 		capabilities: { ...metadata.capabilities, visionConfigured: false },
-		webSearch: {
-			enabled: false,
-			configured: false,
-			protocol: "qwen-chat-completions",
-			forcedSearch: true,
-			searchStrategy: "turbo",
-			assignedSites: [],
-			timeoutSeconds: 60,
-		},
 		lastTest: null,
 		createdAt: now,
 		updatedAt: now,
@@ -148,19 +77,11 @@ export function makeProviderProfile(type: unknown = "openai"): ProviderProfile {
 export function normalizeProviderProfile(profile: unknown): ProviderProfile {
 	const source = asRecord(profile);
 	const capabilities = asRecord(source.capabilities);
-	const webSearch = asRecord(source.webSearch);
 	const rawLastTest = asRecord(source.lastTest);
 	const metadata = providerMetadata(source.type);
 	const fallback = makeProviderProfile(metadata.id);
 	const model = String(source.model || metadata.defaultModel).trim().slice(0, 160);
 	const visionConfigured = capabilities.visionConfigured === true;
-	const webSearchConfigured = webSearch.configured === true;
-	const webSearchEnabled = webSearchConfigured
-		? webSearch.enabled === true
-		: modelIsQwen37Plus(model);
-	const strategy = String(webSearch.searchStrategy || "");
-	const webSearchStrategy = strategy === "max" || strategy === "agent" ? strategy : "turbo";
-	const webSearchTimeout = Number.parseInt(String(webSearch.timeoutSeconds || ""), 10);
 	const timeout = Number.parseInt(String(source.timeoutSeconds || ""), 10);
 	const lastTest = source.lastTest && typeof source.lastTest === "object"
 		? {
@@ -176,9 +97,6 @@ export function normalizeProviderProfile(profile: unknown): ProviderProfile {
 			message: String(rawLastTest.message || "").slice(0, 500),
 			responseTimeMs: Number(rawLastTest.responseTimeMs || 0),
 			streamingVerified: rawLastTest.streamingVerified === true,
-			webSearchVerified: rawLastTest.webSearchVerified === true,
-			webSearchError: String(rawLastTest.webSearchError || "").slice(0, 500),
-			webSearchPreview: String(rawLastTest.webSearchPreview || "").slice(0, 160),
 			testedAt: String(rawLastTest.testedAt || ""),
 		}
 		: null;
@@ -203,17 +121,6 @@ export function normalizeProviderProfile(profile: unknown): ProviderProfile {
 					|| metadata.capabilities.vision
 					|| modelHasKnownVisionSupport(model),
 			visionConfigured,
-		},
-		webSearch: {
-			enabled: webSearchEnabled,
-			configured: webSearchConfigured,
-			protocol: "qwen-chat-completions",
-			forcedSearch: webSearch.forcedSearch !== false,
-			searchStrategy: webSearchStrategy,
-			assignedSites: normalizeAssignedSites(webSearch.assignedSites),
-			timeoutSeconds: Number.isFinite(webSearchTimeout)
-				? Math.max(20, Math.min(120, webSearchTimeout))
-				: 60,
 		},
 		lastTest,
 		createdAt: String(source.createdAt || fallback.createdAt),

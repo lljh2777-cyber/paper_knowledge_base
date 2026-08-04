@@ -21,10 +21,6 @@ import {
 import {
 	makeProviderProfile,
 	modelHasKnownVisionSupport,
-	modelIsQwen37Plus,
-	normalizeAssignedSites,
-	profileHasConfiguredQwenWebSearch,
-	profileSupportsDirectWebSearch,
 	type ProviderProfile,
 } from "../providers/profile";
 import type { ProviderModel } from "../providers/shared";
@@ -187,8 +183,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsNavigationItem(navigation, {
 			page: "direct-api",
 			icon: "plug-zap",
-			title: "Direct API",
-			description: "供应商、SecretStorage 凭据、模型能力、联网搜索和连接测试。",
+			title: "Direct API 知识助手",
+			description: "只读知识库助手的供应商、凭据、模型能力和连接测试。",
 			status: activeProfile
 				? `${activeProfile.name} · 已启用`
 				: profiles.length
@@ -249,6 +245,28 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				this.plugin.invalidateCliModelDiscovery("opencode");
 			},
 		});
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "mineru",
+			name: "MinerU 可执行文件",
+			description: "用于文献入库的 PDF 高精度提取；插件调用 precision extract，不使用快速占位模式。",
+			placeholder: "mineru-open-api.cmd",
+			getValue: () => this.plugin.settings.mineruExecutable,
+			setValue: (value) => {
+				this.plugin.settings.mineruExecutable = value;
+			},
+		});
+		new Setting(containerEl)
+			.setName("MinerU 私有服务地址")
+			.setDesc("可选。留空使用 MinerU 官方服务；仅私有部署时填写 base URL。Token 由 mineru-open-api auth 或 MINERU_TOKEN 管理，不写入插件配置。")
+			.addText((text) =>
+				text
+					.setPlaceholder("https://mineru.example.com")
+					.setValue(this.plugin.settings.mineruBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.mineruBaseUrl = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
 		new Setting(containerEl)
 			.setName("Python 可执行文件")
 			.setDesc("用于统一 runner、知识库体检和 Python 代码练习。")
@@ -711,7 +729,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsPageHeader(
 			containerEl,
 			"批注 AI",
-			"单独配置选中文字后“AI 解释”使用的后端、模型和受支持参数。批注解释始终只读；联网仅按浅层、短时预算开放。",
+			"普通解释可自由选择 Agent 或 Direct API；启用浅层联网后仅使用 Agent，始终不写入文件。",
 			true,
 		);
 		const verifiedProfiles = this.plugin.settings.providerProfiles.filter(
@@ -720,15 +738,23 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		const backendId = this.plugin.settings.annotationBackendId || "auto";
 		new Setting(containerEl)
 			.setName("执行后端")
-			.setDesc("自动模式使用当前启用且已验证的 Direct API；未配置时使用 Codex CLI。")
+			.setDesc(
+				this.plugin.settings.annotationWebSearchEnabled
+					? "联网解释仅使用 Agent；自动模式使用 Codex CLI。"
+					: "普通解释可自由选择 Agent 或已验证的 Direct API；自动模式优先使用默认 Direct API。",
+			)
 			.addDropdown((dropdown) => {
 				dropdown
 					.addOption("auto", "自动选择")
-					.addOption("codex-cli", "Codex CLI")
-					.addOption("claude-code", "Claude Code")
-					.addOption("opencode", "OpenCode");
+					.addOption("codex-cli", "Agent · Codex CLI")
+					.addOption("claude-code", "Agent · Claude Code")
+					.addOption("opencode", "Agent · OpenCode");
 				verifiedProfiles.forEach((profile) => {
 					dropdown.addOption(profile.id, `Direct API · ${profile.name}`);
+					const option = dropdown.selectEl.options[
+						dropdown.selectEl.options.length - 1
+					];
+					if (option) option.disabled = this.plugin.settings.annotationWebSearchEnabled;
 				});
 				dropdown
 					.setValue(backendId)
@@ -738,7 +764,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						this.display();
 					});
 			});
-		this.renderAnnotationWebSearchSettings(containerEl, backendId, verifiedProfiles);
+		this.renderAnnotationWebSearchSettings(containerEl, backendId);
 
 		if (backendId === "auto") {
 			const activeProfile = verifiedProfiles.find(
@@ -747,12 +773,17 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName("自动选择顺序")
 				.setDesc(
-					activeProfile
+					this.plugin.settings.annotationWebSearchEnabled
+						? "联网解释固定使用 Codex CLI；关闭联网后恢复 Direct API 优先。"
+					: activeProfile
 						? `使用 Direct API“${activeProfile.name}”（${activeProfile.model}）；若以后停用该配置，则使用下方 Codex 回退参数。`
 						: "当前没有启用且已验证的 Direct API，将直接使用下方 Codex 回退参数。",
 				);
 			this.renderAnnotationCliSettings(containerEl, "codex-cli", true);
-			this.renderAnnotationTokenSetting(containerEl, Boolean(activeProfile));
+			this.renderAnnotationTokenSetting(
+				containerEl,
+				Boolean(activeProfile) && !this.plugin.settings.annotationWebSearchEnabled,
+			);
 			return;
 		}
 
@@ -791,30 +822,24 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	private renderAnnotationWebSearchSettings(
 		containerEl: HTMLElement,
 		backendId: string,
-		verifiedProfiles: ProviderProfile[],
 	): void {
-		const directProfile = backendId === "auto"
-			? verifiedProfiles.find(
-				(profile) => profile.id === this.plugin.settings.activeProviderId,
-			)
-			: verifiedProfiles.find((profile) => profile.id === backendId);
-		const directApiUnsupported = Boolean(
-			directProfile && !profileSupportsDirectWebSearch(directProfile),
-		);
 		new Setting(containerEl)
 			.setName("浅层联网解释")
 			.setDesc(
-				directApiUnsupported
-					? backendId === "auto"
-						? `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；自动模式启用后将回退到 Codex CLI。`
-						: `当前 Direct API“${directProfile?.name}”未通过联网搜索测试；启用后批注请求会明确报错，不会伪装成联网结果。`
-					: "关闭时只解释当前段落。启用后最多围绕 2 个检索问题、采用不超过 3 个权威来源，不追踪二级链接。",
+				"关闭时可使用 Direct API 或 Agent。启用后仅使用 Agent，最多围绕 2 个检索问题、采用不超过 3 个权威来源，不追踪二级链接。",
 			)
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.annotationWebSearchEnabled)
 					.onChange(async (value) => {
 						this.plugin.settings.annotationWebSearchEnabled = value;
+						if (
+							value
+							&& !["auto", "codex-cli", "claude-code", "opencode"].includes(backendId)
+						) {
+							this.plugin.settings.annotationBackendId = "codex-cli";
+							new Notice("Direct API 不联网，批注后端已切换为 Codex CLI");
+						}
 						await this.plugin.saveSettings();
 						this.display();
 					})
@@ -841,7 +866,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("搜索深度")
-			.setDesc("固定为浅层：Direct API 强制 turbo；CLI 后端仅临时开放联网工具，并受上述总时间限制。")
+			.setDesc("固定为浅层：Agent 仅临时开放联网工具，并受上述总时间限制。")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("shallow", "浅层（固定）")
@@ -1041,8 +1066,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	private renderDirectApiSettings(containerEl: HTMLElement): void {
 		this.createSettingsPageHeader(
 			containerEl,
-			"Direct API",
-			"管理知识库查询可用的独立模型服务。Direct API 不执行 skill 或文件写入。",
+			"Direct API 知识助手",
+			"管理只读知识库助手使用的模型服务。Direct API 只接收插件筛选出的 Vault 上下文，不联网、不执行 Skill、不调用工具，也不写入文件。",
 			true,
 		);
 		this.createProviderSectionHeader(
@@ -1270,15 +1295,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					}
 					profile.type = next.id;
 					profile.capabilities = { ...next.capabilities, visionConfigured: false };
-					profile.webSearch = {
-						enabled: false,
-						configured: false,
-						protocol: "qwen-chat-completions",
-						forcedSearch: true,
-						searchStrategy: "turbo",
-						assignedSites: [],
-						timeoutSeconds: 60,
-					};
 					profile.name = profile.name === previous.label ? next.label : profile.name;
 					this.invalidateProviderProfile(profile);
 					await this.plugin.saveSettings();
@@ -1391,9 +1407,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						if (profile.capabilities.visionConfigured !== true) {
 							profile.capabilities.vision = modelHasKnownVisionSupport(profile.model);
 						}
-						if (profile.webSearch.configured !== true) {
-							profile.webSearch.enabled = modelIsQwen37Plus(profile.model);
-						}
 						this.invalidateProviderProfile(profile);
 						await this.plugin.saveSettings();
 					})
@@ -1409,9 +1422,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					if (profile.capabilities.visionConfigured !== true) {
 						profile.capabilities.vision = modelHasKnownVisionSupport(profile.model);
 					}
-					if (profile.webSearch.configured !== true) {
-						profile.webSearch.enabled = modelIsQwen37Plus(profile.model);
-					}
 					this.invalidateProviderProfile(profile);
 					await this.plugin.saveSettings();
 					this.display();
@@ -1422,7 +1432,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		new Setting(modelForm)
 			.setName("模型能力")
 			.setDesc(
-				`流式输出：${profile.capabilities.streaming ? "支持" : "不支持"}；PDF：${profile.capabilities.pdf ? "支持" : "不支持"}；视觉：${profile.capabilities.vision ? "支持" : "不支持"}；联网搜索：${profileHasConfiguredQwenWebSearch(profile) ? "已配置" : "未启用"}。连接测试会实际探测流式与已启用的联网请求。`,
+				`流式输出：${profile.capabilities.streaming ? "支持" : "不支持"}；PDF：${profile.capabilities.pdf ? "支持" : "不支持"}；视觉：${profile.capabilities.vision ? "支持" : "不支持"}。Direct API 固定为知识库内只读推理，不开放联网工具。`,
 			);
 		new Setting(modelForm)
 			.setName("视觉输入")
@@ -1443,105 +1453,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 						this.display();
 					})
 			);
-		const qwenWebSearchAvailable = profile.type === "openai-compatible"
-			&& modelIsQwen37Plus(profile.model);
-		new Setting(modelForm)
-			.setName("Qwen3.7-Plus 联网搜索")
-			.setDesc(
-				qwenWebSearchAvailable
-					? "通过 OpenAI 兼容 Chat Completions 的 enable_search 参数启用。切换后需重新测试连接。"
-					: "仅在 OpenAI 兼容配置使用 qwen3.7-plus 或其快照模型时可启用。",
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(profile.webSearch.enabled === true)
-					.setDisabled(!qwenWebSearchAvailable)
-					.onChange(async (value) => {
-						profile.webSearch.enabled = value;
-						profile.webSearch.configured = true;
-						this.invalidateProviderProfile(profile);
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
-		if (qwenWebSearchAvailable && profile.webSearch.enabled) {
-			new Setting(modelForm)
-				.setName("搜索协议")
-				.setDesc("当前 Direct API 适配器使用 /v1/chat/completions；不会发送 Responses API 或 DashScope 原生请求。")
-				.addDropdown((dropdown) =>
-					dropdown
-						.addOption("qwen-chat-completions", "Qwen Chat Completions")
-						.setValue(profile.webSearch.protocol)
-						.setDisabled(true)
-				);
-			new Setting(modelForm)
-				.setName("强制联网")
-				.setDesc("启用 forced_search，确保选择“联网搜索”时每轮都触发搜索，而不是由模型自行判断。")
-				.addToggle((toggle) =>
-					toggle
-						.setValue(profile.webSearch.forcedSearch !== false)
-						.onChange(async (value) => {
-							profile.webSearch.forcedSearch = value;
-							this.invalidateProviderProfile(profile);
-							await this.plugin.saveSettings();
-						})
-				);
-			const webTimeoutSetting = new Setting(modelForm)
-				.setName("联网请求超时")
-				.setDesc(
-					`联网搜索包含检索和内容整合，单独使用更长的请求上限。当前：${profile.webSearch.timeoutSeconds} 秒。`,
-				)
-				.addSlider((slider) =>
-					slider
-						.setLimits(20, 120, 5)
-						.setValue(profile.webSearch.timeoutSeconds)
-						.setDynamicTooltip()
-						.onChange(async (value) => {
-							profile.webSearch.timeoutSeconds = value;
-							this.invalidateProviderProfile(profile);
-							webTimeoutSetting.setDesc(
-								`联网搜索包含检索和内容整合，单独使用更长的请求上限。当前：${value} 秒。`,
-							);
-							await this.plugin.saveSettings();
-						})
-				);
-			new Setting(modelForm)
-				.setName("搜索策略")
-				.setDesc("turbo 适合日常查询；max 搜索更全面；agent 可能受模型版本和地域限制。")
-				.addDropdown((dropdown) =>
-					dropdown
-						.addOption("turbo", "turbo · 默认")
-						.addOption("max", "max · 更全面")
-						.addOption("agent", "agent · 多轮搜索")
-						.setValue(profile.webSearch.searchStrategy)
-						.onChange(async (value) => {
-							profile.webSearch.searchStrategy = value as "turbo" | "max" | "agent";
-							if (value !== "turbo") profile.webSearch.assignedSites = [];
-							this.invalidateProviderProfile(profile);
-							await this.plugin.saveSettings();
-							this.display();
-						})
-				);
-			new Setting(modelForm)
-				.setName("限定搜索站点")
-				.setDesc(
-					profile.webSearch.searchStrategy === "turbo"
-						? "可选。输入逗号分隔的域名，最多 25 个；百炼仅在 turbo 策略下应用 assigned_site_list。"
-						: "当前策略不是 turbo，因此不会发送 assigned_site_list。",
-				)
-				.addTextArea((text) =>
-					text
-						.setPlaceholder("pubmed.ncbi.nlm.nih.gov, nature.com")
-						.setValue(profile.webSearch.assignedSites.join(", "))
-						.setDisabled(profile.webSearch.searchStrategy !== "turbo")
-						.onChange(async (value) => {
-							profile.webSearch.assignedSites = normalizeAssignedSites(value);
-							this.invalidateProviderProfile(profile);
-							await this.plugin.saveSettings();
-						})
-				);
-		}
-
 		const controls = new Setting(modelForm)
 			.setName("测试连接")
 			.setDesc("验证 endpoint、凭据、模型和流式协议；成功后自动设为默认 Direct API 配置。");
@@ -1580,13 +1491,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				streaming: {
 					supported: profile.capabilities.streaming,
 					verified: profile.lastTest.streamingVerified,
-				},
-				webSearch: {
-					supported: profileHasConfiguredQwenWebSearch(profile),
-					verified: profile.lastTest.webSearchVerified,
-					error: profile.lastTest.webSearchError,
-					protocol: profile.webSearch.protocol,
-					preview: profile.lastTest.webSearchPreview,
 				},
 				pdf: { supported: profile.capabilities.pdf, verified: false },
 				testedAt: profile.lastTest.testedAt,
@@ -1638,15 +1542,19 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				: "不支持";
 			addRow("流式输出", streaming);
 			addRow("PDF", result.pdf?.supported ? "支持，未上传文件验证" : "不支持");
-			if (result.webSearch?.supported) {
+			const isAgent = ["codex-cli", "claude-code", "opencode"].includes(
+				String(result.provider || ""),
+			);
+			if (isAgent && result.webSearch?.supported) {
 				addRow(
 					"联网搜索",
 					result.webSearch.verified
-						? "请求已接受并返回内容"
-						: `未通过${result.webSearch.error ? `：${result.webSearch.error}` : ""}`,
+						? "支持，已验证"
+						: `按任务开放${result.webSearch.note ? `：${result.webSearch.note}` : ""}`,
 				);
-				addRow("搜索协议", result.webSearch.protocol || "Qwen Chat Completions");
-				if (result.webSearch.preview) addRow("联网测试响应", result.webSearch.preview);
+			}
+			if (!isAgent) {
+				addRow("能力边界", "仅知识库上下文，不联网、不写入");
 			}
 			addRow("响应时间", `${result.responseTimeMs} ms`);
 			if (result.responsePreview) addRow("最小响应", result.responsePreview);

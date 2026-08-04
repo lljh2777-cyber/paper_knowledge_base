@@ -1,5 +1,24 @@
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
+export type ArticleWikiSource = "auto" | "pdf" | "article";
+export type PdfXraySource = "pdf" | "article";
+export type MineruModel = "vlm" | "pipeline" | "auto" | "html";
+
+export interface DashboardActionOptions {
+	createArticleMarkdown?: boolean;
+	createArticleWiki?: boolean;
+	articleWikiSource?: ArticleWikiSource;
+	mineruModel?: MineruModel;
+	mineruLanguage?: string;
+	mineruOcr?: boolean;
+	mineruFormula?: boolean;
+	mineruTable?: boolean;
+	mineruPages?: string;
+	mineruTimeoutSeconds?: number;
+	mineruIncludeSourcePdf?: boolean;
+	pdfXraySource?: PdfXraySource;
+}
+
 export interface DashboardAction {
 	id: string;
 	label: string;
@@ -21,9 +40,9 @@ export const ACTIONS: readonly DashboardAction[] = [
 	{
 		id: "paper-ingest",
 		label: "文献入库",
-		agent: "research-vault-ingest",
-		description: "输入 PDF、本地来源、DOI、URL、Zotero key 或 BibTeX/RIS 记录。该操作可更新入库阶段拥有的元数据、索引和日志，但不会生成论文结论。",
-		placeholder: "例如：D:\\Downloads\\paper.pdf\n或 DOI / URL / Zotero key，以及你希望采用的处理范围",
+		agent: "paper-intake-pipeline",
+		description: "输入本地 PDF，并选择生成可追溯的原文 Markdown、创建初步文章 Wiki，或同时执行。身份核验、去重和元数据准备始终先执行。",
+		placeholder: "例如：D:\\Downloads\\paper.pdf\n可补充 citekey、DOI、Zotero key 或处理要求",
 		requiresInput: true,
 		writes: true,
 		enabled: true,
@@ -34,8 +53,8 @@ export const ACTIONS: readonly DashboardAction[] = [
 		id: "pdf-xray",
 		label: "PDF 深读",
 		agent: "paper_xray",
-		description: "输入 PDF 或 source note 路径及深读目标。该操作会调用 paper_xray 子智能体，只有完整检查全文证据后才允许升级为 x-ray。",
-		placeholder: "例如：knowledge-base/wiki/sources/example.md\n重点核验方法、图 2、数据来源与局限性",
+		description: "选择从原始 PDF 或已有 MinerU article.md 深读，再输入来源路径和核验目标。只有完整检查全文证据后才允许升级为 x-ray。",
+		placeholder: "例如：D:\\Papers\\example.pdf\n或 knowledge-base/papers/example/article.md\n重点核验方法、图 2、数据来源与局限性",
 		requiresInput: true,
 		writes: true,
 		enabled: true,

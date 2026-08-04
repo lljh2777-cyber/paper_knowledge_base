@@ -919,6 +919,208 @@
 	line-height: 1.55;
 }
 
+.agent-dashboard-action-options {
+	display: grid;
+	gap: 8px;
+	padding: 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+}
+
+.agent-dashboard-action-options.is-invalid {
+	border-color: var(--color-red);
+}
+
+.agent-dashboard-action-options h3,
+.agent-dashboard-action-options-description {
+	margin: 0;
+}
+
+.agent-dashboard-action-options h3 {
+	font-size: 13px;
+}
+
+.agent-dashboard-action-options-description {
+	color: var(--text-muted);
+	font-size: 11px;
+	line-height: 1.5;
+}
+
+.agent-dashboard-action-options-warning {
+	margin: 0;
+	padding: 8px 10px;
+	border-left: 3px solid var(--color-orange);
+	color: var(--text-warning);
+	background: color-mix(in srgb, var(--color-orange) 8%, transparent);
+	font-size: 11px;
+	line-height: 1.5;
+}
+
+.agent-dashboard-checkbox-option {
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
+	gap: 9px;
+	align-items: start;
+	padding: 9px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 5px;
+	background: var(--background-primary);
+	cursor: pointer;
+}
+
+.agent-dashboard-checkbox-option input {
+	margin-top: 2px;
+}
+
+.agent-dashboard-checkbox-option div,
+.agent-dashboard-action-options-field > div {
+	display: grid;
+	gap: 3px;
+	min-width: 0;
+}
+
+.agent-dashboard-checkbox-option strong,
+.agent-dashboard-action-options-field strong {
+	font-size: 12px;
+}
+
+.agent-dashboard-checkbox-option span,
+.agent-dashboard-action-options-field span {
+	color: var(--text-muted);
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.agent-dashboard-action-options-field {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(150px, 0.45fr);
+	gap: 12px;
+	align-items: center;
+	padding-top: 4px;
+}
+
+.agent-dashboard-action-options-field select {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+}
+
+.agent-dashboard-mineru-options {
+	display: grid;
+	gap: 10px;
+	padding: 10px;
+	border-left: 3px solid var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent), transparent 95%);
+}
+
+.agent-dashboard-mineru-heading {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px 10px;
+	align-items: baseline;
+	justify-content: space-between;
+}
+
+.agent-dashboard-mineru-heading strong {
+	font-size: 12px;
+}
+
+.agent-dashboard-mineru-heading span {
+	color: var(--text-muted);
+	font-size: 10px;
+}
+
+.agent-dashboard-mineru-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px 12px;
+}
+
+.agent-dashboard-mineru-field {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(130px, 0.65fr);
+	gap: 10px;
+	align-items: center;
+	min-width: 0;
+	padding: 7px 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.agent-dashboard-mineru-field > div {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+.agent-dashboard-mineru-field strong {
+	font-size: 11px;
+}
+
+.agent-dashboard-mineru-field span {
+	color: var(--text-muted);
+	font-size: 10px;
+	line-height: 1.4;
+}
+
+.agent-dashboard-mineru-field select,
+.agent-dashboard-mineru-field input {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+}
+
+.agent-dashboard-mineru-advanced {
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.agent-dashboard-mineru-advanced summary {
+	padding: 8px 0 2px;
+	cursor: pointer;
+	color: var(--text-muted);
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.agent-dashboard-mineru-advanced[open] summary {
+	margin-bottom: 6px;
+	color: var(--text-normal);
+}
+
+.agent-dashboard-source-choice {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 6px;
+}
+
+.agent-dashboard-radio-option {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	justify-content: center;
+	min-height: 34px;
+	padding: 0 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 5px;
+	background: var(--background-primary);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.agent-dashboard-radio-option:has(input:checked) {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent), transparent 90%);
+}
+
+@media (max-width: 520px) {
+	.agent-dashboard-action-options-field,
+	.agent-dashboard-source-choice,
+	.agent-dashboard-mineru-grid,
+	.agent-dashboard-mineru-field {
+		grid-template-columns: 1fr;
+	}
+}
+
 .agent-dashboard-run-config {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));

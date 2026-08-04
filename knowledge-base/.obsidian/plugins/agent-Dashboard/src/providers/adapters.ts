@@ -2,7 +2,6 @@ import {
 	CONNECTION_TEST_MESSAGES,
 	MODEL_OPTIONS,
 	PROVIDER_TYPE_BY_ID,
-	WEB_SEARCH_TEST_MESSAGES,
 	type ChatMessage,
 	type ProviderCapabilities,
 } from "../config";
@@ -15,10 +14,6 @@ import type {
 	ProviderRequestOptions,
 	ProviderRuntimeConfig,
 } from "../types/contracts";
-import {
-	normalizeAssignedSites,
-	profileHasConfiguredQwenWebSearch,
-} from "./profile";
 import {
 	ProviderConnectionError,
 	asRecord,
@@ -33,21 +28,13 @@ import {
 
 type ProviderDeltaHandler = (delta: string) => void;
 
-interface ProviderRuntimeCapabilities extends ProviderCapabilities {
-	webSearch: boolean;
-}
+type ProviderRuntimeCapabilities = ProviderCapabilities;
 
 interface ProviderRequestBody {
 	model: string;
 	messages: readonly ChatMessage[];
 	max_tokens: number;
 	stream: boolean;
-	enable_search?: boolean;
-	search_options?: {
-		forced_search: boolean;
-		search_strategy: "turbo" | "max" | "agent";
-		assigned_site_list?: string[];
-	};
 }
 
 function contentAsText(content: ChatMessage["content"]): string {
@@ -73,7 +60,6 @@ export class LLMProvider {
 			streaming: config.capabilities?.streaming ?? metadata?.capabilities.streaming ?? false,
 			pdf: config.capabilities?.pdf ?? metadata?.capabilities.pdf ?? false,
 			vision: config.capabilities?.vision ?? metadata?.capabilities.vision ?? false,
-			webSearch: profileHasConfiguredQwenWebSearch(config),
 		};
 	}
 
@@ -110,29 +96,6 @@ export class LLMProvider {
 					streamingError = this.plugin.normalizeProviderError(error).message;
 				}
 			}
-			let webSearchVerified = false;
-			let webSearchError = "";
-			let webSearchPreview = "";
-			if (this.capabilities.webSearch) {
-				try {
-					const webResponse = await this.complete({
-						model: selectedModel,
-						messages: WEB_SEARCH_TEST_MESSAGES,
-						maxTokens: 128,
-						webSearch: true,
-					});
-					webSearchPreview = String(webResponse.text || "").trim().slice(0, 160);
-					webSearchVerified = Boolean(webSearchPreview);
-					if (!webSearchVerified) {
-						throw new ProviderConnectionError(
-							"protocol",
-							"联网搜索测试返回了空响应",
-						);
-					}
-				} catch (error) {
-					webSearchError = this.plugin.normalizeProviderError(error).message;
-				}
-			}
 			return {
 				ok: true,
 				type: "success",
@@ -154,13 +117,6 @@ export class LLMProvider {
 				vision: {
 					supported: this.capabilities.vision,
 					verified: false,
-				},
-				webSearch: {
-					supported: this.capabilities.webSearch,
-					verified: webSearchVerified,
-					error: webSearchError,
-					protocol: this.config.webSearch?.protocol || "",
-					preview: webSearchPreview,
 				},
 				responsePreview: String(response.text || "").trim().slice(0, 120),
 				responseTimeMs: Date.now() - startedAt,
@@ -448,29 +404,6 @@ export class OpenAICompatibleProvider extends LLMProvider {
 			max_tokens: request.maxTokens || 256,
 			stream,
 		};
-		if (request.webSearch === true) {
-			const webSearch = this.config.webSearch;
-			if (!webSearch || !profileHasConfiguredQwenWebSearch(this.config)) {
-				throw new ProviderConnectionError(
-					"unsupported",
-					"当前配置没有启用 Qwen3.7-Plus Chat Completions 联网搜索",
-				);
-			}
-			const requestedStrategy = request.webSearchStrategy || webSearch.searchStrategy;
-			const strategy = ["turbo", "max", "agent"].includes(requestedStrategy)
-				? requestedStrategy
-				: "turbo";
-			const searchOptions: NonNullable<ProviderRequestBody["search_options"]> = {
-				forced_search: webSearch.forcedSearch !== false,
-				search_strategy: strategy,
-			};
-			const assignedSites = normalizeAssignedSites(webSearch.assignedSites);
-			if (strategy === "turbo" && assignedSites.length) {
-				searchOptions.assigned_site_list = assignedSites;
-			}
-			body.enable_search = true;
-			body.search_options = searchOptions;
-		}
 		return body;
 	}
 
@@ -478,15 +411,11 @@ export class OpenAICompatibleProvider extends LLMProvider {
 		request: ProviderChatRequest,
 		options: ProviderRequestOptions = {},
 	): Promise<ProviderCompletion> {
-		const webSearchTimeout = request.webSearch === true
-			? this.config.webSearch?.timeoutSeconds
-			: undefined;
 		const result = await this.request("v1/chat/completions", {
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request),
-			timeoutMs: options.timeoutMs
-				|| (webSearchTimeout ? webSearchTimeout * 1000 : undefined),
+			timeoutMs: options.timeoutMs,
 			registerCancel: options.registerCancel,
 		});
 		const payload = this.requireJson(result, "文本生成");
@@ -499,15 +428,12 @@ export class OpenAICompatibleProvider extends LLMProvider {
 		options: ProviderRequestOptions = {},
 	): Promise<ProviderCompletion> {
 		let text = "";
-		const webSearchTimeout = request.webSearch === true
-			? this.config.webSearch?.timeoutSeconds
-			: undefined;
 		await this.plugin.providerHttpStream({
 			url: buildProviderUrl(this.config.baseUrl, "v1/chat/completions"),
 			method: "POST",
 			headers: await this.headers(),
 			body: this.chatBody(request, true),
-			timeoutMs: (webSearchTimeout || this.config.timeoutSeconds) * 1000,
+			timeoutMs: (options.timeoutMs || this.config.timeoutSeconds * 1000),
 			format: "sse",
 			registerCancel: options.registerCancel,
 			onEvent: (data) => {

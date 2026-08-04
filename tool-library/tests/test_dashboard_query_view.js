@@ -153,6 +153,11 @@ assert.ok(
 	"query settings should keep Codex and Claude model overrides independent",
 );
 assert.ok(
+	queryViewSource.includes('label: "Agent（知识库 / 联网）"')
+		&& queryViewSource.includes('label: "Direct API（仅知识库）"'),
+	"query backend selection should visibly separate Agent and Direct API capabilities",
+);
+assert.ok(
 	pluginStyles.includes(".query-wiki-settings-field[hidden]")
 		&& pluginStyles.includes("display: none !important;"),
 	"query settings should honor hidden backend-specific fields",
@@ -482,35 +487,19 @@ async function testDirectApiQuery() {
 		(error) => /超出当前 Vault/.test(error.message),
 	);
 
-	profile.webSearch = {
-		enabled: true,
-		configured: true,
-		protocol: "qwen-chat-completions",
-		forcedSearch: true,
-		searchStrategy: "turbo",
-		assignedSites: [],
-		timeoutSeconds: 60,
-	};
-	profile.lastTest.webSearchVerified = true;
-	let webRequest = null;
-	plugin.createLLMProvider = () => ({
-		complete: async (request) => {
-			webRequest = request;
-			return { text: "联网补充回答：https://example.test/source" };
-		},
-	});
-	const webResult = await plugin.runDirectVaultQuery(
-		"run-web",
-		profile.id,
-		"联网搜索",
-		[],
-		"web",
+	await assert.rejects(
+		() => plugin.runDirectVaultQuery(
+			"run-web",
+			profile.id,
+			"联网搜索",
+			[],
+			"web",
+		),
+		(error) => /Direct API 仅用于知识库内检索/.test(error.message),
 	);
-	assert.strictEqual(webResult.exitCode, 0);
-	assert.strictEqual(webRequest.webSearch, true);
-	assert.strictEqual(
-		webResult.events.at(-1).payload.provider_search.protocol,
-		"qwen-chat-completions",
+	assert.ok(
+		queryViewSource.includes("option.disabled = this.session.retrievalMode === \"web\""),
+		"Direct API options should remain available for vault mode but be disabled in web mode",
 	);
 
 	const expansionCalls = [];

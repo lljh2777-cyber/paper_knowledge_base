@@ -225,23 +225,12 @@ export interface ProviderRuntimeConfig {
 	secretId?: string;
 	timeoutSeconds: number;
 	capabilities?: Partial<ProviderCapabilities>;
-	webSearch?: {
-		enabled: boolean;
-		configured: boolean;
-		protocol: "qwen-chat-completions";
-		forcedSearch: boolean;
-		searchStrategy: "turbo" | "max" | "agent";
-		assignedSites: string[];
-		timeoutSeconds: number;
-	};
 }
 
 export interface ProviderChatRequest {
 	model?: string;
 	messages: readonly ChatMessage[];
 	maxTokens?: number;
-	webSearch?: boolean;
-	webSearchStrategy?: "turbo" | "max" | "agent";
 }
 
 export interface ProviderRequestOptions {

@@ -12,7 +12,10 @@ _ACTION_WRITE_ROOTS: dict[str, tuple[str, ...]] = {
     "paper-ingest": (
         "tool-library/metadata",
         "tool-library/references.bib",
+        "tool-library/output/mineru-runs",
         "tool-library/output/reports",
+        "knowledge-base/papers",
+        "knowledge-base/wiki/sources",
         "knowledge-base/文献索引.md",
         "knowledge-base/字段补全检查.md",
         "knowledge-base/wiki/index.md",

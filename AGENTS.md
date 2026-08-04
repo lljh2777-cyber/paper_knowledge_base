@@ -43,7 +43,10 @@ Skill locations:
 %USERPROFILE%\.codex\skills\research-vault-lint\SKILL.md         # vault quality audit and repair
 .agents\skills\research-vault-r\SKILL.md                         # R packages, functions, concepts, and reusable recipes
 .agents\skills\research-vault-linux\SKILL.md                     # Linux commands, Shell, CLI recipes, bioinformatics software, and formats
+%USERPROFILE%\.codex\skills\mineru-document-extractor\SKILL.md # MinerU document extraction guidance
 ```
+
+The Dashboard detects the `mineru-open-api` CLI from `MINERU_CLI_PATH`, common installation locations, the system PATH, or a saved manual path. MinerU authentication remains in its CLI config or `MINERU_TOKEN`; never store the token in plugin settings.
 
 ## Skill Routing Policy
 
@@ -82,6 +85,10 @@ Keep skill use lightweight and stage-owned. Use the router only to select the ri
 
 Lightweight handoff rules:
 
+- Dashboard `paper-ingest` is an orchestrator, not a new evidence owner. It always hands identity and metadata to `research-vault-ingest`; a selected original-Markdown output uses `tool-library/scripts/run_mineru_extract.py` and the configured MinerU CLI; a selected initial Wiki output goes to `research-vault-source-note`.
+- A validated MinerU package belongs under `knowledge-base/papers/<citekey>/` and contains `article.md`, `mineru-result.json`, optional `images/`, and `_extraction/manifest.json` plus `_extraction/validation.json`. `_extraction/source.pdf` is optional. The package is a faithful reading artifact, not an AI source note or scientific synthesis page.
+- The initial article Wiki may use either the original PDF or a validated `article.md`, as selected by the user. It remains no deeper than `abstract-level` until the X-Ray checks are complete.
+- PDF X-Ray must honor the user's source choice. `original PDF` uses the PDF as primary full-text and visual evidence. `existing article.md` requires a validated MinerU package and must not silently fall back to the PDF.
 - `metadata-only` supports metadata, indexes, gaps, and source paths only; do not generate paper conclusions.
 - `abstract-level` supports conservative source-note claims only; do not write it as `x-ray`.
 - Mark or upgrade to `x-ray` only after full-text evidence, methods, figures/tables, data/materials, limitations, and evidence chain have been inspected.
@@ -173,6 +180,10 @@ Use explicit depth labels in reasoning and outputs:
 ## Local PDF And Metadata Rules
 
 - Local PDF ingest must verify evidence before generating claims.
+- MinerU output must be staged under `tool-library/output/mineru-runs/`, validated, and then published atomically to `knowledge-base/papers/<citekey>/`; never expose a partial final package or overwrite an existing package in place.
+- Treat the original PDF as source of truth. After MinerU validation, do not manually rewrite generated `article.md`, `mineru-result.json`, images, manifest, or validation files to improve prose or alter scientific content.
+- `article.md` can support reading and an initial source note only after `_extraction/manifest.json`, `_extraction/validation.json`, Markdown links, and JSON assets pass validation. A complete-looking conversion alone does not establish `x-ray` depth.
+- MinerU precision extraction sends document content to the configured MinerU service. Use `extract` with `md,json` for formal intake; do not use `flash-extract`, whose output may omit image/table/formula content and degrade text.
 - PDF title page or converted text must be consistent with DOI/Crossref/publisher metadata.
 - Filename-derived clues must not contradict the selected metadata record.
 - Zotero/vault existing records must not point to a different paper.
@@ -207,6 +218,13 @@ knowledge-base/                  # Obsidian vault root; open this folder in Obsi
   R知识索引.md
   Linux与命令行索引.md
   字段补全检查.md
+  papers/               # validated MinerU packages; one directory per citekey
+    index.md             # package location and usage contract
+    <citekey>/
+      article.md         # faithful converted article used for reading
+      images/            # extracted figures and other article assets
+      mineru-result.json # ordered MinerU extraction elements and bounding boxes
+      _extraction/       # project manifest, validation, and optional source PDF
   wiki/
     assets/
       figures/           # per-paper figure assets embedded into X-Ray source notes
@@ -267,6 +285,7 @@ When answering from vault evidence:
 ## Index And Log Rules
 
 - Append important operations to `knowledge-base/wiki/log.md`.
+- Update `knowledge-base/papers/index.md` when a validated MinerU package is added, replaced, or invalidated. Keep legacy package provenance explicit when older Paper2MD artifacts remain in the vault.
 - Update `knowledge-base/文献索引.md` when source notes change materially.
 - Update `knowledge-base/研究主题索引.md` when concepts, projects, MOCs, or synthesis pages change materially.
 - Update `knowledge-base/研究方法索引.md` when methods, datasets, metrics, or analysis workflows change materially.

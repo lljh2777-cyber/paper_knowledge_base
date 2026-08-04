@@ -36,7 +36,6 @@ import {
 	type VaultImageAttachment,
 } from "../query/normalization";
 import {
-	profileSupportsDirectWebSearch,
 	profileSupportsQueryImage,
 	type ProviderProfile,
 } from "../providers/profile";
@@ -998,18 +997,14 @@ export class QueryWikiView extends ItemView {
 				if (button.disabled || value === currentMode) return;
 				this.initialQuestion = this.inputEl?.value || "";
 				const activeBackendId = this.plugin.resolveQueryBackendId(this.session.queryBackendId);
-				const activeProfile = isCliBackendId(activeBackendId)
-					? null
-					: this.plugin.getProviderProfile(activeBackendId);
 				if (
 					value === "web"
 					&& !isCliBackendId(activeBackendId)
-					&& !profileSupportsDirectWebSearch(activeProfile)
 				) {
 					if (this.pendingImages.length) this.pendingImages = [];
 					await this.plugin.setActiveQueryBackend("codex-cli");
 					new Notice(
-						"当前 Direct API 未通过联网搜索测试；已切换到 Codex CLI",
+						"Direct API 仅用于知识库内检索；联网搜索已切换到 Codex CLI",
 					);
 				}
 				await this.plugin.setActiveQueryMode(value);
@@ -1077,10 +1072,10 @@ export class QueryWikiView extends ItemView {
 			text: directProfile
 				? `Direct API · ${directProfile.name} · ${directProfile.model}`
 				: backendId === "claude-code"
-					? `Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
+					? `Agent · Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}`
 				: backendId === "opencode"
-					? `OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}`
-				: `Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${
+					? `Agent · OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}`
+				: `Agent · Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${
 					effective.serviceTier === "fast"
 						? "快速"
 						: this.plugin.settings.codexConfigSource === "cc-switch"
@@ -1090,25 +1085,32 @@ export class QueryWikiView extends ItemView {
 		});
 		const grid = details.createDiv({ cls: "query-wiki-settings-grid" });
 		const backend = this.createSelectField(grid, "执行后端");
-		backend.createEl("option", {
+		const agentGroup = backend.createEl("optgroup", {
+			attr: { label: "Agent（知识库 / 联网）" },
+		});
+		agentGroup.createEl("option", {
 			text: "Codex CLI",
 			attr: { value: "codex-cli" },
 		});
-		const claudeOption = backend.createEl("option", {
+		const claudeOption = agentGroup.createEl("option", {
 			text: "Claude Code · 只读",
 			attr: { value: "claude-code" },
 		});
 		claudeOption.disabled = !this.plugin.isCliBackendAvailable("claude-code");
-		const openCodeOption = backend.createEl("option", {
+		const openCodeOption = agentGroup.createEl("option", {
 			text: "OpenCode · 只读",
 			attr: { value: "opencode" },
 		});
 		openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
+		const directGroup = backend.createEl("optgroup", {
+			attr: { label: "Direct API（仅知识库）" },
+		});
 		directProfiles.forEach((profile) => {
-			backend.createEl("option", {
-				text: `Direct API · ${profile.name} · ${profile.model}${profileSupportsDirectWebSearch(profile) ? " · 可联网" : ""}`,
+			const option = directGroup.createEl("option", {
+				text: `Direct API · ${profile.name} · ${profile.model} · 知识库`,
 				attr: { value: profile.id },
 			});
+			option.disabled = this.session.retrievalMode === "web";
 		});
 		backend.value = backendId;
 		const model = this.createSelectField(grid, "模型");
@@ -1265,10 +1267,7 @@ export class QueryWikiView extends ItemView {
 						profileSupportsQueryImage(selectedProfile)
 							? `可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，并自动识别问题中的笔记链接。`
 							: "当前适配器未启用视觉输入。",
-						profileSupportsDirectWebSearch(selectedProfile)
-							? "该配置已通过 Qwen 联网请求测试，可在“联网搜索”模式使用。"
-							: "该配置仅支持知识库模式；联网搜索需启用并重新测试 Qwen 配置。",
-						"Direct API 不执行 Codex skill 或文件写入。",
+						"Direct API 仅使用插件筛选出的 Vault 证据，不联网、不执行 Skill、不调用工具，也不写入文件。",
 					].join("")
 					: usingClaude
 						? `Claude Code 使用 ${claudeSourceLabel} 和 plan 权限模式。知识库模式只开放 Read、Glob 和 Grep；联网搜索模式额外开放 WebSearch 和 WebFetch。可附加最多 ${MAX_QUERY_IMAGE_ATTACHMENTS} 张 Vault 图片，图片由 Read 工具按本地路径读取；两种模式都不开放文件写入。视觉与联网结果取决于当前模型及账号能力。`
@@ -1290,7 +1289,7 @@ export class QueryWikiView extends ItemView {
 					claudeOverrides,
 				);
 				summaryText.setText(
-					`Claude Code · ${next.model || claudeDiscovery?.effectiveModel || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
+					`Agent · Claude Code · ${next.model || claudeDiscovery?.effectiveModel || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
 				);
 				return;
 			}
@@ -1304,7 +1303,7 @@ export class QueryWikiView extends ItemView {
 					openCodeOverrides,
 				);
 				summaryText.setText(
-					`OpenCode · ${next.model || openCodeDiscovery?.effectiveModel || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
+					`Agent · OpenCode · ${next.model || openCodeDiscovery?.effectiveModel || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(next.reasoningEffort || "")}`,
 				);
 				return;
 			}
@@ -1320,7 +1319,7 @@ export class QueryWikiView extends ItemView {
 				codexOverrides,
 			);
 			summaryText.setText(
-				`Codex CLI · ${next.model ? this.plugin.getModelLabel(next.model) : codexDefaultModelLabel} · ${
+				`Agent · Codex CLI · ${next.model ? this.plugin.getModelLabel(next.model) : codexDefaultModelLabel} · ${
 					next.reasoningEffort ? this.plugin.getReasoningLabel(next.reasoningEffort) : "CLI 默认推理"
 				} · ${next.serviceTier === "fast"
 					? "快速"
@@ -1342,16 +1341,6 @@ export class QueryWikiView extends ItemView {
 				new Notice("所选后端未启用视觉输入，已移除待发送图片");
 			}
 			await this.plugin.setActiveQueryBackend(backend.value);
-			if (
-				!isCliBackendId(backend.value)
-				&& this.session.retrievalMode === "web"
-				&& !profileSupportsDirectWebSearch(selectedProfile)
-			) {
-				await this.plugin.setActiveQueryMode("vault");
-				new Notice(
-					"所选 Direct API 未通过联网搜索测试；已切换为知识库模式",
-				);
-			}
 			await this.render();
 			this.inputEl?.focus();
 		});
@@ -1457,12 +1446,7 @@ export class QueryWikiView extends ItemView {
 			);
 		}
 		const retrievalMode: QueryRetrievalMode = session.retrievalMode === "web"
-			&& (
-				backendId === "codex-cli"
-				|| backendId === "claude-code"
-				|| backendId === "opencode"
-				|| profileSupportsDirectWebSearch(directProfile)
-			)
+			&& isCliBackendId(backendId)
 			? "web"
 			: "vault";
 		const priorMessages = session.messages.filter((message) => message.status === "done");
@@ -1567,7 +1551,7 @@ export class QueryWikiView extends ItemView {
 					directProfile.id,
 					question,
 					priorMessages,
-					retrievalMode,
+					"vault",
 					hooks,
 					userMessage.attachments || [],
 				)

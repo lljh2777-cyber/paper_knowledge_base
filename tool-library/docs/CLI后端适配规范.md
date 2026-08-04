@@ -11,10 +11,24 @@ Agent Dashboard 核心只处理统一任务、统一事件、生命周期和权�
 权限或类型变化无法恢复，事件状态必须为 `rollback-incomplete`，界面不得显示
 为完整回滚。
 
-快照范围按操作确定，避免扫描整个项目：入库覆盖 metadata、BibTeX、文献索引
-和日志；PDF 深读覆盖 source note、论文图像及相关索引；代码分析和综合分析
+快照范围按操作确定，避免扫描整个项目：入库覆盖 metadata、BibTeX、MinerU
+暂存目录、`knowledge-base/papers/` 原文包、source note、文献索引和日志；PDF 深读覆盖 source note、论文图像及相关索引；代码分析和综合分析
 覆盖各自阶段目录；体检修复覆盖 wiki、顶层索引、metadata 和允许修复的
 Obsidian 图谱配置。`tool-library/raw/` 只做不可变源检查，不作为正常写入范围。
+
+文献入库弹窗通过版本化结构参数选择两个独立输出：MinerU 原文包和初步文章
+Wiki。前者发布到 `knowledge-base/papers/<citekey>/`，后者写入
+`knowledge-base/wiki/sources/<citekey>.md`；两个输出分别由转换和 source-note
+阶段拥有。PDF 深读同样通过结构参数选择原始 PDF 或已有 `article.md`，runner
+必须把该选择作为强约束传给智能体，不能静默回退到另一来源。
+
+MinerU 参数分为常用和高级两层。常用层选择 VLM、Pipeline 或 Auto，设置文档
+语言、OCR、公式、表格和是否附带原 PDF；高级层设置 1-based 页面范围与请求
+超时。runner 必须按 allow-list 校验模型、语言、布尔开关、页码格式和 60–1800
+秒超时，再把规范值交给 Agent。Agent 只能通过
+`tool-library/scripts/run_mineru_extract.py` 执行 precision `extract`，输出固定为
+`md,json`；单篇入库不开放 `flash-extract`、batch 或其他输出格式。helper 在
+`tool-library/output/mineru-runs/` 暂存并验证后，才原子发布到最终目录。
 
 当前协议版本为 `1.0`。内置实现是：
 
@@ -120,8 +134,9 @@ Claude Code。
 
 插件设置为 Claude Code 提供独立二级页面，可选择官方 Claude Code 或
 CC Switch，配置可选模型覆盖和默认推理强度；批注 AI 使用独立二级页面选择自动、Codex CLI、Claude Code
-或已验证 Direct API，并保存批注专用模型和参数。查询侧边栏可在 Codex CLI、Claude Code 和
-已验证的 Direct API 配置之间选择。选择 Claude Code 时可使用知识库或联网
+或已验证 Direct API，并保存批注专用模型和参数。普通批注解释可自由选择 Agent 或 Direct API，
+浅层联网批注只使用 Agent。查询侧边栏的知识库模式可在 Codex CLI、Claude Code、OpenCode 和
+已验证的 Direct API 配置之间选择；联网模式只显示或使用 Agent。选择 Claude Code 时可使用知识库或联网
 搜索模式，并隐藏 Codex 专属的模型、速度和 service tier 控件；Claude
 模型选择按配置来源显示官方 CLI 别名，或 CC Switch 用户设置与初始化事件中
 识别出的候选。
@@ -160,8 +175,8 @@ OpenCode 设置页独立保存可执行文件、配置来源、模型和推理 v
 
 批注联网解释固定为浅层策略：最多围绕 2 个检索问题，采用不超过 3 个权威
 来源，不追踪来源中的二级链接；总时间上限只能在 15–45 秒内设置，默认 30
-秒。Direct API 强制使用 Qwen `turbo` 搜索策略；CLI 后端由统一 runner 在
-超时后终止进程树。关闭开关时，三种 CLI 都显式禁用联网工具。
+秒。联网解释只使用 Agent CLI，由统一 runner 在超时后终止进程树。关闭开关
+时，三种 CLI 都显式禁用联网工具；Direct API 始终不开放联网能力。
 
 模型目录发现仍由插件直接运行 `opencode models`，因为该命令不发起模型推理，
 在 Node 子进程中能够稳定退出。连接测试和实际模型任务都通过统一 Python

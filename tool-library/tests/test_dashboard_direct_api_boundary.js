@@ -30,7 +30,7 @@ const obsidianStub = {
 	Setting: ObsidianBase,
 	normalizePath: (value) => value,
 	requestUrl: async () => {
-		throw new Error("requestUrl must not be called by the protocol test");
+		throw new Error("requestUrl must not be called by the boundary test");
 	},
 	setIcon: () => {},
 };
@@ -49,20 +49,18 @@ const sandbox = {
 
 vm.runInNewContext(
 	`${source}
-	globalThis.__qwenWebSearchTestHooks = {
-		extractModelProvidedWebSources,
+	globalThis.__directApiBoundaryTestHooks = {
 		normalizeProviderProfile,
 		OpenAICompatibleProvider,
-		profileSupportsDirectWebSearch,
 	};`,
 	sandbox,
 	{ filename: pluginPath },
 );
 
-const hooks = sandbox.__qwenWebSearchTestHooks;
+const hooks = sandbox.__directApiBoundaryTestHooks;
 const profile = hooks.normalizeProviderProfile({
-	id: "qwen-web",
-	name: "Qwen Web",
+	id: "legacy-qwen-web",
+	name: "Qwen",
 	type: "openai-compatible",
 	baseUrl: "https://example.invalid/compatible-mode/v1",
 	model: "qwen3.7-plus",
@@ -71,8 +69,8 @@ const profile = hooks.normalizeProviderProfile({
 		configured: true,
 		protocol: "qwen-chat-completions",
 		forcedSearch: true,
-		searchStrategy: "turbo",
-		assignedSites: ["https://help.aliyun.com/path", "nature.com", "nature.com"],
+		searchStrategy: "max",
+		assignedSites: ["nature.com"],
 		timeoutSeconds: 75,
 	},
 	lastTest: {
@@ -80,56 +78,22 @@ const profile = hooks.normalizeProviderProfile({
 		webSearchVerified: true,
 	},
 });
-const provider = new hooks.OpenAICompatibleProvider({}, profile);
-const messages = [{ role: "user", content: "test" }];
+assert.equal(profile.webSearch, undefined);
+assert.equal(profile.lastTest.webSearchVerified, undefined);
 
+const provider = new hooks.OpenAICompatibleProvider({}, profile);
+assert.equal(provider.capabilities.webSearch, undefined);
+const messages = [{ role: "user", content: "test" }];
 const plainBody = provider.chatBody({ model: profile.model, messages });
 assert.equal(plainBody.enable_search, undefined);
 assert.equal(plainBody.search_options, undefined);
-
-const searchBody = provider.chatBody({
+const staleSearchBody = provider.chatBody({
 	model: profile.model,
 	messages,
 	webSearch: true,
 });
-assert.equal(searchBody.enable_search, true);
-assert.equal(searchBody.search_options.forced_search, true);
-assert.equal(searchBody.search_options.search_strategy, "turbo");
-assert.deepEqual(
-	Array.from(searchBody.search_options.assigned_site_list),
-	["help.aliyun.com", "nature.com"],
-);
-assert.equal(hooks.profileSupportsDirectWebSearch(profile), true);
-assert.equal(profile.webSearch.timeoutSeconds, 75);
-profile.webSearch.searchStrategy = "agent";
-const shallowSearchBody = provider.chatBody({
-	model: profile.model,
-	messages,
-	webSearch: true,
-	webSearchStrategy: "turbo",
-});
-assert.equal(shallowSearchBody.search_options.search_strategy, "turbo");
-
-const links = hooks.extractModelProvidedWebSources(
-	"参考 [阿里云联网搜索](https://help.aliyun.com/zh/model-studio/web-search)。",
-);
-assert.equal(links.length, 1);
-assert.equal(links[0].verification, "model");
-
-const unsupported = hooks.normalizeProviderProfile({
-	id: "other",
-	type: "openai-compatible",
-	model: "deepseek-v4-pro",
-	webSearch: { enabled: true, configured: true },
-});
-assert.throws(
-	() => new hooks.OpenAICompatibleProvider({}, unsupported).chatBody({
-		model: unsupported.model,
-		messages,
-		webSearch: true,
-	}),
-	/没有启用 Qwen3\.7-Plus/,
-);
+assert.equal(staleSearchBody.enable_search, undefined);
+assert.equal(staleSearchBody.search_options, undefined);
 
 (async () => {
 	let capturedOptions = null;
@@ -145,11 +109,11 @@ assert.throws(
 	await provider.complete({
 		model: profile.model,
 		messages,
-		webSearch: true,
 	}, {
 		timeoutMs: 30000,
 	});
 	assert.equal(capturedOptions.timeoutMs, 30000);
+	assert.equal(capturedOptions.body.enable_search, undefined);
 
 	const DashboardPlugin = sandbox.module.exports;
 	const plugin = Object.create(DashboardPlugin.prototype);
@@ -188,7 +152,7 @@ assert.throws(
 	const reusedSession = await plugin.createQuerySession();
 	assert.equal(reusedSession.id, "only-empty");
 	assert.equal(plugin.querySessions.length, 1);
-	console.log("Qwen web-search protocol tests passed.");
+	console.log("Direct API boundary tests passed.");
 })().catch((error) => {
 	console.error(error);
 	process.exitCode = 1;

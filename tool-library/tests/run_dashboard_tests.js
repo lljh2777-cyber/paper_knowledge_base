@@ -7,9 +7,10 @@ const projectRoot = path.resolve(__dirname, "../..");
 const python = process.env.DASHBOARD_PYTHON || "D:\\python\\python.exe";
 const commands = [
 	[process.execPath, ["tool-library/tests/test_dashboard_providers.js"]],
-	[process.execPath, ["tool-library/tests/test_agent_dashboard_qwen_web_search.js"]],
+	[process.execPath, ["tool-library/tests/test_dashboard_direct_api_boundary.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_query_view.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_annotations.js"]],
+	[process.execPath, ["tool-library/tests/test_dashboard_paper_actions.js"]],
 	[python, ["-m", "unittest", "discover", "-s", "tool-library/tests", "-p", "test_*.py"]],
 ];
 

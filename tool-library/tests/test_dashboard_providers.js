@@ -52,6 +52,10 @@ const pluginSource = fs.readdirSync(pluginSourceRoot, { recursive: true })
 	.map((file) => fs.readFileSync(path.join(pluginSourceRoot, file), "utf8"))
 	.join("\n");
 
+assert.match(pluginSource, /id:\s*"gpt-5\.6-luna"/);
+assert.match(pluginSource, /label:\s*"GPT-5\.6-Luna"/);
+assert.match(pluginSource, /gpt-5\.6-luna[\s\S]*supportsFast:\s*true/);
+
 global.window = {
 	setTimeout,
 	clearTimeout,
@@ -133,6 +137,11 @@ async function main() {
 	);
 	assert.ok(pluginSource.includes('.setName("视觉输入")'));
 	assert.ok(pluginSource.includes("visionConfigured"));
+	assert.ok(!pluginSource.includes('.setName("Qwen3.7-Plus 联网搜索")'));
+	assert.ok(
+		pluginSource.includes("Direct API 固定为知识库内只读推理"),
+		"Direct API settings should expose the vault-only boundary",
+	);
 	assert.ok(pluginSource.includes("this.app.metadataCache?.getFileCache?.(file)?.frontmatter"));
 	assert.ok(!pluginSource.includes('wiki/methods/single-cell-rna-seq'));
 	assert.ok(pluginSource.includes("this.recordByPath = new Map()"));

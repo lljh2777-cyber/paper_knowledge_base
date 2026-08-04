@@ -12,7 +12,6 @@ import {
 	getClaudeDefaultModelLabel,
 	getOpenCodeDefaultModelLabel,
 } from "../runtime/settings";
-import { profileSupportsDirectWebSearch } from "../providers/profile";
 import type {
 	AnnotationDraft,
 	AnnotationExplanation,
@@ -457,18 +456,8 @@ export class AnnotationService {
 			: !["codex-cli", "claude-code", "opencode"].includes(configuredBackend)
 				? this.plugin.getProviderProfile(configuredBackend)
 				: null;
-		const directProfile = webSearchEnabled
-			&& configuredBackend === "auto"
-			&& selectedDirectProfile
-			&& !profileSupportsDirectWebSearch(selectedDirectProfile)
-			? null
-			: selectedDirectProfile;
+		const directProfile = webSearchEnabled ? null : selectedDirectProfile;
 		if (directProfile?.lastTest?.ok) {
-			if (webSearchEnabled && !profileSupportsDirectWebSearch(directProfile)) {
-				throw new Error(
-					"当前 Direct API 配置未通过联网搜索测试；请关闭批注联网搜索，或改用支持联网的 Qwen3.7-Plus/Codex CLI/Claude Code/OpenCode 后端",
-				);
-			}
 			const provider = this.plugin.createLLMProvider(directProfile);
 			const result = await provider.complete(
 				{
@@ -478,12 +467,9 @@ export class AnnotationService {
 						{ role: "user", content: user },
 					],
 					maxTokens: this.plugin.settings.annotationMaxTokens,
-					webSearch: webSearchEnabled,
-					webSearchStrategy: webSearchEnabled ? "turbo" : undefined,
 				},
 				{
 					registerCancel,
-					timeoutMs: webSearchEnabled ? webSearchTimeoutSeconds * 1000 : undefined,
 				},
 			);
 			const text = String(result.text || "").trim();

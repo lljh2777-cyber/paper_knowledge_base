@@ -7,7 +7,7 @@ import type { ProviderProfile } from "../providers/profile";
 export type ClaudeConfigSource = "official" | "cc-switch";
 export type CodexConfigSource = "official" | "cc-switch";
 export type OpenCodeConfigSource = "official" | "cc-switch";
-export type CliExecutableKind = "codex" | "claude" | "opencode";
+export type CliExecutableKind = "codex" | "claude" | "opencode" | "mineru";
 export type CliExecutableDetectionSource =
 	| "environment"
 	| "common"
@@ -29,11 +29,13 @@ const CLI_ENVIRONMENT_VARIABLES: Record<CliExecutableKind, string> = {
 	codex: "CODEX_CLI_PATH",
 	claude: "CLAUDE_CODE_PATH",
 	opencode: "OPENCODE_PATH",
+	mineru: "MINERU_CLI_PATH",
 };
 const CLI_COMMAND_NAMES: Record<CliExecutableKind, string> = {
 	codex: "codex",
 	claude: "claude",
 	opencode: "opencode",
+	mineru: "mineru-open-api",
 };
 
 export interface DashboardSettings {
@@ -61,6 +63,8 @@ export interface DashboardSettings {
 	annotationMaxTokens: number;
 	annotationWebSearchEnabled: boolean;
 	annotationWebSearchTimeoutSeconds: number;
+	mineruExecutable: string;
+	mineruBaseUrl: string;
 	pythonExecutable: string;
 	rscriptExecutable: string;
 	codePracticeTimeoutSeconds: number;
@@ -158,6 +162,14 @@ function commonCliCandidates(kind: CliExecutableKind): string[] {
 			joinFromEnvironment(appData, "npm", "claude.cmd"),
 			joinFromEnvironment(localAppData, "AnthropicClaude", "claude.exe"),
 			joinFromEnvironment(localAppData, "Microsoft", "WinGet", "Links", "claude.exe"),
+		];
+	}
+	if (kind === "mineru") {
+		return [
+			joinFromEnvironment(appData, "npm", "mineru-open-api.cmd"),
+			joinFromEnvironment(userProfile, "scoop", "shims", "mineru-open-api.exe"),
+			joinFromEnvironment(userProfile, ".local", "bin", "mineru-open-api.exe"),
+			joinFromEnvironment(localAppData, "Microsoft", "WinGet", "Links", "mineru-open-api.exe"),
 		];
 	}
 	return [
@@ -291,6 +303,11 @@ export function findPreferredOpenCodeExecutable(): string {
 	return detected.found ? detected.executable : "";
 }
 
+export function findPreferredMineruExecutable(): string {
+	const detected = detectCliExecutable("mineru");
+	return detected.found ? detected.executable : "";
+}
+
 export function findPreferredClaudeExecutable(): string {
 	const detected = detectCliExecutable("claude");
 	return detected.found ? detected.executable : "";
@@ -388,6 +405,8 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	annotationMaxTokens: 900,
 	annotationWebSearchEnabled: false,
 	annotationWebSearchTimeoutSeconds: 30,
+	mineruExecutable: findPreferredMineruExecutable(),
+	mineruBaseUrl: "",
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
 	codePracticeTimeoutSeconds: 30,

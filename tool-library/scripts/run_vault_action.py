@@ -65,20 +65,142 @@ MAX_QUERY_IMAGE_BYTES = 7 * 1024 * 1024
 MAX_QUERY_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
 
 
+def validate_mineru_executable(value: str) -> Path:
+    """Resolve the configured MinerU CLI without executing it."""
+
+    if not value:
+        raise ValueError(
+            "MinerU CLI is not configured; set mineru-open-api in "
+            "Agent Dashboard before generating original Markdown"
+        )
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    located = shutil.which(value)
+    if located:
+        return Path(located).resolve()
+    raise ValueError(f"MinerU CLI is invalid or unavailable: {value}")
+
+
+def normalize_option_choice(
+    options: dict[str, Any],
+    key: str,
+    allowed: set[str],
+    default: str,
+) -> str:
+    value = str(options.get(key) or default)
+    if value not in allowed:
+        raise ValueError(f"Invalid {key}: {value}")
+    return value
+
+
+def normalize_option_number(
+    options: dict[str, Any],
+    key: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = options.get(key, default)
+    if isinstance(raw, bool):
+        raise ValueError(f"Invalid {key}: expected a number")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {key}: expected a number") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"Invalid {key}: expected {minimum}-{maximum}")
+    return value
+
+
+def normalize_option_bool(
+    options: dict[str, Any],
+    key: str,
+    default: bool,
+) -> bool:
+    if key not in options:
+        return default
+    value = options[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"Invalid {key}: expected a boolean")
+    return value
+
+
+def normalize_mineru_pages(options: dict[str, Any]) -> str:
+    raw = str(options.get("mineruPages") or "").strip().replace("，", ",")
+    if not raw:
+        return ""
+    tokens = [token for token in re.split(r"[,\s]+", raw) if token]
+    if len(tokens) > 2000:
+        raise ValueError("Too many MinerU page ranges")
+    for token in tokens:
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", token)
+        if not match:
+            raise ValueError("Invalid mineruPages: use 1-based ranges such as 1-10,15")
+        start = int(match.group(1))
+        end = int(match.group(2) or match.group(1))
+        if start < 1 or end < start:
+            raise ValueError("Invalid mineruPages: page numbers start at 1")
+    return ",".join(tokens)
+
+
 ACTION_SPECS: dict[str, dict[str, Any]] = {
     "paper-ingest": {
         "label": "文献入库",
-        "agent": "research-vault-ingest",
+        "agent": "paper-intake-pipeline",
         "sandbox": "workspace-write",
         "input_required": True,
         "writes": True,
         "instructions": """
-Use the `research-vault-ingest` skill for this task. Perform source identity,
-metadata normalization, duplicate checks, attachment/source-path discovery,
-evidence-consistency checks, and the metadata/index/log updates owned by the
-ingest stage. Do not write paper conclusions and do not claim evidence beyond
-`metadata-only`. If metadata and source evidence conflict, stop before writing
-conclusions and record the gap according to the workspace rules.
+Treat the Dashboard processing options in the request as authoritative. This
+action orchestrates separate stage owners; do not collapse them into one skill.
+
+Always use `research-vault-ingest` first for source identity, metadata
+normalization, DOI/title/PDF-hash duplicate checks, citekey selection,
+attachment discovery, and evidence-consistency checks. If identity conflicts
+with the PDF, stop before creating either selected output and record the gap.
+
+When `generate_original_markdown` is `yes`, use the configured MinerU CLI
+through `tool-library/scripts/run_mineru_extract.py`. Do not invoke Paper2MD and
+do not install or upgrade MinerU. Resolve the source PDF and citekey only after
+identity and duplicate checks pass, then pass every authoritative `mineru_*`
+option to the helper exactly. The helper must use MinerU precision `extract`
+with `md,json`; never substitute `flash-extract`.
+
+Invoke the helper with the project Python, `--project-root .`, the verified
+`--source`, selected `--citekey`, configured `--mineru`, `--model`,
+`--language`, and `--timeout`. Add `--pages`, `--ocr`, `--no-formula`,
+`--no-table`, `--include-source-pdf`, or `--base-url` only when the matching
+Dashboard option requires it. Do not pass a token on the command line; MinerU
+authentication stays in its CLI config or `MINERU_TOKEN` environment variable.
+
+Publish only the helper's complete validated result to
+`knowledge-base/papers/<citekey>/`. The package contains `article.md`,
+`mineru-result.json`, optional `images/`, and `_extraction/manifest.json` plus
+`_extraction/validation.json`; `_extraction/source.pdf` is present only when
+requested. Treat the original PDF as source of truth and do not edit generated
+Markdown, JSON, or images after validation. The helper stages work under
+`tool-library/output/mineru-runs/`, verifies every JSON and Markdown asset, and
+refuses to overwrite an existing package in place. If an existing package is
+valid, reuse it; otherwise report the conflict instead of partially replacing
+it. Document content is transmitted to the configured MinerU service.
+
+When `create_initial_article_wiki` is `yes`, use
+`research-vault-source-note` to create or update
+`knowledge-base/wiki/sources/<citekey>.md`. Respect `article_wiki_source`
+exactly: `pdf` means read the supplied original PDF; `article` means require an
+existing validated MinerU article package; `auto` means prefer the newly
+generated or existing validated article and otherwise fall back to the PDF,
+reporting the fallback. Validate `_extraction/manifest.json` and
+`_extraction/validation.json` before reading the article. Keep the source note
+at `abstract-level`; this action must
+not mark it `x-ray`. Set `converted_path` only when a validated article package
+exists and link the source note to that article.
+
+Update papers.csv, references.bib when applicable, literature/index pages,
+field-gap tracking, and wiki/log records owned by these stages. Report each
+selected output independently, including reuse, skip, fallback, validation
+failure, and unresolved metadata or conversion gaps.
 """,
     },
     "pdf-xray": {
@@ -93,6 +215,18 @@ Spawn the project custom agent `paper_xray` and use the
 data/materials, limitations, and evidence chain. Upgrade a source note to
 `x-ray` only when every required evidence check is complete. Report any
 inaccessible or unverified evidence explicitly.
+
+Treat `deep_read_source` in the Dashboard processing options as authoritative.
+For `pdf`, use the supplied original PDF as primary full-text and visual
+evidence; do not silently replace it with converted Markdown. For `article`,
+require an existing MinerU package under `knowledge-base/papers/<citekey>/`,
+validate `_extraction/manifest.json` and `_extraction/validation.json`, and
+inspect `article.md` plus every claim-bearing Figure/Table asset. Treat
+`mineru-result.json` as extraction structure and provenance support, not
+scientific evidence by itself. Do not silently fall back to the PDF. If the
+selected article package omits or degrades evidence required for an x-ray
+judgment, report the gap and do not upgrade the note merely because the
+Markdown is complete enough to read.
 """,
     },
     "code-analysis": {
@@ -747,6 +881,142 @@ def normalize_action_input(
     raw_input: str,
     project_root: Path | None = None,
 ) -> tuple[str, str, str, list[dict[str, Any]]]:
+    if action in {"paper-ingest", "pdf-xray"}:
+        try:
+            payload = json.loads(raw_input)
+        except json.JSONDecodeError:
+            return raw_input, "", "vault", []
+        if not isinstance(payload, dict) or payload.get("kind") != "dashboard-action-request":
+            return raw_input, "", "vault", []
+        if payload.get("version") != 1 or payload.get("action") != action:
+            raise ValueError("Dashboard action request identity does not match the selected action")
+        request = str(payload.get("request") or "").strip()
+        if not request:
+            raise ValueError(f"{ACTION_SPECS[action]['label']} requires a non-empty request")
+        options = payload.get("options")
+        if not isinstance(options, dict):
+            raise ValueError("Dashboard action request options must be an object")
+
+        if action == "paper-ingest":
+            create_markdown = options.get("createArticleMarkdown") is True
+            create_wiki = options.get("createArticleWiki") is True
+            if not create_markdown and not create_wiki:
+                raise ValueError("Paper ingest requires at least one selected output")
+            wiki_source = str(options.get("articleWikiSource") or "auto")
+            if wiki_source not in {"auto", "pdf", "article"}:
+                raise ValueError("Invalid article Wiki source")
+            mineru_model = normalize_option_choice(
+                options,
+                "mineruModel",
+                {"vlm", "pipeline", "auto", "html"},
+                "vlm",
+            )
+            mineru_language = normalize_option_choice(
+                options,
+                "mineruLanguage",
+                {
+                    "ch",
+                    "ch_server",
+                    "en",
+                    "japan",
+                    "korean",
+                    "chinese_cht",
+                    "ta",
+                    "te",
+                    "ka",
+                    "el",
+                    "th",
+                    "latin",
+                    "arabic",
+                    "cyrillic",
+                    "east_slavic",
+                    "devanagari",
+                },
+                "en",
+            )
+            mineru_ocr = normalize_option_bool(options, "mineruOcr", False)
+            mineru_formula = normalize_option_bool(options, "mineruFormula", True)
+            mineru_table = normalize_option_bool(options, "mineruTable", True)
+            mineru_pages = normalize_mineru_pages(options)
+            mineru_timeout = normalize_option_number(
+                options,
+                "mineruTimeoutSeconds",
+                600,
+                60,
+                1800,
+            )
+            if not mineru_timeout.is_integer():
+                raise ValueError("Invalid mineruTimeoutSeconds: expected an integer")
+            include_source_pdf = normalize_option_bool(
+                options,
+                "mineruIncludeSourcePdf",
+                False,
+            )
+            tool_config = payload.get("toolConfig")
+            if not isinstance(tool_config, dict):
+                tool_config = {}
+            mineru_executable = re.sub(
+                r"[\r\n]+",
+                " ",
+                str(tool_config.get("mineruExecutable") or "").strip(),
+            )
+            mineru_base_url = re.sub(
+                r"[\r\n]+",
+                " ",
+                str(tool_config.get("mineruBaseUrl") or "").strip(),
+            )
+            if mineru_base_url and not re.match(r"^https?://", mineru_base_url):
+                raise ValueError("MinerU base URL must use http:// or https://")
+            if create_markdown:
+                mineru_executable = str(validate_mineru_executable(mineru_executable))
+            return (
+                "\n".join(
+                    [
+                        "Dashboard processing options (authoritative):",
+                        f"- generate_original_markdown: {'yes' if create_markdown else 'no'}",
+                        f"- create_initial_article_wiki: {'yes' if create_wiki else 'no'}",
+                        f"- article_wiki_source: {wiki_source}",
+                        "- mineru_helper: tool-library/scripts/run_mineru_extract.py",
+                        f"- mineru_executable: {mineru_executable or '<not configured>'}",
+                        f"- mineru_base_url: {mineru_base_url or '<official default>'}",
+                        "- mineru_mode: precision-extract",
+                        "- mineru_formats: md,json",
+                        f"- mineru_model: {mineru_model}",
+                        f"- mineru_language: {mineru_language}",
+                        f"- mineru_ocr: {'yes' if mineru_ocr else 'no'}",
+                        f"- mineru_formula: {'yes' if mineru_formula else 'no'}",
+                        f"- mineru_table: {'yes' if mineru_table else 'no'}",
+                        f"- mineru_pages: {mineru_pages or '<all>'}",
+                        f"- mineru_timeout_seconds: {int(mineru_timeout)}",
+                        f"- mineru_include_source_pdf: {'yes' if include_source_pdf else 'no'}",
+                        "",
+                        "User-supplied source and request:",
+                        request,
+                    ]
+                ),
+                "",
+                "vault",
+                [],
+            )
+
+        xray_source = str(options.get("pdfXraySource") or "")
+        if xray_source not in {"pdf", "article"}:
+            raise ValueError("PDF deep reading requires source 'pdf' or 'article'")
+        return (
+            "\n".join(
+                [
+                    "Dashboard processing options (authoritative):",
+                    f"- deep_read_source: {xray_source}",
+                    "",
+                    "User-supplied source and request:",
+                    request,
+                ]
+            ),
+            "",
+            "vault",
+            [],
+        )
+
     if action != "vault-retrieval":
         return raw_input, "", "vault", []
     try:
@@ -1930,12 +2200,36 @@ def run_process(
         cwd=project_root,
         env=env,
         stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
         shell=False,
+        bufsize=1,
         **subprocess_group_options(),
     )
+    output_lock = threading.Lock()
+
+    def forward_output(stream: Any, target: Any) -> None:
+        if stream is None:
+            return
+        for line in stream:
+            with output_lock:
+                print(line, end="", file=target, flush=True)
+
+    stdout_thread = threading.Thread(
+        target=forward_output,
+        args=(process.stdout, sys.stdout),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=forward_output,
+        args=(process.stderr, sys.stderr),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
     if stdin_text is not None and process.stdin is not None:
         process.stdin.write(stdin_text)
         process.stdin.close()
@@ -1961,6 +2255,11 @@ def run_process(
             "Action stopped by user; child process tree was terminated.",
             file=sys.stderr,
         )
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    for stream in (process.stdout, process.stderr):
+        if stream is not None and not stream.closed:
+            stream.close()
     return return_code
 
 

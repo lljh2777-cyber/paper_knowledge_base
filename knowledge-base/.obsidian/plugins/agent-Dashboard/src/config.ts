@@ -35,6 +35,7 @@ export interface ModelOption {
 export const MODEL_OPTIONS: readonly ModelOption[] = [
 	{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "均衡模型", supportsFast: true },
 	{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "高能力模型", supportsFast: true },
+	{ id: "gpt-5.6-luna", label: "GPT-5.6-Luna", description: "快速经济型代码模型", supportsFast: true },
 	{ id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "快速代码模型", supportsFast: false },
 ];
 
@@ -178,15 +179,4 @@ export interface ChatMessage {
 export const CONNECTION_TEST_MESSAGES: readonly ChatMessage[] = [
 	{ role: "system", content: "This is a connection test. Do not use tools or external data." },
 	{ role: "user", content: "Reply with exactly OK." },
-];
-
-export const WEB_SEARCH_TEST_MESSAGES: readonly ChatMessage[] = [
-	{
-		role: "system",
-		content: "This is a web search capability test. Do not use any local files or private data.",
-	},
-	{
-		role: "user",
-		content: "请强制联网搜索并用一句话回答：阿里云百炼联网搜索文档的页面标题是什么？",
-	},
 ];
