@@ -1824,6 +1824,51 @@ assert.ok(!prepared.includes("images/b.jpg"));
 assert.ok(!prepared.includes("Fig. 1. Complete caption"));
 assert.ok(prepared.includes("images/unrelated.jpg"));
 
+const pagedMarkdown = "# Example\n\nFirst page paragraph.\n\nSecond page paragraph.\n";
+const pagedIndex = normalization.buildRuntimeViewerIndex([
+	[{ type: "text", bbox: [0, 0, 100, 100], text: "First page paragraph." }],
+	[{ type: "text", bbox: [0, 0, 100, 100], text: "Second page paragraph." }],
+], pagedMarkdown);
+const pagedPrepared = markdown.prepareReaderMarkdown(pagedMarkdown, [], pagedIndex);
+assert.equal((pagedPrepared.match(/data-reader-page=/g) || []).length, 2);
+assert.ok(pagedPrepared.indexOf('data-reader-page="1"') < pagedPrepared.indexOf("First page paragraph."));
+assert.ok(pagedPrepared.indexOf('data-reader-page="2"') < pagedPrepared.indexOf("Second page paragraph."));
+assert.ok(pagedPrepared.indexOf('data-reader-page="1"') < pagedPrepared.indexOf('data-reader-page="2"'));
+const imageOnlyMarkdown = "# Example\n\nFirst page paragraph.\n\n![](images/only.jpg)\n\nThird page paragraph.\n";
+const imageOnlyIndex = normalization.buildRuntimeViewerIndex([
+	[{ type: "text", bbox: [0, 0, 100, 100], text: "First page paragraph." }],
+	[{ type: "image", bbox: [0, 0, 100, 100], img_path: "images/only.jpg" }],
+	[{ type: "text", bbox: [0, 0, 100, 100], text: "Third page paragraph." }],
+], imageOnlyMarkdown);
+const imageOnlyPrepared = markdown.prepareReaderMarkdown(imageOnlyMarkdown, [{
+	...visual,
+	id: "image-only-page",
+	pageIdx: 1,
+	memberAssetPaths: ["images/only.jpg"],
+	memberMarkdownImageIds: ["md-img-0000"],
+	anchorAssetPath: "images/only.jpg",
+}], imageOnlyIndex);
+assert.match(imageOnlyPrepared, /data-reader-page="1"/);
+assert.doesNotMatch(imageOnlyPrepared, /data-reader-page="2"/);
+assert.match(imageOnlyPrepared, /data-reader-page="3"/);
+assert.equal(markdown.readerPageBoundaryIndex([8], [3], 1), 8);
+assert.equal(markdown.readerPageBoundaryIndex([], [3, 8], 3), 8);
+assert.equal(markdown.readerPageBoundaryIndex([], [], -1, true), 0);
+assert.equal(markdown.readerPageBoundaryIndex([], [], 2, false), -1);
+assert.equal(markdown.readerElementOffset(240, 450, 100), 590);
+assert.equal(markdown.alignedReaderScrollTop(240, 450, 100, 18), 572);
+assert.equal(markdown.alignedReaderScrollTop(0, 18, 0, 18), 0);
+assert.equal(markdown.readerPageAtViewportTop([
+	{ pageNumber: 1, top: -120, bottom: 80 },
+	{ pageNumber: 2, top: 90, bottom: 180 },
+], 0, 300, 3), 1);
+assert.equal(markdown.readerPageAtViewportTop([
+	{ pageNumber: 1, top: -200, bottom: -1 },
+	{ pageNumber: 2, top: 12, bottom: 80 },
+	{ pageNumber: 3, top: 90, bottom: 180 },
+], 0, 300, 1), 2);
+assert.equal(markdown.readerPageAtViewportTop([], 0, 300, 4), 4);
+
 const nonAdjacentLowercaseBody = "ordinary lowercase body prose that is unique and must remain visible.";
 const nonAdjacentPrepared = markdown.prepareReaderMarkdown(
 	`![](images/lowercase.jpg)\n\nIntervening body boundary.\n\n${nonAdjacentLowercaseBody}\n`,
@@ -2206,8 +2251,16 @@ assert.match(plugin, /id:\s*"open-mineru-reader"/);
 assert.match(plugin, /"file-menu"/);
 assert.match(plugin, /getLeaf\("tab"\)/);
 assert.match(view, /MarkdownRenderer\.render\([\s\S]*readerPackage\.articlePath,[\s\S]*this\.markdownComponent/);
+assert.doesNotMatch(view, /agent-dashboard-mineru-article markdown-preview-view/);
 assert.match(view, /loadPdfJs|MineruPdfRenderer/);
 assert.match(view, /IntersectionObserver/);
+assert.match(view, /applyMarkdownPage/);
+assert.match(view, /readerPageAtViewportTop/);
+assert.match(view, /data-reader-page-owner/);
+assert.match(view, /document\.addEventListener\("scroll", schedulePageUpdate/);
+assert.doesNotMatch(view, /setInterval\(/);
+assert.doesNotMatch(view, /pagePollTimer|pageObserver/);
+assert.doesNotMatch(view, /Math\.min\(paneRect\.bottom, scrollerRect\.bottom/);
 assert.doesNotMatch(view, /selectVisual\(visualId, false, false\)/);
 assert.match(view, /referenceAbortController/);
 assert.match(view, /onReferenceEvent/);
@@ -2217,6 +2270,35 @@ assert.match(view, /data-page-number/);
 assert.match(view, /rootMargin:\s*"1400px 0px"/);
 assert.match(view, /updateVisiblePage/);
 assert.match(view, /scrollPdfToPage/);
+assert.match(view, /followPdfReading/);
+assert.match(view, /followVisualReading/);
+assert.match(view, /pdfFollowInteractionSource/);
+assert.match(view, /pausePdfFollowingForReferenceInteraction/);
+assert.match(view, /this\.pdfFollowInteractionSource === "markdown"/);
+assert.match(view, /pointerenter/);
+assert.match(view, /跟随正文页 · 已暂停/);
+assert.match(view, /pageHasSuspiciousBlankVisual/);
+assert.match(view, /renderRetried/);
+assert.match(view, /paintPdfImageCompatibilityLayer/);
+assert.match(view, /imageFallback/);
+assert.match(view, /block\.source_type !== "image"/);
+assert.match(view, /reader\.readAsDataURL/);
+assert.match(view, /await compatibilityImage\.decode\(\)/);
+assert.match(view, /agent-dashboard-mineru-pdf-image-layer/);
+assert.match(view, /data-reader-page/);
+assert.match(view, /materializePageAnchors/);
+assert.match(view, /markerTargets/);
+assert.match(view, /readerPageBoundaryIndex/);
+assert.doesNotMatch(view, /visualTargets/);
+assert.match(view, /markdown_text_range/);
+assert.match(view, /syncStateForMode/);
+assert.match(view, /alignedReaderScrollTop/);
+assert.match(view, /this\.readerState\.mode !== "pdf" \|\| this\.readerState\.followPdfReading/);
+assert.match(view, /target\.closest<HTMLElement>\("\[data-reader-page-owner\]"\)/);
+assert.match(view, /MinerU 文献阅读器/);
+assert.doesNotMatch(view, /agent-dashboard-mineru-title-block/);
+assert.doesNotMatch(view, /pageWrapper\.offsetTop|initialPage\.offsetTop/);
+assert.doesNotMatch(view, /this\.readerState\.followReading/);
 assert.doesNotMatch(view, /this\.readerState\.pdfPage = page;\s*void this\.renderReference\(\)/);
 assert.match(view, /renderCrop/);
 assert.match(view, /缺少包内 PDF，当前保留 MinerU 原始图块/);
@@ -2239,6 +2321,9 @@ assert.match(loader, /captionText \|\| captionParts\.length \|\| fallback\?\.cap
 assert.match(loader, /rawRole === "marginalia" \? "discarded"/);
 assert.match(pdfRenderer, /pageGeneration/);
 assert.match(pdfRenderer, /PDF page render superseded/);
+assert.match(pdfRenderer, /pageTasks = new Set/);
+assert.match(pdfRenderer, /cropTasks = new Set/);
+assert.doesNotMatch(pdfRenderer, /page\.cleanup\?\.\(\)/);
 assert.match(pdfRenderer, /clearResources/);
 assert.match(view, /包内 PDF 无法加载，已保留 Markdown 与原始图片阅读/);
 assert.match(extractor, /viewer-index\.json/);
@@ -2247,8 +2332,11 @@ assert.match(extractor, /visual-candidates\.json/);
 assert.match(extractor, /build_visual_candidates/);
 assert.match(styles, /\.agent-dashboard-mineru-workspace/);
 assert.match(styles, /\.agent-dashboard-mineru-layout-box/);
+assert.match(styles, /\.agent-dashboard-mineru-layout-box\.is-visual,[\s\S]*?background:\s*transparent/);
 assert.match(styles, /\.agent-dashboard-mineru-pdf-page-placeholder/);
 assert.match(styles, /scrollbar-gutter:\s*stable/);
+assert.match(styles, /\.agent-dashboard-mineru-page-anchor/);
+assert.match(styles, /\.agent-dashboard-mineru-mode-follow/);
 assert.match(styles, /@container \(max-width: 680px\)/);
 assert.match(styles, /grid-template-columns: minmax\(0, var\(--agent-dashboard-mineru-markdown-width/);
 

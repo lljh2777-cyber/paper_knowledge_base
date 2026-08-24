@@ -234,10 +234,12 @@ export interface MineruReaderPackage {
 export interface MineruReaderViewState {
 	articlePath: string;
 	mode: MineruReaderMode;
-	followReading: boolean;
+	followPdfReading: boolean;
+	followVisualReading: boolean;
 	showLayoutBoxes: boolean;
 	currentVisualId: string;
 	markdownAnchor: string;
+	markdownPage: number;
 	pdfPage: number;
 	pdfZoom: number;
 	splitRatio: number;

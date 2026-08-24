@@ -11,6 +11,7 @@ import type {
 	MineruCaptionLink,
 	MineruReaderVisual,
 	MineruViewerBlock,
+	MineruViewerIndex,
 	MineruVisualRepair,
 	MineruVisualRepairGroup,
 	NormalizedBbox,
@@ -36,6 +37,88 @@ interface MarkdownLineRange {
 	contentEnd: number;
 	end: number;
 	text: string;
+}
+
+export interface MineruReaderViewportBlock {
+	pageNumber: number;
+	top: number;
+	bottom: number;
+}
+
+/**
+ * Pick one monotonic DOM boundary for a source page. An inline marker survived
+ * the same Markdown suppression/rendering pipeline as the visible text, so it
+ * is stronger evidence than a later normalized-text search. The latter is a
+ * compatibility fallback for older or partially indexed packages only.
+ */
+export function readerPageBoundaryIndex(
+	exactIndices: readonly number[],
+	fallbackIndices: readonly number[],
+	previousIndex: number,
+	allowDocumentStart = false,
+): number {
+	const firstAfterPrevious = (values: readonly number[]): number => [...values]
+		.filter((value) => Number.isInteger(value) && value > previousIndex)
+		.sort((left, right) => left - right)[0] ?? -1;
+	const exact = firstAfterPrevious(exactIndices);
+	if (exact >= 0) return exact;
+	const fallback = firstAfterPrevious(fallbackIndices);
+	if (fallback >= 0) return fallback;
+	return allowDocumentStart && previousIndex < 0 ? 0 : -1;
+}
+
+/**
+ * Resolve the page owned by the first visible Markdown line. Blocks crossing
+ * the viewport top win over later blocks, so a partially visible paragraph is
+ * still attributed to the page where that rendered block begins.
+ */
+export function readerPageAtViewportTop(
+	blocks: readonly MineruReaderViewportBlock[],
+	viewportTop: number,
+	viewportBottom: number,
+	fallbackPage = 1,
+): number {
+	const top = Number.isFinite(viewportTop) ? viewportTop : 0;
+	const bottom = Number.isFinite(viewportBottom)
+		? Math.max(top, viewportBottom)
+		: Number.POSITIVE_INFINITY;
+	const visible = blocks
+		.filter((block) => (
+			Number.isFinite(block.pageNumber)
+			&& block.pageNumber > 0
+			&& Number.isFinite(block.top)
+			&& Number.isFinite(block.bottom)
+			&& block.bottom > top + 0.5
+			&& block.top < bottom - 0.5
+		))
+		.sort((left, right) => {
+			const leftVisibleTop = Math.max(top, left.top);
+			const rightVisibleTop = Math.max(top, right.top);
+			return leftVisibleTop - rightVisibleTop
+				|| left.top - right.top
+				|| left.bottom - right.bottom;
+		});
+	return Math.max(1, Math.floor(visible[0]?.pageNumber || fallbackPage));
+}
+
+export function readerElementOffset(
+	scrollTop: number,
+	elementTop: number,
+	scrollerTop: number,
+): number {
+	return Math.max(0, scrollTop + elementTop - scrollerTop);
+}
+
+export function alignedReaderScrollTop(
+	scrollTop: number,
+	elementTop: number,
+	scrollerTop: number,
+	leadingInset = 0,
+): number {
+	return Math.max(
+		0,
+		readerElementOffset(scrollTop, elementTop, scrollerTop) - Math.max(0, leadingInset),
+	);
 }
 
 type SamePageCaptionProjection = NonNullable<
@@ -1459,6 +1542,7 @@ export function inferRuntimeNextPageCaptionLink(
 export function prepareReaderMarkdown(
 	markdown: string,
 	visuals: readonly MineruReaderVisual[],
+	viewerIndex?: MineruViewerIndex,
 ): string {
 	const atomicCaptures = visuals.flatMap((visual) => {
 		const projection = visual.atomicBlockProjection;
@@ -1564,6 +1648,50 @@ export function prepareReaderMarkdown(
 		const anchor = `<span class="agent-dashboard-mineru-reading-anchor" data-visual-id="${escapeHtmlAttribute(replacement.capture.visualId)}" aria-label="图像位置"></span>`;
 		prepared = `${prepared.slice(0, replacement.tableStart)}${anchor}${prepared.slice(replacement.tableEnd, replacement.captionStart)}${prepared.slice(replacement.captionEnd)}`;
 		inserted.add(replacement.capture.visualId);
+	}
+	if (!viewerIndex?.pages.length) return prepared;
+
+	const positionsByPage = new Map<number, number[]>();
+	const addPosition = (pageIdx: number, position: number): void => {
+		if (position < 0) return;
+		const positions = positionsByPage.get(pageIdx) || [];
+		positions.push(position);
+		positionsByPage.set(pageIdx, positions);
+	};
+	for (const page of viewerIndex.pages) {
+		for (const block of page.blocks) {
+			const range = block.markdown_text_range || block.markdown_table_range;
+			if (
+				!range
+				|| range.offset_unit !== "utf16-code-unit"
+				|| range.start < 0
+				|| range.end <= range.start
+				|| range.end > markdown.length
+			) continue;
+			const source = markdown.slice(range.start, range.end);
+			if (!source.trim()) continue;
+			const position = prepared.indexOf(source);
+			if (position >= 0 && prepared.indexOf(source, position + source.length) < 0) {
+				addPosition(page.page_idx, position);
+			}
+		}
+	}
+	const insertions: Array<{ pageNumber: number; position: number }> = [];
+	let previousPosition = -1;
+	const firstLineEnd = prepared.indexOf("\n");
+	const firstPageFallback = firstLineEnd >= 0 ? firstLineEnd + 1 : prepared.length;
+	for (const page of [...viewerIndex.pages].sort((left, right) => left.page_idx - right.page_idx)) {
+		const positions = (positionsByPage.get(page.page_idx) || [])
+			.filter((position) => position > previousPosition)
+			.sort((left, right) => left - right);
+		const position = positions[0] ?? (page.page_idx === 0 ? firstPageFallback : -1);
+		if (position < 0) continue;
+		insertions.push({ pageNumber: page.page_idx + 1, position });
+		previousPosition = position;
+	}
+	for (const insertion of insertions.sort((left, right) => right.position - left.position)) {
+		const anchor = `<span class="agent-dashboard-mineru-page-anchor" data-reader-page="${insertion.pageNumber}" aria-hidden="true"></span>`;
+		prepared = `${prepared.slice(0, insertion.position)}${anchor}${prepared.slice(insertion.position)}`;
 	}
 	return prepared;
 }

@@ -14,7 +14,13 @@ import { MINERU_READER_VIEW_TYPE } from "../config";
 import { bboxToPercent } from "../mineru/normalization";
 import { MineruPackageLoader, resolvePackageAssetPath } from "../mineru/package-loader";
 import { MineruPdfRenderer } from "../mineru/pdf-renderer";
-import { prepareReaderMarkdown } from "../mineru/reader-markdown";
+import {
+	alignedReaderScrollTop,
+	prepareReaderMarkdown,
+	readerElementOffset,
+	readerPageBoundaryIndex,
+	readerPageAtViewportTop,
+} from "../mineru/reader-markdown";
 import type {
 	MineruReaderMode,
 	MineruReaderPackage,
@@ -30,10 +36,12 @@ interface MineruReaderHost {
 const DEFAULT_STATE: MineruReaderViewState = {
 	articlePath: "",
 	mode: "pdf",
-	followReading: true,
+	followPdfReading: true,
+	followVisualReading: true,
 	showLayoutBoxes: true,
 	currentVisualId: "",
 	markdownAnchor: "",
+	markdownPage: 1,
 	pdfPage: 1,
 	pdfZoom: 1,
 	splitRatio: 0.64,
@@ -55,13 +63,20 @@ function normalizeState(value: unknown): MineruReaderViewState {
 		? value as Record<string, unknown>
 		: {};
 	const mode: MineruReaderMode = record.mode === "visuals" ? "visuals" : "pdf";
+	const legacyFollowReading = record.followReading !== false;
 	return {
 		articlePath: String(record.articlePath || ""),
 		mode,
-		followReading: record.followReading !== false,
+		followPdfReading: typeof record.followPdfReading === "boolean"
+			? record.followPdfReading
+			: legacyFollowReading,
+		followVisualReading: typeof record.followVisualReading === "boolean"
+			? record.followVisualReading
+			: legacyFollowReading,
 		showLayoutBoxes: record.showLayoutBoxes !== false,
 		currentVisualId: String(record.currentVisualId || ""),
 		markdownAnchor: String(record.markdownAnchor || ""),
+		markdownPage: Math.floor(boundedNumber(record.markdownPage, 1, 1, Number.MAX_SAFE_INTEGER)),
 		pdfPage: Math.floor(boundedNumber(record.pdfPage, 1, 1, Number.MAX_SAFE_INTEGER)),
 		pdfZoom: boundedNumber(record.pdfZoom, 1, 0.4, 4),
 		splitRatio: boundedNumber(record.splitRatio, 0.64, 0.42, 0.78),
@@ -90,6 +105,8 @@ export class MineruReaderView extends ItemView {
 	private readerState: MineruReaderViewState = { ...DEFAULT_STATE };
 	private readerPackage: MineruReaderPackage | null = null;
 	private markdownScroller: HTMLElement | null = null;
+	private markdownPageStatus: HTMLElement | null = null;
+	private markdownPageAnchorCount = 0;
 	private referenceHost: HTMLElement | null = null;
 	private workspaceEl: HTMLElement | null = null;
 	private readingObserver: IntersectionObserver | null = null;
@@ -101,6 +118,7 @@ export class MineruReaderView extends ItemView {
 	private referenceGeneration = 0;
 	private opened = false;
 	private resizeTimer: number | null = null;
+	private pdfFollowInteractionSource: "markdown" | "pdf" = "markdown";
 
 	constructor(leaf: WorkspaceLeaf, plugin: MineruReaderHost) {
 		super(leaf);
@@ -142,6 +160,7 @@ export class MineruReaderView extends ItemView {
 		this.readerState.articlePath = articlePath;
 		this.readerState.currentVisualId = "";
 		this.readerState.markdownAnchor = "";
+		this.readerState.markdownPage = 1;
 		this.readerState.pdfPage = 1;
 		if (this.opened) await this.loadAndRender();
 		this.requestStateSave();
@@ -203,6 +222,11 @@ export class MineruReaderView extends ItemView {
 				1,
 				Math.min(this.pdfRenderer.numPages || Number.MAX_SAFE_INTEGER, this.readerState.pdfPage),
 			);
+			this.readerState.markdownPage = Math.max(
+				1,
+				Math.min(this.pdfRenderer.numPages || Number.MAX_SAFE_INTEGER, this.readerState.markdownPage),
+			);
+			this.syncStateForMode();
 			await this.renderWorkspace();
 			this.requestStateSave();
 		} catch (error) {
@@ -253,7 +277,6 @@ export class MineruReaderView extends ItemView {
 		this.contentEl.empty();
 		this.contentEl.addClass("agent-dashboard-mineru-reader-view");
 		const shell = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-shell" });
-		this.renderTopbar(shell);
 		const workspace = shell.createDiv({ cls: "agent-dashboard-mineru-workspace" });
 		workspace.style.setProperty(
 			"--agent-dashboard-mineru-markdown-width",
@@ -275,44 +298,6 @@ export class MineruReaderView extends ItemView {
 		this.resizeObserver?.observe(referencePane);
 	}
 
-	private renderTopbar(parent: HTMLElement): void {
-		const readerPackage = this.readerPackage;
-		if (!readerPackage) return;
-		const topbar = parent.createEl("header", { cls: "agent-dashboard-mineru-topbar" });
-		const identity = topbar.createDiv({ cls: "agent-dashboard-mineru-document-identity" });
-		const openMarkdown = iconButton(identity, "file-text", "在新标签页打开原始 Markdown");
-		this.onWorkspaceEvent(openMarkdown, "click", () => void this.openArticleMarkdown());
-		const titleBlock = identity.createDiv({ cls: "agent-dashboard-mineru-title-block" });
-		titleBlock.createEl("h1", { text: readerPackage.title });
-		titleBlock.createEl("p", { text: readerPackage.articlePath });
-		const controls = topbar.createDiv({ cls: "agent-dashboard-mineru-top-controls" });
-		const follow = controls.createEl("button", {
-			cls: this.readerState.followReading
-				? "agent-dashboard-mineru-toggle is-active"
-				: "agent-dashboard-mineru-toggle",
-			attr: {
-				"aria-pressed": this.readerState.followReading ? "true" : "false",
-				title: "让右侧参考内容跟随 Markdown 阅读位置",
-			},
-		});
-		follow.type = "button";
-		follow.createSpan({ text: "跟随阅读" });
-		follow.createSpan({ cls: "agent-dashboard-mineru-toggle-track" });
-		this.onWorkspaceEvent(follow, "click", () => {
-			this.readerState.followReading = !this.readerState.followReading;
-			follow.toggleClass("is-active", this.readerState.followReading);
-			follow.setAttribute("aria-pressed", this.readerState.followReading ? "true" : "false");
-			if (this.readerState.followReading) void this.syncReferenceToCurrentVisual();
-			this.requestStateSave();
-		});
-		if (readerPackage.issues.length) {
-			const issue = iconButton(controls, "info", `${readerPackage.issues.length} 条兼容性提示`);
-			this.onWorkspaceEvent(issue, "click", () => {
-				new Notice(readerPackage.issues.slice(0, 5).join("\n"), 9000);
-			});
-		}
-	}
-
 	private async renderMarkdownPane(parent: HTMLElement): Promise<void> {
 		const readerPackage = this.readerPackage;
 		if (!readerPackage) return;
@@ -321,16 +306,34 @@ export class MineruReaderView extends ItemView {
 			attr: { "aria-label": "Markdown 正文" },
 		});
 		const paneHeader = pane.createDiv({ cls: "agent-dashboard-mineru-pane-heading" });
-		paneHeader.createEl("strong", { text: "Markdown" });
-		paneHeader.createSpan({ text: "图片与图注已移至参考栏，正文阅读位置保持独立" });
+		this.markdownPageStatus = paneHeader.createEl("strong");
+		this.updateMarkdownPageStatus();
 		const scroller = pane.createDiv({
 			cls: "agent-dashboard-mineru-markdown-scroll markdown-reading-view",
 		});
 		const article = scroller.createEl("article", {
-			cls: "agent-dashboard-mineru-article markdown-preview-view markdown-rendered",
+			cls: "agent-dashboard-mineru-article markdown-rendered",
 		});
 		this.markdownScroller = scroller;
-		const prepared = prepareReaderMarkdown(readerPackage.articleMarkdown, readerPackage.visuals);
+		const activateMarkdownFollowing = (): void => {
+			if (this.pdfFollowInteractionSource === "markdown") return;
+			this.pdfFollowInteractionSource = "markdown";
+			this.updatePdfFollowAffordance();
+			if (this.readerState.mode === "pdf" && this.readerState.followPdfReading) {
+				this.readerState.pdfPage = this.readerState.markdownPage;
+				this.scrollPdfToPage(this.readerState.pdfPage, "auto");
+				this.requestStateSave();
+			}
+		};
+		this.onWorkspaceEvent(pane, "pointerenter", activateMarkdownFollowing);
+		this.onWorkspaceEvent(pane, "pointerdown", activateMarkdownFollowing);
+		this.onWorkspaceEvent(pane, "wheel", activateMarkdownFollowing);
+		this.onWorkspaceEvent(pane, "focusin", activateMarkdownFollowing);
+		const prepared = prepareReaderMarkdown(
+			readerPackage.articleMarkdown,
+			readerPackage.visuals,
+			readerPackage.viewerIndex,
+		);
 		this.markdownComponent?.unload();
 		this.markdownComponent = new Component();
 		this.markdownComponent.load();
@@ -341,6 +344,8 @@ export class MineruReaderView extends ItemView {
 			readerPackage.articlePath,
 			this.markdownComponent,
 		);
+		this.markdownPageAnchorCount = this.materializePageAnchors(article);
+		this.updateMarkdownPageStatus();
 		readerPackage.visuals.forEach((visual) => {
 			const anchor = article.querySelector<HTMLElement>(`[data-visual-id="${CSS.escape(visual.id)}"]`);
 			if (!anchor) return;
@@ -358,6 +363,118 @@ export class MineruReaderView extends ItemView {
 		});
 		this.observeReadingAnchors(article, scroller);
 		window.requestAnimationFrame(() => this.restoreMarkdownPosition(article));
+	}
+
+	private materializePageAnchors(article: HTMLElement): number {
+		const readerPackage = this.readerPackage;
+		if (!readerPackage) return 0;
+		const blockSelector = "h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, table";
+		const normalizedText = (value: string | null | undefined): string => String(value || "")
+			.replace(/<[^>]*>/g, " ")
+			.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+			.replace(/[`*_~#>\[\]]/g, " ")
+			.replace(/&(?:nbsp|#160);/gi, " ")
+			.replace(/[\u00a0\u202f]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		// Only visible reading content owns a PDF page. Figure-only anchors are
+		// intentionally absent because their assets live in the separate visual
+		// rail; assigning them a page would shift the following caption/body text.
+		const renderedBlocks = [...article.querySelectorAll<HTMLElement>(blockSelector)]
+			.filter((block) => Boolean(normalizedText(block.textContent)));
+		if (!renderedBlocks.length) return 0;
+		const blockIndex = (element: HTMLElement | null): number => {
+			if (!element) return -1;
+			const direct = renderedBlocks.indexOf(element);
+			if (direct >= 0) return direct;
+			return renderedBlocks.findIndex((candidate) => candidate.contains(element));
+		};
+		const targetForMarker = (marker: HTMLElement): HTMLElement | null => {
+			const containing = marker.closest<HTMLElement>(blockSelector);
+			if (containing && normalizedText(containing.textContent)) return containing;
+			return renderedBlocks.find((candidate) => Boolean(
+				marker.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING
+			)) || containing;
+		};
+
+		const markerTargets = new Map<number, HTMLElement[]>();
+		for (const marker of article.querySelectorAll<HTMLElement>(".agent-dashboard-mineru-page-anchor[data-reader-page]")) {
+			const pageNumber = Number(marker.dataset.readerPage || 0);
+			const target = targetForMarker(marker);
+			if (pageNumber > 0 && target) {
+				const targets = markerTargets.get(pageNumber) || [];
+				targets.push(target);
+				markerTargets.set(pageNumber, targets);
+			}
+			marker.remove();
+		}
+		// Rebuild one monotonic page chain. Exact inline markers are authoritative;
+		// normalized-text search is used only when a marker did not survive.
+		renderedBlocks.forEach((block) => block.removeAttribute("data-reader-page"));
+
+		let previousIndex = -1;
+		for (const page of [...readerPackage.viewerIndex.pages].sort((left, right) => left.page_idx - right.page_idx)) {
+			const pageNumber = page.page_idx + 1;
+			const candidateTexts = page.blocks
+					.filter((block) => Boolean(block.markdown_text_range || block.markdown_table_range))
+					.sort((left, right) => left.page_order - right.page_order)
+					.map((block) => normalizedText(block.text?.text))
+					.filter((text) => text.length >= 8);
+			const textTargets: number[] = [];
+			for (const candidateText of candidateTexts) {
+				const candidateIndex = renderedBlocks.findIndex((block, index) => {
+					if (index <= previousIndex) return false;
+					const renderedText = normalizedText(block.textContent);
+					const candidatePrefix = candidateText.slice(0, 120);
+					const renderedPrefix = renderedText.slice(0, 120);
+					return renderedText === candidateText
+						|| renderedText.includes(candidateText)
+						|| candidateText.includes(renderedText)
+						|| (candidatePrefix.length >= 24 && renderedText.includes(candidatePrefix))
+						|| (renderedPrefix.length >= 24 && candidateText.includes(renderedPrefix));
+				});
+				if (candidateIndex >= 0) {
+					textTargets.push(candidateIndex);
+					break;
+				}
+			}
+
+			const rawTargets = (markerTargets.get(pageNumber) || [])
+				.map((target) => blockIndex(target));
+			const targetIndex = readerPageBoundaryIndex(
+				rawTargets,
+				textTargets,
+				previousIndex,
+				page.page_idx === 0,
+			);
+			if (targetIndex < 0) continue;
+			renderedBlocks[targetIndex].dataset.readerPage = String(pageNumber);
+			previousIndex = targetIndex;
+		}
+		let owningPage = 1;
+		for (const block of renderedBlocks) {
+			const boundaryPage = Number(block.dataset.readerPage || 0);
+			if (boundaryPage > 0) owningPage = boundaryPage;
+			block.dataset.readerPageOwner = String(owningPage);
+		}
+		return new Set(renderedBlocks
+			.map((block) => Number(block.dataset.readerPage || 0))
+			.filter((pageNumber) => pageNumber > 0)).size;
+	}
+
+	private updateMarkdownPageStatus(): void {
+		if (!this.markdownPageStatus) return;
+		const totalPages = Math.max(
+			this.pdfRenderer.numPages,
+			...(this.readerPackage?.viewerIndex.pages.map((page) => page.page_idx + 1) || [1]),
+		);
+		this.markdownPageStatus.setText(
+			`Markdown · 正文第 ${this.readerState.markdownPage} 页`,
+		);
+		this.markdownPageStatus.setAttribute(
+			"title",
+			`已映射 ${this.markdownPageAnchorCount}/${totalPages} 个 MinerU 正文页`,
+		);
 	}
 
 	private renderSplitter(parent: HTMLElement): void {
@@ -435,6 +552,7 @@ export class MineruReaderView extends ItemView {
 		const tabs = header.createDiv({ cls: "agent-dashboard-mineru-reference-tabs", attr: { role: "tablist" } });
 		this.renderModeTab(tabs, "pdf", "原始 PDF");
 		this.renderModeTab(tabs, "visuals", "图片与图注");
+		this.renderModeFollowToggle(header);
 		const body = host.createDiv({ cls: "agent-dashboard-mineru-reference-body" });
 		try {
 			if (this.readerState.mode === "pdf") {
@@ -463,9 +581,72 @@ export class MineruReaderView extends ItemView {
 		this.onReferenceEvent(button, "click", () => {
 			if (this.readerState.mode === mode) return;
 			this.readerState.mode = mode;
+			this.syncStateForMode();
 			void this.renderReference();
 			this.requestStateSave();
 		});
+	}
+
+	private renderModeFollowToggle(parent: HTMLElement): void {
+		const pdfMode = this.readerState.mode === "pdf";
+		const active = pdfMode
+			? this.readerState.followPdfReading
+			: this.readerState.followVisualReading;
+		const label = pdfMode ? "跟随正文页" : "跟随正文图片";
+		const button = parent.createEl("button", {
+			cls: active
+				? "agent-dashboard-mineru-toggle agent-dashboard-mineru-mode-follow is-active"
+				: "agent-dashboard-mineru-toggle agent-dashboard-mineru-mode-follow",
+			attr: {
+				"aria-pressed": active ? "true" : "false",
+				title: pdfMode
+					? "仅按 Markdown 阅读位置同步原始 PDF 页码"
+					: "按 Markdown 中的图片锚点同步图片与图注",
+			},
+		});
+		button.type = "button";
+		button.createSpan({ cls: "agent-dashboard-mineru-follow-label", text: label });
+		button.createSpan({ cls: "agent-dashboard-mineru-toggle-track" });
+		this.onReferenceEvent(button, "click", () => {
+			const enabled = button.getAttribute("aria-pressed") !== "true";
+			if (pdfMode) {
+				this.readerState.followPdfReading = enabled;
+				if (enabled) this.pdfFollowInteractionSource = "markdown";
+			}
+			else this.readerState.followVisualReading = enabled;
+			button.toggleClass("is-active", enabled);
+			button.setAttribute("aria-pressed", enabled ? "true" : "false");
+			this.updatePdfFollowAffordance();
+			if (enabled) void this.syncReferenceToReadingPosition();
+			this.requestStateSave();
+		});
+		this.updatePdfFollowAffordance();
+	}
+
+	private updatePdfFollowAffordance(): void {
+		if (this.readerState.mode !== "pdf") return;
+		const button = this.referenceHost?.querySelector<HTMLButtonElement>(
+			".agent-dashboard-mineru-mode-follow",
+		);
+		if (!button) return;
+		const paused = this.readerState.followPdfReading && this.pdfFollowInteractionSource === "pdf";
+		button.toggleClass("is-paused", paused);
+		button.querySelector<HTMLElement>(".agent-dashboard-mineru-follow-label")?.setText(
+			paused ? "跟随正文页 · 已暂停" : "跟随正文页",
+		);
+		button.setAttribute(
+			"title",
+			paused
+				? "正在浏览原始 PDF；把鼠标移回或操作 Markdown 正文即可恢复自动跟随"
+				: "操作 Markdown 正文时同步原始 PDF 页；浏览 PDF 时自动暂停",
+		);
+	}
+
+	private pausePdfFollowingForReferenceInteraction(): void {
+		if (this.readerState.mode !== "pdf" || !this.readerState.followPdfReading) return;
+		if (this.pdfFollowInteractionSource === "pdf") return;
+		this.pdfFollowInteractionSource = "pdf";
+		this.updatePdfFollowAffordance();
 	}
 
 	private async renderPdfReference(parent: HTMLElement, generation: number): Promise<void> {
@@ -483,6 +664,9 @@ export class MineruReaderView extends ItemView {
 			return;
 		}
 		const toolbar = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-toolbar" });
+		this.onReferenceEvent(toolbar, "pointerenter", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(toolbar, "pointerdown", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(toolbar, "focusin", () => this.pausePdfFollowingForReferenceInteraction());
 		const previous = iconButton(toolbar, "chevron-left", "上一页");
 		previous.disabled = this.readerState.pdfPage <= 1;
 		this.onReferenceEvent(previous, "click", () => void this.changePdfPage(-1));
@@ -543,6 +727,11 @@ export class MineruReaderView extends ItemView {
 			this.requestStateSave();
 		});
 		const scroll = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-scroll" });
+		this.onReferenceEvent(scroll, "pointerenter", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(scroll, "pointerdown", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(scroll, "wheel", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(scroll, "touchstart", () => this.pausePdfFollowingForReferenceInteraction());
+		this.onReferenceEvent(scroll, "focusin", () => this.pausePdfFollowingForReferenceInteraction());
 		const availableWidth = Math.max(260, scroll.clientWidth - 34);
 		const estimatedWidth = Math.floor(availableWidth * this.readerState.pdfZoom);
 		const pageWrappers: HTMLElement[] = [];
@@ -576,15 +765,30 @@ export class MineruReaderView extends ItemView {
 				if (!canvas) return;
 				pageWrapper.dataset.renderState = "rendering";
 				try {
-					const size = await this.pdfRenderer.renderPage(
+					let size = await this.pdfRenderer.renderPage(
 						pageNumber,
 						canvas,
 						availableWidth,
 						this.readerState.pdfZoom,
 					);
+					if (this.pageHasSuspiciousBlankVisual(pageNumber, canvas)) {
+						pageWrapper.dataset.renderRetried = "true";
+						await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+						size = await this.pdfRenderer.renderPage(
+							pageNumber,
+							canvas,
+							availableWidth,
+							this.readerState.pdfZoom,
+						);
+					}
 					if (generation !== this.referenceGeneration || !pageWrapper.isConnected) return;
 					pageWrapper.style.width = `${Math.floor(size.width)}px`;
 					pageWrapper.style.height = `${Math.floor(size.height)}px`;
+					const compatibilityImageCount = await this.paintPdfImageCompatibilityLayer(canvas, pageNumber);
+					if (generation !== this.referenceGeneration || !pageWrapper.isConnected) return;
+					if (compatibilityImageCount > 0) {
+						pageWrapper.dataset.imageFallback = String(compatibilityImageCount);
+					}
 					pageWrapper.querySelector(".agent-dashboard-mineru-pdf-page-placeholder")?.remove();
 					canvas.hidden = false;
 					pageWrapper.removeClass("is-loading", "is-error");
@@ -627,16 +831,22 @@ export class MineruReaderView extends ItemView {
 			scrollFrame = 0;
 			if (generation !== this.referenceGeneration) return;
 			const probe = scroll.scrollTop + Math.min(scroll.clientHeight * 0.35, 260);
+			const scrollRect = scroll.getBoundingClientRect();
 			let currentPage = 1;
 			for (const pageWrapper of pageWrappers) {
-				if (pageWrapper.offsetTop > probe) break;
+				const pageTop = readerElementOffset(
+					scroll.scrollTop,
+					pageWrapper.getBoundingClientRect().top,
+					scrollRect.top,
+				);
+				if (pageTop > probe) break;
 				currentPage = Number(pageWrapper.dataset.pageNumber || currentPage);
 			}
-			if (currentPage === this.readerState.pdfPage) return;
-			this.readerState.pdfPage = currentPage;
 			pageInput.value = String(currentPage);
 			previous.disabled = currentPage <= 1;
 			next.disabled = currentPage >= this.pdfRenderer.numPages;
+			if (currentPage === this.readerState.pdfPage) return;
+			this.readerState.pdfPage = currentPage;
 			this.requestStateSave();
 		};
 		this.onReferenceEvent(scroll, "scroll", () => {
@@ -649,12 +859,124 @@ export class MineruReaderView extends ItemView {
 
 		const initialPage = pageWrappers[this.readerState.pdfPage - 1];
 		if (initialPage) {
-			scroll.scrollTop = Math.max(0, initialPage.offsetTop - 12);
+			const leadingInset = Number.parseFloat(window.getComputedStyle(scroll).paddingTop) || 0;
+			scroll.scrollTop = alignedReaderScrollTop(
+				scroll.scrollTop,
+				initialPage.getBoundingClientRect().top,
+				scroll.getBoundingClientRect().top,
+				leadingInset,
+			);
 			queuePageRender(initialPage);
 			if (this.readerState.pdfPage > 1) queuePageRender(pageWrappers[this.readerState.pdfPage - 2]);
 			if (this.readerState.pdfPage < pageWrappers.length) queuePageRender(pageWrappers[this.readerState.pdfPage]);
 		}
 		this.renderReferenceStatus(parent);
+	}
+
+	private pageHasSuspiciousBlankVisual(pageNumber: number, canvas: HTMLCanvasElement): boolean {
+		const page = this.readerPackage?.viewerIndex.pages.find((candidate) => candidate.page_idx === pageNumber - 1);
+		const visualBounds = page?.blocks
+			.filter((block) => block.role === "visual" && Boolean(block.bbox_norm))
+			.map((block) => block.bbox_norm)
+			.filter((bbox): bbox is NonNullable<typeof bbox> => Boolean(bbox)) || [];
+		if (!visualBounds.length || canvas.width < 1 || canvas.height < 1) return false;
+		const context = canvas.getContext("2d", { alpha: false });
+		if (!context) return false;
+		let pixels: Uint8ClampedArray;
+		try {
+			pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+		} catch {
+			return false;
+		}
+		return visualBounds.some((bbox) => {
+			const x0 = Math.max(0, Math.min(canvas.width - 1, Math.floor(canvas.width * bbox[0] / 1000)));
+			const y0 = Math.max(0, Math.min(canvas.height - 1, Math.floor(canvas.height * bbox[1] / 1000)));
+			const x1 = Math.max(x0 + 1, Math.min(canvas.width, Math.ceil(canvas.width * bbox[2] / 1000)));
+			const y1 = Math.max(y0 + 1, Math.min(canvas.height, Math.ceil(canvas.height * bbox[3] / 1000)));
+			if ((x1 - x0) * (y1 - y0) < canvas.width * canvas.height * 0.015) return false;
+			const stepX = Math.max(1, Math.floor((x1 - x0) / 48));
+			const stepY = Math.max(1, Math.floor((y1 - y0) / 48));
+			let sampled = 0;
+			let ink = 0;
+			for (let y = y0; y < y1; y += stepY) {
+				for (let x = x0; x < x1; x += stepX) {
+					const offset = (y * canvas.width + x) * 4;
+					sampled += 1;
+					if (pixels[offset] < 246 || pixels[offset + 1] < 246 || pixels[offset + 2] < 246) ink += 1;
+				}
+			}
+			return sampled >= 64 && ink / sampled < 0.0025;
+		});
+	}
+
+	private async paintPdfImageCompatibilityLayer(canvas: HTMLCanvasElement, pageNumber: number): Promise<number> {
+		const page = this.readerPackage?.viewerIndex.pages.find((candidate) => candidate.page_idx === pageNumber - 1);
+		if (!page) return 0;
+		const compatibleBlocks = page.blocks.filter((block) => {
+			if (
+				block.role !== "visual"
+				|| block.source_type !== "image"
+				|| !block.bbox_norm
+				|| !block.asset_path
+			) return false;
+			return (block.bbox_norm[2] - block.bbox_norm[0])
+				* (block.bbox_norm[3] - block.bbox_norm[1]) >= 80_000;
+		});
+		if (!compatibleBlocks.length) return 0;
+		const parent = canvas.parentElement;
+		if (!parent) return 0;
+		parent.querySelectorAll(".agent-dashboard-mineru-pdf-image-layer").forEach((element) => element.remove());
+		const imageLayer = parent.createDiv({
+			cls: "agent-dashboard-mineru-pdf-image-layer",
+			attr: { "aria-label": `PDF 第 ${pageNumber} 页图片兼容补绘` },
+		});
+		imageLayer.style.width = canvas.style.width;
+		imageLayer.style.height = canvas.style.height;
+		// Some PDF.js image operators complete after renderTask.promise and can
+		// overwrite the canvas with a blank XObject. Paint the verified MinerU
+		// source image after that late pass has settled.
+		await new Promise<void>((resolve) => window.setTimeout(resolve, 400));
+		let count = 0;
+		for (const block of compatibleBlocks) {
+			const assetPath = resolvePackageAssetPath(this.readerPackage?.packagePath || "", block.asset_path || "");
+			const file = this.app.vault.getAbstractFileByPath(assetPath);
+			if (!(file instanceof TFile)) continue;
+			let bytes: ArrayBuffer;
+			try {
+				bytes = await this.app.vault.readBinary(file);
+			} catch {
+				continue;
+			}
+			const mime = file.extension.toLowerCase() === "png" ? "image/png" : "image/jpeg";
+			let compatibilityImage: HTMLImageElement | null = null;
+			try {
+				const dataUrl = await new Promise<string>((resolve, reject) => {
+					const reader = new FileReader();
+					reader.addEventListener("load", () => resolve(String(reader.result || "")), { once: true });
+					reader.addEventListener("error", () => reject(reader.error || new Error("图片读取失败")), { once: true });
+					reader.readAsDataURL(new Blob([bytes], { type: mime }));
+				});
+				const [x1, y1, x2, y2] = block.bbox_norm as NonNullable<typeof block.bbox_norm>;
+				compatibilityImage = imageLayer.createEl("img", {
+					attr: {
+						alt: "",
+						"aria-hidden": "true",
+						src: dataUrl,
+					},
+				});
+				compatibilityImage.style.left = `${x1 / 10}%`;
+				compatibilityImage.style.top = `${y1 / 10}%`;
+				compatibilityImage.style.width = `${(x2 - x1) / 10}%`;
+				compatibilityImage.style.height = `${(y2 - y1) / 10}%`;
+				await compatibilityImage.decode();
+				count += 1;
+			} catch {
+				compatibilityImage?.remove();
+				// Keep the native PDF.js result when an extracted asset cannot decode.
+			}
+		}
+		if (!count) imageLayer.remove();
+		return count;
 	}
 
 	private renderPdfOverlays(parent: HTMLElement, pageNumber: number): void {
@@ -846,26 +1168,118 @@ export class MineruReaderView extends ItemView {
 
 	private observeReadingAnchors(article: HTMLElement, scroller: HTMLElement): void {
 		this.readingObserver?.disconnect();
-		const anchors = [...article.querySelectorAll<HTMLElement>("[data-visual-id]")];
-		if (!anchors.length || typeof IntersectionObserver !== "function") return;
-		this.readingObserver = new IntersectionObserver((entries) => {
-			const visible = entries
-				.filter((entry) => entry.isIntersecting)
-				.sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-			const visualId = (visible?.target as HTMLElement | undefined)?.dataset.visualId;
-			if (!visualId || visualId === this.readerState.markdownAnchor) return;
-			this.readerState.markdownAnchor = visualId;
-			if (this.readerState.followReading) void this.selectVisual(visualId, false);
-			this.requestStateSave();
-		}, {
-			root: scroller,
-			rootMargin: "-18% 0px -52% 0px",
-			threshold: [0, 0.1, 0.5, 1],
+		const visualAnchors = [...article.querySelectorAll<HTMLElement>("[data-visual-id]")];
+		if (visualAnchors.length && typeof IntersectionObserver === "function") {
+			this.readingObserver = new IntersectionObserver((entries) => {
+				const visible = entries
+					.filter((entry) => entry.isIntersecting)
+					.sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+				const visualId = (visible?.target as HTMLElement | undefined)?.dataset.visualId;
+				if (!visualId || visualId === this.readerState.markdownAnchor) return;
+				this.readerState.markdownAnchor = visualId;
+				if (this.readerState.followVisualReading && this.readerState.mode === "visuals") {
+					void this.selectVisual(visualId, false);
+				}
+				this.requestStateSave();
+			}, {
+				root: null,
+				rootMargin: "-18% 0px -52% 0px",
+				threshold: [0, 0.1, 0.5, 1],
+			});
+			visualAnchors.forEach((anchor) => this.readingObserver?.observe(anchor));
+		}
+
+		const pageBlocks = [...article.querySelectorAll<HTMLElement>("[data-reader-page-owner]")];
+		const totalPages = Math.max(
+			this.pdfRenderer.numPages,
+			...(this.readerPackage?.viewerIndex.pages.map((page) => page.page_idx + 1) || [1]),
+		);
+		const applyMarkdownPage = (pageNumber: number): void => {
+			const boundedPage = Math.max(1, Math.min(totalPages, pageNumber));
+			const markdownPageChanged = boundedPage !== this.readerState.markdownPage;
+			if (markdownPageChanged) {
+				this.readerState.markdownPage = boundedPage;
+				this.updateMarkdownPageStatus();
+			}
+			const shouldSyncPdf = this.readerState.followPdfReading
+				&& this.readerState.mode === "pdf"
+				&& this.pdfFollowInteractionSource === "markdown"
+				&& this.readerState.pdfPage !== boundedPage;
+			if (shouldSyncPdf) {
+				this.readerState.pdfPage = boundedPage;
+				this.scrollPdfToPage(boundedPage, "auto");
+			}
+			if (markdownPageChanged || shouldSyncPdf) this.requestStateSave();
+		};
+		let scrollFrame = 0;
+		const updatePageFromViewportTop = (): void => {
+			scrollFrame = 0;
+			const pane = article.closest<HTMLElement>(".agent-dashboard-mineru-markdown-pane");
+			const paneRect = pane?.getBoundingClientRect() || scroller.getBoundingClientRect();
+			const headingBottom = pane?.querySelector<HTMLElement>(":scope > .agent-dashboard-mineru-pane-heading")
+				?.getBoundingClientRect().bottom || paneRect.top;
+			// The pane is the stable clipping boundary. Some Obsidian themes move
+			// scrolling into an internal renderer and leave our nominal scroller
+			// with a zero-sized or stale rect.
+			const viewportTop = Math.max(paneRect.top, headingBottom) + 1;
+			const viewportBottom = Math.min(paneRect.bottom, window.innerHeight);
+			const pageNumber = readerPageAtViewportTop(
+				pageBlocks.map((block) => {
+					const rect = block.getBoundingClientRect();
+					return {
+						pageNumber: Number(block.dataset.readerPageOwner || 1),
+						top: rect.top,
+						bottom: rect.bottom,
+					};
+				}),
+				viewportTop,
+				viewportBottom,
+				this.readerState.markdownPage,
+			);
+			applyMarkdownPage(pageNumber);
+		};
+		const schedulePageUpdate = (): void => {
+			if (scrollFrame) return;
+			scrollFrame = window.requestAnimationFrame(updatePageFromViewportTop);
+		};
+		document.addEventListener("scroll", schedulePageUpdate, {
+			capture: true,
+			passive: true,
+			signal: this.workspaceAbortController?.signal,
 		});
-		anchors.forEach((anchor) => this.readingObserver?.observe(anchor));
+		window.addEventListener("resize", schedulePageUpdate, {
+			passive: true,
+			signal: this.workspaceAbortController?.signal,
+		});
+		this.onWorkspaceEvent(article, "click", (event) => {
+			if (this.readerState.mode !== "pdf" || this.readerState.followPdfReading) return;
+			const target = event.target instanceof Element ? event.target : null;
+			if (!target || target.closest("a, button, input, textarea, select, [role=button]")) return;
+			const block = target.closest<HTMLElement>("[data-reader-page-owner]");
+			const pageNumber = Number(block?.dataset.readerPageOwner || 0);
+			if (!pageNumber) return;
+			this.readerState.markdownPage = Math.max(1, Math.min(totalPages, pageNumber));
+			this.readerState.pdfPage = this.readerState.markdownPage;
+			this.updateMarkdownPageStatus();
+			this.scrollPdfToPage(this.readerState.pdfPage, "smooth");
+			this.requestStateSave();
+		});
+		this.workspaceAbortController?.signal.addEventListener("abort", () => {
+			if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+		}, { once: true });
+		schedulePageUpdate();
 	}
 
 	private restoreMarkdownPosition(article: HTMLElement): void {
+		if (this.readerState.mode === "pdf") {
+			const pageAnchor = article.querySelector<HTMLElement>(
+				`[data-reader-page="${this.readerState.markdownPage}"]`,
+			);
+			if (pageAnchor) {
+				pageAnchor.scrollIntoView({ block: "start" });
+				return;
+			}
+		}
 		const anchorId = this.readerState.markdownAnchor || this.readerState.currentVisualId;
 		if (!anchorId) return;
 		const anchor = article.querySelector<HTMLElement>(`[data-visual-id="${CSS.escape(anchorId)}"]`);
@@ -888,9 +1302,6 @@ export class MineruReaderView extends ItemView {
 		if (!visual) return;
 		this.readerState.currentVisualId = visual.id;
 		if (scrollMarkdown) this.scrollToVisualAnchor(visual.id);
-		if (this.readerState.followReading && this.readerState.mode === "pdf") {
-			this.readerState.pdfPage = visual.pageIdx + 1;
-		}
 		await this.renderReference();
 		this.requestStateSave();
 	}
@@ -909,9 +1320,24 @@ export class MineruReaderView extends ItemView {
 		this.requestStateSave();
 	}
 
-	private async syncReferenceToCurrentVisual(): Promise<void> {
-		const visual = this.currentVisual();
-		if (visual && this.readerState.mode === "pdf") this.readerState.pdfPage = visual.pageIdx + 1;
+	private syncStateForMode(): void {
+		if (this.readerState.mode === "pdf" && this.readerState.followPdfReading) {
+			this.readerState.pdfPage = this.readerState.markdownPage;
+			return;
+		}
+		if (this.readerState.mode !== "visuals" || !this.readerState.followVisualReading) return;
+		const visual = this.readerPackage?.visuals.find(
+			(candidate) => candidate.id === this.readerState.markdownAnchor,
+		);
+		if (visual) this.readerState.currentVisualId = visual.id;
+	}
+
+	private async syncReferenceToReadingPosition(): Promise<void> {
+		this.syncStateForMode();
+		if (this.readerState.mode === "pdf") {
+			this.scrollPdfToPage(this.readerState.pdfPage, "smooth");
+			return;
+		}
 		await this.renderReference();
 	}
 
@@ -928,7 +1354,20 @@ export class MineruReaderView extends ItemView {
 		const scroll = this.referenceHost?.querySelector<HTMLElement>(".agent-dashboard-mineru-pdf-scroll");
 		const page = scroll?.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`);
 		if (!scroll || !page) return;
-		scroll.scrollTo({ top: Math.max(0, page.offsetTop - 12), behavior });
+		const pageInput = this.referenceHost?.querySelector<HTMLInputElement>(
+			".agent-dashboard-mineru-page-input",
+		);
+		if (pageInput) pageInput.value = String(pageNumber);
+		const leadingInset = Number.parseFloat(window.getComputedStyle(scroll).paddingTop) || 0;
+		scroll.scrollTo({
+			top: alignedReaderScrollTop(
+				scroll.scrollTop,
+				page.getBoundingClientRect().top,
+				scroll.getBoundingClientRect().top,
+				leadingInset,
+			),
+			behavior,
+		});
 	}
 
 	private async changePdfZoom(factor: number): Promise<void> {
@@ -982,6 +1421,8 @@ export class MineruReaderView extends ItemView {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		this.markdownScroller = null;
+		this.markdownPageStatus = null;
+		this.markdownPageAnchorCount = 0;
 		this.referenceHost = null;
 		this.workspaceEl = null;
 	}

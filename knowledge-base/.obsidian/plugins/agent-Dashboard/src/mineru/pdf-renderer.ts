@@ -58,8 +58,8 @@ function isCancelledRender(error: unknown): boolean {
 export class MineruPdfRenderer {
 	private document: PdfDocumentProxy | null = null;
 	private loadingTask: PdfLoadingTask | null = null;
-	private pageTask: PdfRenderTask | null = null;
-	private cropTask: PdfRenderTask | null = null;
+	private readonly pageTasks = new Set<PdfRenderTask>();
+	private readonly cropTasks = new Set<PdfRenderTask>();
 	private generation = 0;
 	private pageGeneration = 0;
 	private cropGeneration = 0;
@@ -97,12 +97,10 @@ export class MineruPdfRenderer {
 	): Promise<PdfPageRenderResult> {
 		const document = this.document;
 		if (!document) throw new Error("PDF 尚未加载");
-		this.cancelPageRender();
-		const generation = ++this.pageGeneration;
+		const generation = this.pageGeneration;
 		const documentGeneration = this.generation;
 		const page = await document.getPage(Math.max(1, Math.min(document.numPages, pageNumber)));
 		if (generation !== this.pageGeneration || documentGeneration !== this.generation || document !== this.document) {
-			page.cleanup?.();
 			throw new DOMException("PDF page render superseded", "AbortError");
 		}
 		const baseViewport = page.getViewport({ scale: 1 });
@@ -119,15 +117,14 @@ export class MineruPdfRenderer {
 			transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0],
 			background: "#ffffff",
 		});
-		this.pageTask = task;
+		this.pageTasks.add(task);
 		try {
 			await task.promise;
 		} catch (error) {
 			if (isCancelledRender(error)) throw new DOMException("PDF page render cancelled", "AbortError");
 			throw error;
 		} finally {
-			if (this.pageTask === task) this.pageTask = null;
-			page.cleanup?.();
+			this.pageTasks.delete(task);
 		}
 		if (generation !== this.pageGeneration || documentGeneration !== this.generation) {
 			throw new DOMException("PDF page render superseded", "AbortError");
@@ -149,7 +146,6 @@ export class MineruPdfRenderer {
 		const documentGeneration = this.generation;
 		const page = await document.getPage(Math.max(1, Math.min(document.numPages, pageNumber)));
 		if (generation !== this.cropGeneration || documentGeneration !== this.generation || document !== this.document) {
-			page.cleanup?.();
 			throw new DOMException("PDF crop render superseded", "AbortError");
 		}
 		const baseViewport = page.getViewport({ scale: 1 });
@@ -172,15 +168,14 @@ export class MineruPdfRenderer {
 			transform: [ratio, 0, 0, ratio, -left * ratio, -top * ratio],
 			background: "#ffffff",
 		});
-		this.cropTask = task;
+		this.cropTasks.add(task);
 		try {
 			await task.promise;
 		} catch (error) {
 			if (isCancelledRender(error)) throw new DOMException("PDF crop render cancelled", "AbortError");
 			throw error;
 		} finally {
-			if (this.cropTask === task) this.cropTask = null;
-			page.cleanup?.();
+			this.cropTasks.delete(task);
 		}
 		if (generation !== this.cropGeneration || documentGeneration !== this.generation) {
 			throw new DOMException("PDF crop render superseded", "AbortError");
@@ -190,22 +185,26 @@ export class MineruPdfRenderer {
 
 	cancelPageRender(): void {
 		this.pageGeneration += 1;
-		try {
-			this.pageTask?.cancel();
-		} catch {
-			// PDF.js can throw when a completed task is cancelled during teardown.
+		for (const task of this.pageTasks) {
+			try {
+				task.cancel();
+			} catch {
+				// PDF.js can throw when a completed task is cancelled during teardown.
+			}
 		}
-		this.pageTask = null;
+		this.pageTasks.clear();
 	}
 
 	cancelCropRender(): void {
 		this.cropGeneration += 1;
-		try {
-			this.cropTask?.cancel();
-		} catch {
-			// See cancelPageRender.
+		for (const task of this.cropTasks) {
+			try {
+				task.cancel();
+			} catch {
+				// See cancelPageRender.
+			}
 		}
-		this.cropTask = null;
+		this.cropTasks.clear();
 	}
 
 	async destroy(): Promise<void> {

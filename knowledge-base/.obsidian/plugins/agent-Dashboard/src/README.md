@@ -50,7 +50,26 @@ left pane renders `article.md`; the right pane switches between the original
 PDF and a figure/caption rail. The PDF pane uses a continuous, lazily rendered
 page stream: scrolling updates the retained page-number control, while page
 selection, zoom, layout boxes, and figure anchors remain synchronized without
-modifying the generated article.
+modifying the generated article. Follow-reading is mode-specific: the PDF mode
+tracks page anchors derived from verified Markdown block ranges and synchronizes
+only the current page. Rendered blocks receive one monotonic runtime page chain:
+surviving inline markers from exact Markdown ranges are authoritative, with
+normalized-text matching used only as a compatibility fallback. Figure-only PDF
+pages do not claim nearby visible text after their images move to the visual rail.
+Each rendered Markdown
+block inherits the nearest preceding verified MinerU page boundary. Automatic PDF
+following has one authority: the page owned by the first visible Markdown line.
+Scroll capture only schedules that viewport-top calculation; it does not run a
+competing interpolation or timer. When PDF following is disabled, clicking a
+non-interactive Markdown text block explicitly opens that block's page on the right.
+PDF page alignment is calculated in the scroll container's coordinate
+system, keeping every selected page top below the retained toolbar. The figure/caption mode independently tracks visual
+anchors and selects the corresponding reconstructed image. Legacy reader state
+is migrated to both switches without changing the source package.
+Page changes are derived from each mapped block's viewport position, rather than
+assuming a theme-specific Obsidian scroll wrapper. A capture-phase document scroll
+listener also sees themes that hide the actual scrolling layer inside their Markdown
+renderer, while requestAnimationFrame coalesces duplicate scroll notifications.
 When `_extraction/visual-repair.json` identifies a high-confidence fragmented
 figure, the reader displays either the enclosing MinerU asset or a PDF crop;
 the original assets remain the safe fallback. A PDF.js loading failure is also
