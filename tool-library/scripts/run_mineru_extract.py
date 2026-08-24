@@ -17,6 +17,23 @@ from typing import Any
 from urllib.parse import unquote
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from mineru_viewer_contract import (  # noqa: E402
+    build_viewer_index,
+    build_visual_repair,
+    extract_markdown_image_occurrences,
+    validate_viewer_index,
+    validate_visual_repair,
+)
+from mineru_visual_adjudication import (  # noqa: E402
+    build_visual_candidates,
+    validate_visual_candidates,
+)
+
+
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HTML_IMAGE_RE = re.compile(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", re.IGNORECASE)
 CITEKEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
@@ -192,9 +209,64 @@ def find_single_output(extract_root: Path, suffix: str) -> Path:
     return matches[0]
 
 
+def find_mineru_json_output(extract_root: Path) -> Path:
+    matches = [path for path in extract_root.rglob("*.json") if path.is_file()]
+    if len(matches) == 1:
+        return matches[0]
+    for marker in ("content_list_v2", "content_list"):
+        preferred = [path for path in matches if marker in path.stem.lower()]
+        if len(preferred) == 1:
+            return preferred[0]
+    raise ValueError(
+        f"Expected one unambiguous MinerU JSON output, found {len(matches)} in {extract_root}"
+    )
+
+
+def flatten_mineru_elements(payload: Any) -> list[tuple[dict[str, Any], int]]:
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("MinerU JSON must be a non-empty element array")
+    flattened: list[tuple[dict[str, Any], int]] = []
+    nested_by_page = all(isinstance(page, list) for page in payload)
+    if nested_by_page:
+        source_index = 0
+        for page_index, page in enumerate(payload):
+            for item in page:
+                if not isinstance(item, dict):
+                    raise ValueError(f"MinerU JSON item {source_index} is not an object")
+                flattened.append((item, page_index))
+                source_index += 1
+        if not flattened:
+            raise ValueError("MinerU JSON page arrays contain no elements")
+        return flattened
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"MinerU JSON item {index} is not an object")
+        page_index = item.get("page_idx")
+        if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:
+            raise ValueError(f"MinerU JSON item {index} has an invalid page_idx")
+        flattened.append((item, page_index))
+    return flattened
+
+
+def mineru_asset_path(item: dict[str, Any]) -> str | None:
+    content = item.get("content") if isinstance(item.get("content"), dict) else {}
+    source = content.get("image_source") or content.get("table_source")
+    source = source if isinstance(source, dict) else {}
+    for value in (
+        item.get("img_path"),
+        item.get("image_path"),
+        source.get("path"),
+        source.get("src"),
+        content.get("img_path"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def copy_extraction_outputs(extract_root: Path, package_root: Path) -> tuple[Path, Path]:
     markdown_source = find_single_output(extract_root, ".md")
-    json_source = find_single_output(extract_root, ".json")
+    json_source = find_mineru_json_output(extract_root)
     package_root.mkdir(parents=True, exist_ok=False)
     markdown_target = package_root / "article.md"
     json_target = package_root / "mineru-result.json"
@@ -215,19 +287,13 @@ def validate_package(package_root: Path) -> dict[str, Any]:
     if not re.search(r"^#\s+\S", markdown, re.MULTILINE):
         raise ValueError("MinerU article.md has no document title heading")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list) or not payload:
-        raise ValueError("MinerU JSON must be a non-empty element array")
+    elements = flatten_mineru_elements(payload)
 
     page_indexes: list[int] = []
     json_assets: set[str] = set()
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise ValueError(f"MinerU JSON item {index} is not an object")
-        page_index = item.get("page_idx")
-        if not isinstance(page_index, int) or page_index < 0:
-            raise ValueError(f"MinerU JSON item {index} has an invalid page_idx")
+    for item, page_index in elements:
         page_indexes.append(page_index)
-        raw_asset = item.get("img_path")
+        raw_asset = mineru_asset_path(item)
         if raw_asset:
             asset = str(raw_asset)
             target = safe_asset_path(package_root, asset)
@@ -255,11 +321,64 @@ def validate_package(package_root: Path) -> dict[str, Any]:
             "markdown_assets_exist": True,
         },
         "page_count": max(page_indexes) + 1,
-        "json_element_count": len(payload),
+        "json_element_count": len(elements),
         "json_asset_count": len(json_assets),
         "markdown_asset_count": len(markdown_assets),
         "unreferenced_json_assets": sorted(json_assets - markdown_assets),
     }
+
+
+def build_viewer_contracts(
+    package_root: Path,
+    include_source_pdf: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build and internally validate optional, non-authoritative view contracts."""
+
+    markdown_path = package_root / "article.md"
+    json_path = package_root / "mineru-result.json"
+    markdown = markdown_path.read_text(encoding="utf-8")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    markdown_images = extract_markdown_image_occurrences(markdown)
+    viewer_index = build_viewer_index(
+        payload,
+        markdown_images,
+        {
+            "article": sha256_file(markdown_path),
+            "mineru_result": sha256_file(json_path),
+        },
+        packaged_source_pdf=include_source_pdf,
+        source_available_at_generation=True,
+    )
+    viewer_errors = validate_viewer_index(viewer_index)
+    if viewer_errors:
+        raise RuntimeError(
+            "Generated MinerU viewer index is invalid: " + "; ".join(viewer_errors)
+        )
+
+    visual_repair = build_visual_repair(viewer_index)
+    repair_errors = validate_visual_repair(visual_repair, viewer_index)
+    if repair_errors:
+        raise RuntimeError(
+            "Generated MinerU visual repair plan is invalid: "
+            + "; ".join(repair_errors)
+        )
+
+    visual_candidates = build_visual_candidates(viewer_index, visual_repair)
+    candidate_errors = validate_visual_candidates(
+        visual_candidates, viewer_index, visual_repair
+    )
+    if candidate_errors:
+        messages = [
+            str(error.get("message") or error.get("code") or error)
+            if isinstance(error, dict)
+            else str(error)
+            for error in candidate_errors
+        ]
+        raise RuntimeError(
+            "Generated MinerU visual adjudication candidates are invalid: "
+            + "; ".join(messages)
+        )
+    return viewer_index, visual_repair, visual_candidates
 
 
 def file_record(path: Path, package_root: Path) -> dict[str, Any]:
@@ -278,11 +397,37 @@ def write_contract(
     options: dict[str, Any],
     validation: dict[str, Any],
     include_source_pdf: bool,
+    viewer_index: dict[str, Any] | None = None,
+    visual_repair: dict[str, Any] | None = None,
+    visual_candidates: dict[str, Any] | None = None,
 ) -> None:
     contract_root = package_root / "_extraction"
     contract_root.mkdir()
     if include_source_pdf:
         shutil.copy2(source, contract_root / "source.pdf")
+
+    derived_contract_paths: list[Path] = []
+    if viewer_index is not None:
+        viewer_path = contract_root / "viewer-index.json"
+        viewer_path.write_text(
+            json.dumps(viewer_index, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        derived_contract_paths.append(viewer_path)
+    if visual_repair is not None:
+        repair_path = contract_root / "visual-repair.json"
+        repair_path.write_text(
+            json.dumps(visual_repair, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        derived_contract_paths.append(repair_path)
+    if visual_candidates is not None:
+        candidates_path = contract_root / "visual-candidates.json"
+        candidates_path.write_text(
+            json.dumps(visual_candidates, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        derived_contract_paths.append(candidates_path)
 
     generated_files = [
         path
@@ -309,6 +454,10 @@ def write_contract(
         "outputs": [
             file_record(path, package_root)
             for path in sorted(generated_files, key=lambda value: value.as_posix())
+        ],
+        "derived_contracts": [
+            file_record(path, package_root)
+            for path in sorted(derived_contract_paths, key=lambda value: value.as_posix())
         ],
     }
     (contract_root / "manifest.json").write_text(
@@ -384,6 +533,20 @@ def main() -> int:
     run_command(executable, arguments, project_root, args.timeout + 30)
     copy_extraction_outputs(extract_root, package_stage)
     validation = validate_package(package_stage)
+    viewer_index, visual_repair, visual_candidates = build_viewer_contracts(
+        package_stage,
+        args.include_source_pdf,
+    )
+    validation["checks"].update(
+        {
+            "viewer_index_contract_valid": True,
+            "visual_repair_contract_valid": True,
+            "visual_candidates_contract_valid": True,
+        }
+    )
+    validation["viewer_index_status"] = viewer_index["status"]
+    validation["visual_repair_status"] = visual_repair["status"]
+    validation["visual_candidates_status"] = visual_candidates["status"]
     version = detect_version(executable, project_root)
     options = {
         "mode": "precision-extract",
@@ -406,6 +569,9 @@ def main() -> int:
         options,
         validation,
         args.include_source_pdf,
+        viewer_index,
+        visual_repair,
+        visual_candidates,
     )
     package_stage.replace(final_package)
     print(

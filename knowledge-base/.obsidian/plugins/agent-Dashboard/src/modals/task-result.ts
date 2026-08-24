@@ -8,6 +8,8 @@ interface TaskResultHost {
 	getTaskRunOutput(run: TaskRun): string;
 	isActionRunning(actionId: string): boolean;
 	getLintStatus(): LintStatus;
+	getMineruArticlePath?(run: TaskRun): string;
+	activateMineruReaderView?(articlePath?: string): Promise<void>;
 }
 
 export class TaskResultModal extends Modal {
@@ -83,6 +85,15 @@ export class TaskResultModal extends Modal {
 			repair.addEventListener("click", () => {
 				this.close();
 				this.onRepair?.();
+			});
+		}
+		const mineruArticlePath = this.plugin.getMineruArticlePath?.(this.run) || "";
+		if (mineruArticlePath) {
+			const openReader = footer.createEl("button", { text: "打开 MinerU 阅读器" });
+			openReader.type = "button";
+			openReader.addEventListener("click", () => {
+				this.close();
+				void this.plugin.activateMineruReaderView?.(mineruArticlePath);
 			});
 		}
 		const close = footer.createEl("button", { cls: "mod-cta", text: "关闭" });

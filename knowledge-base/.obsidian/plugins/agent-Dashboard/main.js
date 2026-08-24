@@ -479,6 +479,7 @@ var DashboardLifecycleState = class {
 var VIEW_TYPE = "agent-dashboard-research-vault";
 var CODE_PRACTICE_VIEW_TYPE = "agent-dashboard-code-practice";
 var QUERY_WIKI_VIEW_TYPE = "agent-dashboard-query-wiki";
+var MINERU_READER_VIEW_TYPE = "agent-dashboard-mineru-reader";
 function isCliBackendId(value) {
   return value === "codex-cli" || value === "claude-code" || value === "opencode";
 }
@@ -1090,7 +1091,7 @@ var ProcessExecutionService = class {
           clientInfo: {
             name: "agent-dashboard",
             title: "Agent Dashboard",
-            version: "0.24.0"
+            version: "0.25.8"
           },
           capabilities: {
             experimentalApi: false,
@@ -3776,8 +3777,8 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       const includeSourcePdf = this.createCheckboxOption(
         mineruPanel,
         "在原文包中附带 PDF",
-        "将原 PDF 复制到 _extraction/source.pdf；默认只记录来源路径和 SHA-256。",
-        false
+        "将原 PDF 复制到 _extraction/source.pdf，用于双栏阅读、版面框定位和完整图重建。",
+        true
       );
       const ocr = this.createCheckboxOption(
         mineruPanel,
@@ -4232,6 +4233,15 @@ var TaskResultModal = class extends import_obsidian5.Modal {
       repair.addEventListener("click", () => {
         this.close();
         this.onRepair?.();
+      });
+    }
+    const mineruArticlePath = this.plugin.getMineruArticlePath?.(this.run) || "";
+    if (mineruArticlePath) {
+      const openReader = footer.createEl("button", { text: "打开 MinerU 阅读器" });
+      openReader.type = "button";
+      openReader.addEventListener("click", () => {
+        this.close();
+        void this.plugin.activateMineruReaderView?.(mineruArticlePath);
       });
     }
     const close = footer.createEl("button", { cls: "mod-cta", text: "关闭" });
@@ -5521,13 +5531,3132 @@ ${result.stderr.trim()}`);
   }
 };
 
+// src/mineru/normalization.ts
+var MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)/g;
+var HTML_IMAGE_RE = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+var FIGURE_LABEL_RE = /^\s*(?:(Extended\s+Data)\s+Fig(?:ure)?\.?|(Supplementary)\s+Fig(?:ure)?\.?|(Supporting(?:\s+Information)?)\s+Fig(?:ure)?\.?|Fig(?:ure)?\.?|(图))\s*([A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)/i;
+var FIGURE_LABEL_ANYWHERE_SOURCE = String.raw`(?:Extended\s+Data\s+Fig(?:ure)?\.?|Supplementary\s+Fig(?:ure)?\.?|Supporting(?:\s+Information)?\s+Fig(?:ure)?\.?|Fig(?:ure)?\.?|图)\s*[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*`;
+var FIGURE_REFERENCE_VERB_RE = /^(?:shows?|illustrates?|depicts?|demonstrates?|presents?|reports?|displays?|compares?|lists?|summari[sz]es?|gives?|provides?|plots?|is|are|was|were)\b/i;
+var NEXT_PAGE_CAPTION_SOURCE = String.raw`(?:see\s+(?:the\s+)?next\s+page\s+for\s+(?:the\s+)?caption|caption\s+(?:is\s+)?continued\s+on\s+(?:the\s+)?next\s+page|continued\s+on\s+(?:the\s+)?next\s+page|caption\s+(?:is\s+)?(?:on|over)\s+(?:the\s+)?next\s+page|continued\s+overleaf|图注(?:见|续见|续|在)?(?:下一|下)页|(?:下一|下)页(?:续见|续|见)图注)`;
+var NEXT_PAGE_PLACEHOLDER_RE = new RegExp(
+  `${FIGURE_LABEL_ANYWHERE_SOURCE}\\s*[|｜:：.]\\s*${NEXT_PAGE_CAPTION_SOURCE}[.!?。！？]?`,
+  "i"
+);
+var NEXT_PAGE_PLACEHOLDER_CANDIDATE_RE = new RegExp(
+  `${FIGURE_LABEL_ANYWHERE_SOURCE}\\s*[|｜:：.]\\s*${NEXT_PAGE_CAPTION_SOURCE}`,
+  "i"
+);
+var PANEL_LABEL_RE = /^\s*[\[(]?[A-Za-z][\])\].:]?\s*$/;
+var PANEL_LABEL_NOISE_RE = /^[\[(]?[A-Za-z][\])\].:]?(?:\s+[\[(]?[A-Za-z][\])\].:]?)*$/;
+var PANEL_DESCRIPTION_RE = /^\s*[a-z](?:\s*[-\u2013\u2014]\s*[a-z])?[\s,.;:)]/i;
+function asRecord5(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function asText(value) {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value.map((item) => asText(item)).filter(Boolean).join(" ").trim();
+  }
+  if (value === null || typeof value !== "object") return "";
+  const record = asRecord5(value);
+  const nested = record.content ?? record.text ?? record.value;
+  return nested === void 0 || nested === value ? "" : asText(nested);
+}
+function asTextParts(value) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text ? [text] : [];
+  }
+  if (Array.isArray(value)) return value.flatMap((item) => asTextParts(item));
+  if (value === null || typeof value !== "object") return [];
+  const record = asRecord5(value);
+  const nested = record.content ?? record.text ?? record.value;
+  return nested === void 0 || nested === value ? [] : asTextParts(nested);
+}
+function firstTextParts(...values) {
+  for (const value of values) {
+    const parts = asTextParts(value);
+    if (parts.length) return parts;
+  }
+  return [];
+}
+function firstString(...values) {
+  for (const value of values) {
+    const text = asText(value);
+    if (text) return text;
+  }
+  return "";
+}
+function figureKeyFromText(value) {
+  const match = FIGURE_LABEL_RE.exec(value);
+  if (!match) return "";
+  const prefix = match[1] ? "extended-data-figure" : match[2] ? "supplementary-figure" : match[3] ? "supporting-figure" : match[4] ? "图" : "figure";
+  const identifier = match[5].replace(/\./g, "_").replace(/\s+/g, "").toLowerCase();
+  return identifier ? `${prefix}:${identifier}` : "";
+}
+function formalFigureCaptionKeyFromText(value) {
+  const match = FIGURE_LABEL_RE.exec(value);
+  if (!match) return "";
+  const suffix = value.slice(match[0].length);
+  const delimited = /^\s*[|｜:：.]\s*([^|｜:：.\s][\s\S]*)$/.exec(suffix);
+  const undelimited = /^\s+([^|｜:：.\s][\s\S]*)$/.exec(suffix);
+  const title = String(delimited?.[1] || undelimited?.[1] || "").trim();
+  if (title.length < 5 || FIGURE_REFERENCE_VERB_RE.test(title)) return "";
+  return figureKeyFromText(value);
+}
+function isPanelLabelText(value) {
+  return PANEL_LABEL_RE.test(value);
+}
+function containsNextPageCaptionCandidate(value) {
+  return NEXT_PAGE_PLACEHOLDER_CANDIDATE_RE.test(value);
+}
+function firstAlphaIsLowercase(value) {
+  for (const character of value) {
+    if (character.toLocaleLowerCase() !== character.toLocaleUpperCase()) {
+      return character === character.toLocaleLowerCase();
+    }
+  }
+  return false;
+}
+function endsWithTerminalPunctuation(value) {
+  let normalized = value.trim();
+  while (/<\/[^>]+>\s*$/.test(normalized)) {
+    normalized = normalized.replace(/<\/[^>]+>\s*$/, "").trimEnd();
+  }
+  return /[.!?。！？]["'”’\)\]}]*$/.test(normalized);
+}
+function classifyCaptionPart(value) {
+  const text = value.trim();
+  if (!text) return "other";
+  const nextPagePlaceholder = nextPageCaptionPlaceholderFromText(text);
+  if (nextPagePlaceholder) {
+    return nextPagePlaceholder === text ? "next-page-placeholder" : "other";
+  }
+  if (containsNextPageCaptionCandidate(text)) return "other";
+  if (formalFigureCaptionKeyFromText(text)) return "formal-caption";
+  if (isPanelLabelText(text)) return "panel-label";
+  if (text.length >= 24 && !figureKeyFromText(text) && (firstAlphaIsLowercase(text) || PANEL_DESCRIPTION_RE.test(text)) && endsWithTerminalPunctuation(text)) return "caption-continuation";
+  return "other";
+}
+function nextPageCaptionPlaceholderFromText(value, expectedFigureKey = "") {
+  const match = NEXT_PAGE_PLACEHOLDER_RE.exec(value);
+  if (!match) return "";
+  const placeholder = match[0].trim();
+  const suffix = value.slice(match.index + match[0].length).trim();
+  if (suffix && !PANEL_LABEL_NOISE_RE.test(suffix)) return "";
+  const figureKey = formalFigureCaptionKeyFromText(placeholder);
+  if (!figureKey || expectedFigureKey && figureKey !== expectedFigureKey) return "";
+  return placeholder;
+}
+function normalizeAssetPath(value) {
+  let path8 = String(value || "").trim().replace(/^<|>$/g, "");
+  try {
+    path8 = decodeURIComponent(path8);
+  } catch {
+  }
+  path8 = path8.replace(/\\/g, "/").replace(/^\.\//, "");
+  const segments = path8.split("/");
+  if (!path8 || /^[a-z][a-z0-9+.-]*:/i.test(path8) || path8.startsWith("/") || segments.some((segment) => segment === "..")) {
+    return "";
+  }
+  return path8;
+}
+function normalizeBbox(value, scaleUnitInterval = true) {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  if (value.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
+  const numbers = value;
+  let [x1, y1, x2, y2] = numbers;
+  if (scaleUnitInterval && Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2)) <= 1.5) {
+    x1 *= 1e3;
+    y1 *= 1e3;
+    x2 *= 1e3;
+    y2 *= 1e3;
+  }
+  if (x2 <= x1 || y2 <= y1) return null;
+  if (x1 < -5 || y1 < -5 || x2 > 1005 || y2 > 1005) return null;
+  return [
+    Math.max(0, Math.min(1e3, x1)),
+    Math.max(0, Math.min(1e3, y1)),
+    Math.max(0, Math.min(1e3, x2)),
+    Math.max(0, Math.min(1e3, y2))
+  ];
+}
+function classifyRole(sourceType, record = {}) {
+  const type = sourceType.toLowerCase();
+  if (["image", "chart"].includes(type)) return "visual";
+  if (["table", "table_body"].includes(type)) return "table";
+  if (["equation", "interline_equation", "formula"].includes(type)) return "equation";
+  if (["title", "heading", "paragraph_title"].includes(type) || record.text_level !== void 0) return "title";
+  if (["text", "paragraph", "list"].includes(type)) return "text";
+  if (["aside_text", "header", "footer", "page_header", "page_footer", "page_footnote", "page_number", "discarded"].includes(type)) {
+    return "discarded";
+  }
+  return "other";
+}
+function extractAssetPath(record) {
+  const content = asRecord5(record.content);
+  const source = asRecord5(content.image_source ?? content.table_source);
+  return normalizeAssetPath(
+    record.img_path ?? record.image_path ?? source.path ?? source.src ?? content.img_path
+  );
+}
+function independentHtmlTableBody(record, sourceType) {
+  if (sourceType.toLowerCase() !== "table") return "";
+  const content = asRecord5(record.content);
+  const value = record.table_body ?? content.table_body;
+  if (typeof value !== "string") return "";
+  const table = value.trim();
+  const openingTags = table.match(/<table\b/gi) || [];
+  const closingTags = table.match(/<\/table\s*>/gi) || [];
+  return openingTags.length === 1 && closingTags.length === 1 && /^<table\b[^>]*>[\s\S]*<\/table>$/i.test(table) ? table : "";
+}
+function uniqueExactMarkdownRange(markdown, value) {
+  if (!value) return void 0;
+  const start = markdown.indexOf(value);
+  if (start < 0 || markdown.indexOf(value, start + value.length) >= 0) return void 0;
+  const end = start + value.length;
+  const lineStart = markdown.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const nextNewline = markdown.indexOf("\n", end);
+  const lineEnd = nextNewline < 0 ? markdown.length : nextNewline;
+  if (markdown.slice(lineStart, start).trim() || markdown.slice(end, lineEnd).trim()) return void 0;
+  return { offset_unit: "utf16-code-unit", start, end };
+}
+function extractCaption(record, sourceType) {
+  const content = asRecord5(record.content);
+  const type = sourceType.toLowerCase();
+  const values = type === "table" ? [record.table_caption, content.table_caption] : type === "chart" ? [record.chart_caption, content.chart_caption] : [record.image_caption, content.image_caption];
+  const parts = firstTextParts(...values).map((text2) => ({
+    text: text2,
+    kind: classifyCaptionPart(text2)
+  }));
+  const text = parts.map((part) => part.text).join(" ").trim();
+  if (!text) return void 0;
+  const itemCount = parts.length;
+  const nextPagePlaceholders = parts.flatMap((part, index) => {
+    const placeholder2 = nextPageCaptionPlaceholderFromText(part.text);
+    const figureKey2 = placeholder2 ? formalFigureCaptionKeyFromText(placeholder2) : "";
+    return placeholder2 && figureKey2 ? [{ index, text: placeholder2, figure_key: figureKey2 }] : [];
+  });
+  const hasNextPageMarker = nextPagePlaceholders.length > 0;
+  const placeholder = nextPagePlaceholders[0]?.text || "";
+  const figureKey = figureKeyFromText(text) || (placeholder ? formalFigureCaptionKeyFromText(placeholder) : "");
+  return {
+    text,
+    parts,
+    char_count: text.length,
+    item_count: Math.max(1, itemCount),
+    figure_keys: figureKey ? [figureKey] : [],
+    leading_figure_key: figureKey || void 0,
+    next_page_marker: hasNextPageMarker,
+    next_page_figure_keys: hasNextPageMarker && figureKey ? [figureKey] : [],
+    next_page_placeholders: nextPagePlaceholders,
+    next_page_reference_count: hasNextPageMarker ? 1 : 0,
+    ends_with_terminal_punctuation: endsWithTerminalPunctuation(text)
+  };
+}
+function extractTextSummary(record) {
+  const content = asRecord5(record.content);
+  const text = firstString(record.text, content.paragraph_content, record.content, record.list_items);
+  if (!text) return void 0;
+  const figureKey = figureKeyFromText(text);
+  return {
+    text,
+    char_count: text.length,
+    item_count: 1,
+    figure_keys: figureKey ? [figureKey] : [],
+    leading_figure_key: figureKey || void 0,
+    next_page_marker: false,
+    next_page_figure_keys: [],
+    ends_with_terminal_punctuation: /[.!?。！？]\s*$/.test(text)
+  };
+}
+function flattenMineruPayload(payload) {
+  if (!Array.isArray(payload)) return [];
+  const flattened = [];
+  let sourceIndex = 0;
+  if (payload.every(Array.isArray)) {
+    payload.forEach((page, pageIdx) => {
+      page.forEach((item, pageOrder) => {
+        flattened.push({ record: asRecord5(item), pageIdx, sourceIndex, pageOrder });
+        sourceIndex += 1;
+      });
+    });
+    return flattened;
+  }
+  const pageOrders = /* @__PURE__ */ new Map();
+  payload.forEach((item, index) => {
+    const record = asRecord5(item);
+    const rawPage = Number(record.page_idx ?? record.pageIndex ?? 0);
+    const pageIdx = Number.isInteger(rawPage) && rawPage >= 0 ? rawPage : 0;
+    const pageOrder = pageOrders.get(pageIdx) || 0;
+    pageOrders.set(pageIdx, pageOrder + 1);
+    flattened.push({ record, pageIdx, sourceIndex: index, pageOrder });
+  });
+  return flattened;
+}
+function extractMarkdownImages(markdown) {
+  const images = [];
+  const occurrences = /* @__PURE__ */ new Map();
+  const matches = [];
+  MARKDOWN_IMAGE_RE.lastIndex = 0;
+  HTML_IMAGE_RE.lastIndex = 0;
+  let match;
+  while ((match = MARKDOWN_IMAGE_RE.exec(markdown)) !== null) {
+    const assetPath = normalizeAssetPath(match[1] || match[2]);
+    if (assetPath) matches.push({ start: match.index, assetPath });
+  }
+  while ((match = HTML_IMAGE_RE.exec(markdown)) !== null) {
+    const assetPath = normalizeAssetPath(match[1]);
+    if (assetPath) matches.push({ start: match.index, assetPath });
+  }
+  matches.sort((left, right) => left.start - right.start);
+  for (const matchRecord of matches) {
+    const assetPath = matchRecord.assetPath;
+    if (!assetPath) continue;
+    const occurrence = occurrences.get(assetPath) || 0;
+    occurrences.set(assetPath, occurrence + 1);
+    images.push({
+      id: `md-img-${String(images.length).padStart(4, "0")}`,
+      order: images.length,
+      asset_path: assetPath,
+      occurrence
+    });
+  }
+  return images;
+}
+function uniqueStandaloneMarkdownTextRangeCandidates(markdown) {
+  const ranges = /* @__PURE__ */ new Map();
+  let start = 0;
+  while (start < markdown.length) {
+    const newline = markdown.indexOf("\n", start);
+    const contentEnd = newline < 0 ? markdown.length : newline;
+    const end = newline < 0 ? markdown.length : newline + 1;
+    const text = markdown.slice(start, contentEnd).trim();
+    if (text) {
+      if (ranges.has(text)) ranges.set(text, null);
+      else ranges.set(text, { offset_unit: "utf16-code-unit", start, end });
+    }
+    start = end;
+  }
+  return ranges;
+}
+function buildRuntimeViewerIndex(payload, markdown) {
+  const issues = [];
+  const elements = flattenMineruPayload(payload);
+  const nestedByPage = Array.isArray(payload) && payload.length > 0 && payload.every(Array.isArray);
+  if (!elements.length) issues.push("MinerU JSON 没有可识别的元素数组");
+  const markdownImages = extractMarkdownImages(markdown);
+  const imageIds = /* @__PURE__ */ new Map();
+  const imageCursors = /* @__PURE__ */ new Map();
+  markdownImages.forEach((image) => {
+    const ids = imageIds.get(image.asset_path) || [];
+    ids.push(image.id);
+    imageIds.set(image.asset_path, ids);
+  });
+  const pages = /* @__PURE__ */ new Map();
+  let locatedBlockCount = 0;
+  elements.forEach(({ record, pageIdx, sourceIndex, pageOrder }) => {
+    const sourceType = String(record.type || "unknown");
+    const assetPath = extractAssetPath(record);
+    const bbox = normalizeBbox(record.bbox, nestedByPage);
+    if (bbox) locatedBlockCount += 1;
+    else issues.push(`元素 ${sourceIndex} 缺少有效 bbox，已关闭该元素的版面定位`);
+    const role = classifyRole(sourceType, record);
+    const block = {
+      id: `p${String(pageIdx).padStart(4, "0")}-s${String(sourceIndex).padStart(6, "0")}`,
+      source_index: sourceIndex,
+      page_order: pageOrder,
+      source_type: sourceType,
+      role,
+      bbox_norm: bbox
+    };
+    if (assetPath) {
+      block.asset_path = assetPath;
+      const candidates = imageIds.get(assetPath) || [];
+      const cursor = imageCursors.get(assetPath) || 0;
+      block.markdown_image_ids = candidates[cursor] ? [candidates[cursor]] : [];
+      if (candidates[cursor]) imageCursors.set(assetPath, cursor + 1);
+    }
+    const tableBody = assetPath ? independentHtmlTableBody(record, sourceType) : "";
+    const markdownTableRange = uniqueExactMarkdownRange(markdown, tableBody);
+    if (markdownTableRange) block.markdown_table_range = markdownTableRange;
+    const caption = extractCaption(record, sourceType);
+    if (caption) block.caption = caption;
+    if (["text", "title", "discarded"].includes(role)) {
+      const text = extractTextSummary(record);
+      if (text) block.text = text;
+    }
+    const page = pages.get(pageIdx) || { page_idx: pageIdx, blocks: [] };
+    page.blocks.push(block);
+    pages.set(pageIdx, page);
+  });
+  const markdownTextRanges = uniqueStandaloneMarkdownTextRangeCandidates(markdown);
+  const normalizedPages = [...pages.values()].sort((a, b) => a.page_idx - b.page_idx);
+  for (const page of normalizedPages) {
+    for (const block of page.blocks) {
+      const text = String(block.text?.text || "").trim();
+      const range = text ? markdownTextRanges.get(text) : null;
+      if (range) block.markdown_text_range = range;
+    }
+  }
+  return reclassifyRuntimeRunningHeaders({
+    schema_version: 1,
+    status: !elements.length || locatedBlockCount === 0 ? "unavailable" : issues.length ? "partial" : "complete",
+    coordinate_system: { kind: "normalized-page", extent: 1e3, page_index_base: 0 },
+    markdown_images: markdownImages,
+    pages: normalizedPages,
+    issues
+  });
+}
+function nearSameHeaderBbox(left, right) {
+  if (!left || !right || left[1] > 80 || right[1] > 80 || left[3] > 120 || right[3] > 120 || left[3] - left[1] > 60 || right[3] - right[1] > 60) return false;
+  return left.every((coordinate, index) => Math.abs(coordinate - right[index]) <= 10);
+}
+function reclassifyRuntimeRunningHeaders(index) {
+  const knownHeaders = index.pages.flatMap((page) => page.blocks.filter((block) => block.role === "discarded" && ["header", "page_header"].includes(block.source_type.toLowerCase()) && Boolean(block.bbox_norm) && Boolean(String(block.text?.text || "").trim())).map((block) => ({ pageIdx: page.page_idx, block })));
+  if (!knownHeaders.length) return index;
+  let changed = false;
+  const pages = index.pages.map((page) => ({
+    ...page,
+    blocks: page.blocks.map((block) => {
+      if (!["text", "title"].includes(block.role) || !block.bbox_norm) return block;
+      const blockPosition = page.blocks.findIndex((candidate) => candidate.id === block.id);
+      const hasEarlierPageContent = page.blocks.slice(0, blockPosition).some((candidate) => candidate.role !== "discarded" && (["visual", "table", "equation", "other"].includes(candidate.role) || Boolean(String(candidate.text?.text || "").trim())));
+      if (hasEarlierPageContent) return block;
+      const text = String(block.text?.text || "").trim();
+      if (!text || text.length > 80 || /[\r\n]/.test(text)) return block;
+      const matchesKnownHeader = knownHeaders.some((header) => header.pageIdx !== page.page_idx && String(header.block.text?.text || "").trim() === text && nearSameHeaderBbox(block.bbox_norm, header.block.bbox_norm));
+      if (!matchesKnownHeader) return block;
+      changed = true;
+      return { ...block, role: "discarded" };
+    })
+  }));
+  return changed ? { ...index, pages } : index;
+}
+function bboxToPercent(bbox) {
+  return {
+    left: bbox[0] / 10,
+    top: bbox[1] / 10,
+    width: (bbox[2] - bbox[0]) / 10,
+    height: (bbox[3] - bbox[1]) / 10
+  };
+}
+function paddedBbox(bbox, padding) {
+  return [
+    Math.max(0, bbox[0] - padding),
+    Math.max(0, bbox[1] - padding),
+    Math.min(1e3, bbox[2] + padding),
+    Math.min(1e3, bbox[3] + padding)
+  ];
+}
+function extractCaptionText(value) {
+  return asText(value);
+}
+
+// src/mineru/reader-markdown.ts
+var IMAGE_TOKEN_RE = /!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)|<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+function escapeHtmlAttribute(value) {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function blockText(block) {
+  return String(block?.text?.text || "").trim();
+}
+function axisOverlap(startA, endA, startB, endB) {
+  return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
+}
+function sameTopCaptionBand(left, right) {
+  const a = left.bbox_norm;
+  const b = right.bbox_norm;
+  if (!a || !b || Math.abs(a[1] - b[1]) > 45) return false;
+  if (axisOverlap(a[0], a[2], b[0], b[2]) > 0) return false;
+  const xGap = Math.max(0, Math.max(a[0], b[0]) - Math.min(a[2], b[2]));
+  if (xGap > 80) return false;
+  const aHeight = a[3] - a[1];
+  const bHeight = b[3] - b[1];
+  if (axisOverlap(a[1], a[3], b[1], b[3]) < 0.55 * Math.min(aHeight, bHeight)) return false;
+  const heightRatio = bHeight / aHeight;
+  return heightRatio >= 0.45 && heightRatio <= 2.2;
+}
+function isTopTextBlock(block) {
+  return ["text", "title"].includes(block.role) && Boolean(block.bbox_norm) && block.bbox_norm[1] <= 320;
+}
+function firstAlphaIsLowercase2(value) {
+  for (const character of value) {
+    if (character.toLocaleLowerCase() !== character.toLocaleUpperCase()) {
+      return character === character.toLocaleLowerCase();
+    }
+  }
+  return false;
+}
+function startsWithPanelLabel(value) {
+  return /^\s*[a-z](?:\s*[-–—]\s*[a-z])?[\s,.;:)]/i.test(value);
+}
+function endsWithTerminalPunctuation2(value) {
+  let normalized = value.trim();
+  while (/<\/[^>]+>\s*$/.test(normalized)) {
+    normalized = normalized.replace(/<\/[^>]+>\s*$/, "").trimEnd();
+  }
+  return /[.!?。！？]["'”’\)\]}]*$/.test(normalized);
+}
+function captionPartEntries(blocks) {
+  let order = 0;
+  return [...blocks].sort((left, right) => left.page_order - right.page_order || left.source_index - right.source_index).flatMap((block) => {
+    const storedParts = block.caption?.parts || [];
+    const parts = storedParts.length ? storedParts.map((part) => ({ text: String(part.text || "").trim(), kind: part.kind })).filter((part) => Boolean(part.text)) : [String(block.caption?.text || "").trim()].filter(Boolean).map((text) => ({ text, kind: classifyCaptionPart(text) }));
+    return parts.map((part) => ({
+      block,
+      ...part,
+      order: order++
+    }));
+  });
+}
+function bboxContainmentRatio(container, child) {
+  const intersection = axisOverlap(container[0], container[2], child[0], child[2]) * axisOverlap(container[1], container[3], child[1], child[3]);
+  const childArea = Math.max(0, child[2] - child[0]) * Math.max(0, child[3] - child[1]);
+  return childArea > 0 ? intersection / childArea : 0;
+}
+function blockPageIdx(block) {
+  const match = /^p(\d{4,})-/.exec(block.id);
+  return match ? Number(match[1]) : null;
+}
+function captionAdjacencyScore(captionBbox, visualBbox) {
+  const captionWidth = captionBbox[2] - captionBbox[0];
+  const visualWidth = visualBbox[2] - visualBbox[0];
+  const sharedWidth = axisOverlap(captionBbox[0], captionBbox[2], visualBbox[0], visualBbox[2]);
+  const overlapRatio = sharedWidth / Math.max(1, Math.min(captionWidth, visualWidth));
+  if (overlapRatio < 0.55) return null;
+  let gap;
+  if (captionBbox[1] >= visualBbox[3] - 20) {
+    gap = Math.max(0, captionBbox[1] - visualBbox[3]);
+    if (gap > 100) return null;
+  } else if (visualBbox[1] >= captionBbox[3] - 20) {
+    gap = Math.max(0, visualBbox[1] - captionBbox[3]);
+    if (gap > 80) return null;
+  } else {
+    return null;
+  }
+  return gap + (1 - overlapRatio) * 40;
+}
+function nearestFollowingFormalCaptionId(block, orderedPageBlocks) {
+  const position = orderedPageBlocks.findIndex((candidate) => candidate.id === block.id);
+  if (position < 0) return "";
+  const caption = orderedPageBlocks.slice(position + 1).find((candidate) => ["text", "title"].includes(candidate.role) && Boolean(formalFigureCaptionKeyFromText(blockText(candidate))));
+  return caption?.id || "";
+}
+function standaloneSamePageCaption(blocks, allBlocks, pageIdx) {
+  if (blocks.some((block) => block.caption?.next_page_marker === true)) return null;
+  const memberIds = new Set(blocks.map((block) => block.id));
+  const pageVisuals = allBlocks.filter((block) => blockPageIdx(block) === pageIdx && ["visual", "table"].includes(block.role) && Boolean(block.bbox_norm) && (block.markdown_image_ids?.length === 1 || block.role === "table" && !block.markdown_image_ids?.length && Boolean(block.markdown_table_range)));
+  if (!pageVisuals.some((block) => memberIds.has(block.id))) return null;
+  const orderedPageBlocks = allBlocks.filter((block) => blockPageIdx(block) === pageIdx).sort((left, right) => left.page_order - right.page_order || left.source_index - right.source_index);
+  const completeCaptionParts = (anchor) => {
+    const anchorText = blockText(anchor);
+    const anchorPosition = orderedPageBlocks.findIndex((block) => block.id === anchor.id);
+    if (anchorPosition < 0) return null;
+    const laterSemantic = orderedPageBlocks.slice(anchorPosition + 1).filter((next) => next.role !== "discarded" && (["visual", "table", "equation", "other"].includes(next.role) || Boolean(blockText(next))));
+    const anchorIsTerminal = endsWithTerminalPunctuation2(anchorText);
+    const continuationCandidates = laterSemantic.filter((next) => {
+      const nextText = blockText(next);
+      return next.role === "text" && nextText.length >= 24 && !figureKeyFromText(nextText) && sameTopCaptionBand(anchor, next) && (anchorIsTerminal ? startsWithPanelLabel(nextText) : firstAlphaIsLowercase2(nextText) || startsWithPanelLabel(nextText));
+    });
+    if (!continuationCandidates.length) return anchorIsTerminal ? [anchorText] : null;
+    if (continuationCandidates.length !== 1 || laterSemantic[0]?.id !== continuationCandidates[0].id || !endsWithTerminalPunctuation2(blockText(continuationCandidates[0]))) return null;
+    return [anchorText, blockText(continuationCandidates[0])];
+  };
+  const matches = [];
+  for (const candidate of allBlocks) {
+    const text = blockText(candidate);
+    if (memberIds.has(candidate.id) || blockPageIdx(candidate) !== pageIdx || !["text", "title"].includes(candidate.role) || !candidate.bbox_norm || !formalFigureCaptionKeyFromText(text)) continue;
+    const parts = completeCaptionParts(candidate);
+    if (!parts) continue;
+    const captionPosition = orderedPageBlocks.findIndex((block) => block.id === candidate.id);
+    const ranked = pageVisuals.map((visual) => {
+      const visualPosition = orderedPageBlocks.findIndex((block) => block.id === visual.id);
+      const spatialScore = captionAdjacencyScore(candidate.bbox_norm, visual.bbox_norm);
+      if (visualPosition < 0 || captionPosition <= visualPosition || nearestFollowingFormalCaptionId(visual, orderedPageBlocks) !== candidate.id || spatialScore === null) return { visual, score: null };
+      return {
+        visual,
+        score: spatialScore + Math.min(60, Math.max(0, captionPosition - visualPosition - 1) * 3)
+      };
+    }).filter((entry) => entry.score !== null).sort((left, right) => left.score - right.score || right.visual.source_index - left.visual.source_index);
+    if (!ranked.length) continue;
+    const bestScore = ranked[0].score;
+    const equallyPlausible = ranked.filter((entry) => entry.score <= bestScore + 5);
+    if (!equallyPlausible.length || equallyPlausible.some((entry) => !memberIds.has(entry.visual.id))) continue;
+    const anchor = equallyPlausible[0].visual;
+    const common = {
+      text: parts.length === 1 ? parts[0] : parts.join(" ").replace(/\s+/g, " ").trim(),
+      parts,
+      score: bestScore
+    };
+    if (anchor.markdown_image_ids?.length === 1) {
+      matches.push({ ...common, markdownImageId: anchor.markdown_image_ids[0] });
+      continue;
+    }
+    const tableRange = anchor.markdown_table_range;
+    const captionRange = candidate.markdown_text_range;
+    const tableCaptionPosition = orderedPageBlocks.findIndex((block) => block.id === candidate.id);
+    const previousSemantic = [...orderedPageBlocks.slice(0, tableCaptionPosition)].reverse().find((block) => block.role !== "discarded" && (["visual", "table", "equation", "other"].includes(block.role) || Boolean(blockText(block))));
+    if (blocks.length !== 1 || anchor.role !== "table" || parts.length !== 1 || !tableRange || !captionRange || previousSemantic?.id !== anchor.id || tableRange.end > captionRange.start) continue;
+    matches.push({
+      ...common,
+      atomicBlockProjection: {
+        tableBlockId: anchor.id,
+        tableRange: { ...tableRange },
+        captionRange: { ...captionRange },
+        captionText: parts[0]
+      }
+    });
+  }
+  if (!matches.length) return null;
+  matches.sort((left, right) => left.score - right.score);
+  if (matches.length > 1 && matches[1].score <= matches[0].score + 5) return null;
+  return matches[0];
+}
+function unionBboxes(values) {
+  if (!values.length) return null;
+  return [
+    Math.min(...values.map((bbox) => bbox[0])),
+    Math.min(...values.map((bbox) => bbox[1])),
+    Math.max(...values.map((bbox) => bbox[2])),
+    Math.max(...values.map((bbox) => bbox[3]))
+  ];
+}
+function groupsShareCaptionBand(left, right) {
+  const xGap = Math.max(0, Math.max(left[0], right[0]) - Math.min(left[2], right[2]));
+  if (xGap > 40) return false;
+  const leftHeight = left[3] - left[1];
+  const rightHeight = right[3] - right[1];
+  const verticalOverlap = axisOverlap(left[1], left[3], right[1], right[3]);
+  return verticalOverlap >= 0.55 * Math.min(leftHeight, rightHeight);
+}
+function groupsAreCoordinateNeighbours(left, right) {
+  const leftWidth = left[2] - left[0];
+  const leftHeight = left[3] - left[1];
+  const rightWidth = right[2] - right[0];
+  const rightHeight = right[3] - right[1];
+  const xGap = Math.max(0, Math.max(left[0], right[0]) - Math.min(left[2], right[2]));
+  const yGap = Math.max(0, Math.max(left[1], right[1]) - Math.min(left[3], right[3]));
+  const xOverlap = axisOverlap(left[0], left[2], right[0], right[2]);
+  const yOverlap = axisOverlap(left[1], left[3], right[1], right[3]);
+  return xGap <= 65 && yOverlap >= 0.2 * Math.min(leftHeight, rightHeight) || yGap <= 65 && xOverlap >= 0.2 * Math.min(leftWidth, rightWidth);
+}
+var NESTED_GROUP_CONTAINMENT_THRESHOLD = 0.97;
+var NESTED_GROUP_AREA_RATIO = 1.35;
+function bboxArea(bbox) {
+  return Math.max(0, bbox[2] - bbox[0]) * Math.max(0, bbox[3] - bbox[1]);
+}
+function repairGroupFigureKeys(members) {
+  const keys = /* @__PURE__ */ new Set();
+  for (const member of members) {
+    for (const key of member.caption?.formal_figure_caption_keys || []) keys.add(key);
+    for (const key of member.caption?.next_page_figure_keys || []) keys.add(key);
+    for (const entry of captionPartEntries([member])) {
+      if (entry.kind !== "formal-caption" && entry.kind !== "next-page-placeholder") continue;
+      const key = formalFigureCaptionKeyFromText(entry.text) || figureKeyFromText(entry.text);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+function repairGroupsAreSourceAdjacent(left, right) {
+  if (!left.length || !right.length) return false;
+  const leftOrders = left.map((block) => block.page_order);
+  const rightOrders = right.map((block) => block.page_order);
+  const leftMin = Math.min(...leftOrders);
+  const leftMax = Math.max(...leftOrders);
+  const rightMin = Math.min(...rightOrders);
+  const rightMax = Math.max(...rightOrders);
+  return rightMin <= leftMax + 1 && leftMin <= rightMax + 1;
+}
+function mergeNestedVisualRepairGroups(groups, allBlocks) {
+  const blockById = new Map(allBlocks.map((block) => [block.id, block]));
+  const markdownOrder = (id) => markdownImageOrder(id) ?? Number.MAX_SAFE_INTEGER;
+  const orderedMemberIds = (ids) => [...new Set(ids)].sort(
+    (left, right) => (blockById.get(left)?.source_index ?? Number.MAX_SAFE_INTEGER) - (blockById.get(right)?.source_index ?? Number.MAX_SAFE_INTEGER)
+  );
+  const working = groups.map((group) => ({
+    ...group,
+    member_block_ids: [...group.member_block_ids],
+    member_markdown_image_ids: [...group.member_markdown_image_ids || []],
+    caption_anchor_block_ids: [...group.caption_anchor_block_ids || []]
+  }));
+  while (true) {
+    let match = null;
+    for (let leftIndex = 0; leftIndex < working.length && !match; leftIndex += 1) {
+      const left = working[leftIndex];
+      if (left.decision !== "auto" || left.replacement.mode !== "pdf_crop" || !left.replacement.bbox_norm) continue;
+      for (let rightIndex = leftIndex + 1; rightIndex < working.length; rightIndex += 1) {
+        const right = working[rightIndex];
+        if (right.page_idx !== left.page_idx || right.decision !== "auto" || right.replacement.mode !== "pdf_crop" || !right.replacement.bbox_norm) continue;
+        const leftArea = bboxArea(left.replacement.bbox_norm);
+        const rightArea = bboxArea(right.replacement.bbox_norm);
+        if (leftArea <= 0 || rightArea <= 0) continue;
+        const outerIndex = leftArea >= rightArea ? leftIndex : rightIndex;
+        const innerIndex = outerIndex === leftIndex ? rightIndex : leftIndex;
+        const outer2 = working[outerIndex];
+        const inner2 = working[innerIndex];
+        const outerArea = Math.max(leftArea, rightArea);
+        const innerArea = Math.min(leftArea, rightArea);
+        if (outerArea < innerArea * NESTED_GROUP_AREA_RATIO) continue;
+        const containment = bboxContainmentRatio(
+          outer2.replacement.bbox_norm,
+          inner2.replacement.bbox_norm
+        );
+        if (containment < NESTED_GROUP_CONTAINMENT_THRESHOLD) continue;
+        const outerMembers = outer2.member_block_ids.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+        const innerMembers = inner2.member_block_ids.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+        if (outerMembers.length !== outer2.member_block_ids.length || innerMembers.length !== inner2.member_block_ids.length || !repairGroupsAreSourceAdjacent(outerMembers, innerMembers)) continue;
+        const figureKeys = /* @__PURE__ */ new Set([
+          ...repairGroupFigureKeys(outerMembers),
+          ...repairGroupFigureKeys(innerMembers)
+        ]);
+        if (figureKeys.size !== 1) continue;
+        match = { outerIndex, innerIndex, containment };
+        break;
+      }
+    }
+    if (!match) break;
+    const outer = working[match.outerIndex];
+    const inner = working[match.innerIndex];
+    const memberBlockIds = orderedMemberIds([
+      ...outer.member_block_ids,
+      ...inner.member_block_ids
+    ]);
+    const memberMarkdownImageIds = [.../* @__PURE__ */ new Set([
+      ...outer.member_markdown_image_ids || [],
+      ...inner.member_markdown_image_ids || []
+    ])].sort((left, right) => markdownOrder(left) - markdownOrder(right));
+    const nestedCount = Number(outer.signals?.nested_group_count || 0) + Number(inner.signals?.nested_group_count || 0) + 1;
+    const summedSignal = (name) => Number(outer.signals?.[name] || 0) + Number(inner.signals?.[name] || 0);
+    const merged = {
+      ...outer,
+      member_block_ids: memberBlockIds,
+      member_markdown_image_ids: memberMarkdownImageIds,
+      caption_anchor_block_ids: [.../* @__PURE__ */ new Set([
+        ...outer.caption_anchor_block_ids || [],
+        ...inner.caption_anchor_block_ids || []
+      ])],
+      confidence: Math.min(outer.confidence, inner.confidence),
+      signals: {
+        ...outer.signals || {},
+        member_count: memberBlockIds.length,
+        representative_count: summedSignal("representative_count"),
+        adjacent_pair_count: summedSignal("adjacent_pair_count"),
+        caption_char_count: summedSignal("caption_char_count"),
+        long_caption_anchor_count: summedSignal("long_caption_anchor_count"),
+        figure_caption_anchor_count: summedSignal("figure_caption_anchor_count"),
+        panel_label_count: summedSignal("panel_label_count"),
+        nested_group_count: nestedCount,
+        nested_overlap_containment: Number(match.containment.toFixed(4))
+      },
+      reason_codes: [.../* @__PURE__ */ new Set([
+        ...outer.reason_codes || [],
+        ...inner.reason_codes || [],
+        "nested_visual_overlap_deduplicated"
+      ])]
+    };
+    const insertAt = Math.min(match.outerIndex, match.innerIndex);
+    const removeAt = Math.max(match.outerIndex, match.innerIndex);
+    working.splice(removeAt, 1);
+    working.splice(insertAt, 1, merged);
+  }
+  return working;
+}
+function mergeStandaloneCaptionRepairGroups(groups, allBlocks) {
+  const blockById = new Map(allBlocks.map((block) => [block.id, block]));
+  const nestedGroups = mergeNestedVisualRepairGroups(groups, allBlocks);
+  const descriptors = nestedGroups.map((group, index) => {
+    const members = group.member_block_ids.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+    const bbox = group.replacement.bbox_norm || unionBboxes(members.flatMap((block) => block.bbox_norm ? [block.bbox_norm] : []));
+    const panelLabelSignal = Number(group.signals?.panel_label_count || 0);
+    const hasPanelLabels = panelLabelSignal > 0 || captionPartEntries(members).some((entry) => entry.kind === "panel-label");
+    const hasMemberFormalCaption = captionPartEntries(members).some((entry) => entry.kind === "formal-caption");
+    const orderedPageBlocks = allBlocks.filter((block) => blockPageIdx(block) === group.page_idx).sort((left, right) => left.page_order - right.page_order || left.source_index - right.source_index);
+    const followingCaptionIds = [...new Set(members.map((member) => nearestFollowingFormalCaptionId(member, orderedPageBlocks)).filter(Boolean))];
+    const followingCaptionId = followingCaptionIds.length === 1 ? followingCaptionIds[0] : "";
+    return {
+      group,
+      index,
+      members,
+      bbox,
+      hasPanelLabels,
+      hasMemberFormalCaption,
+      followingCaptionId
+    };
+  });
+  const adjacency = /* @__PURE__ */ new Map();
+  descriptors.forEach((descriptor) => adjacency.set(descriptor.index, /* @__PURE__ */ new Set()));
+  for (let leftIndex = 0; leftIndex < descriptors.length; leftIndex += 1) {
+    const left = descriptors[leftIndex];
+    if (left.group.decision !== "auto" || left.group.replacement.mode !== "pdf_crop" || !left.bbox) continue;
+    for (let rightIndex = leftIndex + 1; rightIndex < descriptors.length; rightIndex += 1) {
+      const right = descriptors[rightIndex];
+      if (right.group.page_idx !== left.group.page_idx || right.group.decision !== "auto" || right.group.replacement.mode !== "pdf_crop" || !right.bbox) continue;
+      const panelBandBridge = left.hasPanelLabels && right.hasPanelLabels && groupsShareCaptionBand(left.bbox, right.bbox);
+      const readingOrderBridge = Boolean(
+        left.followingCaptionId && left.followingCaptionId === right.followingCaptionId && groupsAreCoordinateNeighbours(left.bbox, right.bbox)
+      );
+      if (!panelBandBridge && !readingOrderBridge) continue;
+      adjacency.get(left.index).add(right.index);
+      adjacency.get(right.index).add(left.index);
+    }
+  }
+  const consumed = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const descriptor of descriptors) {
+    if (consumed.has(descriptor.index)) continue;
+    const component = [];
+    const pending = [descriptor.index];
+    while (pending.length) {
+      const currentIndex = pending.pop();
+      if (consumed.has(currentIndex)) continue;
+      consumed.add(currentIndex);
+      component.push(descriptors[currentIndex]);
+      for (const neighbour of adjacency.get(currentIndex) || []) {
+        if (!consumed.has(neighbour)) pending.push(neighbour);
+      }
+    }
+    component.sort((left, right) => left.index - right.index);
+    if (component.length < 2 || component.some((entry) => entry.hasMemberFormalCaption)) {
+      result.push(...component.map((entry) => entry.group));
+      continue;
+    }
+    const combinedMembers = component.flatMap((entry) => entry.members);
+    const combinedCaption = standaloneSamePageCaption(
+      combinedMembers,
+      allBlocks,
+      component[0].group.page_idx
+    );
+    if (!combinedCaption) {
+      result.push(...component.map((entry) => entry.group));
+      continue;
+    }
+    const primary = component.find((entry) => Boolean(
+      combinedCaption.markdownImageId && entry.members.some((member) => member.markdown_image_ids?.includes(combinedCaption.markdownImageId))
+    )) || component[0];
+    const memberIds = [...new Set(component.flatMap((entry) => entry.group.member_block_ids))].sort((left, right) => (blockById.get(left)?.source_index || 0) - (blockById.get(right)?.source_index || 0));
+    const markdownIds = [...new Set(component.flatMap((entry) => entry.group.member_markdown_image_ids || entry.members.flatMap((block) => block.markdown_image_ids || [])))].sort((left, right) => (markdownImageOrder(left) || 0) - (markdownImageOrder(right) || 0));
+    const bbox = unionBboxes(component.flatMap((entry) => entry.bbox ? [entry.bbox] : []));
+    if (!bbox) {
+      result.push(...component.map((entry) => entry.group));
+      continue;
+    }
+    result.push({
+      ...primary.group,
+      member_block_ids: memberIds,
+      member_markdown_image_ids: markdownIds,
+      confidence: Math.min(...component.map((entry) => entry.group.confidence)),
+      replacement: {
+        mode: "pdf_crop",
+        bbox_norm: bbox,
+        padding_norm: Math.max(...component.map((entry) => Number(entry.group.replacement.padding_norm || 0)))
+      },
+      reason_codes: [.../* @__PURE__ */ new Set([
+        ...primary.group.reason_codes || [],
+        component.every((entry) => entry.followingCaptionId === component[0].followingCaptionId) ? "reading_order_caption_spatial_bridge" : "standalone_caption_spatial_bridge"
+      ])]
+    });
+  }
+  return result;
+}
+function panelLabelProjectionsForBlocks(blocks, allBlocks, pageIdx) {
+  const projections = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of captionPartEntries(blocks)) {
+    if (entry.kind !== "panel-label") continue;
+    for (const markdownImageId of entry.block.markdown_image_ids || []) {
+      const key = `${markdownImageId}\0${entry.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      projections.push({ markdownImageId, label: entry.text });
+    }
+  }
+  const memberIds = new Set(blocks.map((block) => block.id));
+  for (const candidate of allBlocks) {
+    const text = String(candidate.text?.text || "").trim();
+    if (memberIds.has(candidate.id) || candidate.role !== "text" || blockPageIdx(candidate) !== pageIdx || !candidate.bbox_norm || !isPanelLabelText(text)) continue;
+    const candidateBbox = candidate.bbox_norm;
+    const containingMembers = blocks.filter((member) => {
+      const memberBbox = member.bbox_norm;
+      return Boolean(
+        memberBbox && member.markdown_image_ids?.length === 1 && bboxContainmentRatio(memberBbox, candidateBbox) >= 0.95
+      );
+    });
+    if (containingMembers.length !== 1) continue;
+    const markdownImageId = containingMembers[0].markdown_image_ids?.[0];
+    if (!markdownImageId) continue;
+    const key = `${markdownImageId}\0${text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    projections.push({ markdownImageId, label: text });
+  }
+  return projections;
+}
+function samePageCaptionDetails(blocks, allBlocks, pageIdx) {
+  const entries = captionPartEntries(blocks);
+  const allProjections = entries.flatMap((entry) => {
+    const exactPlaceholder = nextPageCaptionPlaceholderFromText(entry.text);
+    if (entry.kind === "other" && containsNextPageCaptionCandidate(entry.text)) {
+      if (!exactPlaceholder) return [];
+      return (entry.block.markdown_image_ids || []).map((markdownImageId) => ({
+        markdownImageId,
+        text: entry.text,
+        suppressText: exactPlaceholder
+      }));
+    }
+    return (entry.block.markdown_image_ids || []).map((markdownImageId) => ({
+      markdownImageId,
+      text: entry.text
+    }));
+  });
+  const memberCaptions = blocks.map((block) => String(block.caption?.text || "").trim()).filter((caption) => caption.length > 1);
+  const fallback = selectVisualCaption(memberCaptions);
+  const emptyResult = {
+    caption: fallback,
+    captionParts: [],
+    samePageCaptionProjections: allProjections
+  };
+  const formalEntries = entries.filter((entry) => entry.kind === "formal-caption");
+  if (!formalEntries.length) {
+    const standalone = standaloneSamePageCaption(blocks, allBlocks, pageIdx);
+    if (!standalone) return emptyResult;
+    return {
+      caption: standalone.text,
+      captionParts: standalone.parts,
+      samePageCaptionProjections: standalone.markdownImageId ? [
+        ...allProjections,
+        ...standalone.parts.map((text) => ({
+          markdownImageId: standalone.markdownImageId,
+          text
+        }))
+      ] : allProjections,
+      ...standalone.atomicBlockProjection ? { atomicBlockProjection: standalone.atomicBlockProjection } : {}
+    };
+  }
+  if (formalEntries.length !== 1) return emptyResult;
+  const formal = formalEntries[0];
+  const isSafeContinuation = (entry) => entry.order > formal.order && entry.kind === "caption-continuation" && entry.text.length >= 24 && !figureKeyFromText(entry.text) && endsWithTerminalPunctuation2(entry.text);
+  const sameBlockLater = entries.filter((entry) => entry.block.id === formal.block.id && entry.order > formal.order);
+  const sameBlockChain = [];
+  for (const entry of sameBlockLater) {
+    if (!isSafeContinuation(entry)) break;
+    sameBlockChain.push(entry);
+  }
+  const terminalFormalChain = endsWithTerminalPunctuation2(formal.text) && sameBlockChain.length > 0 && startsWithPanelLabel(sameBlockChain[0].text) ? sameBlockChain : [];
+  const nonTerminalCrossBlockCandidates = !endsWithTerminalPunctuation2(formal.text) ? entries.filter((entry) => isSafeContinuation(entry)) : [];
+  const continuations = sameBlockChain.length > 0 && !endsWithTerminalPunctuation2(formal.text) ? sameBlockChain : terminalFormalChain.length > 0 ? terminalFormalChain : nonTerminalCrossBlockCandidates.length === 1 ? nonTerminalCrossBlockCandidates : [];
+  if (!continuations.length) {
+    return {
+      caption: fallback || formal.text,
+      captionParts: [],
+      samePageCaptionProjections: allProjections
+    };
+  }
+  return {
+    caption: [formal.text, ...continuations.map((entry) => entry.text)].join(" ").replace(/\s+/g, " ").trim(),
+    captionParts: [],
+    samePageCaptionProjections: allProjections
+  };
+}
+function markdownImageOccurrences(markdown) {
+  const occurrences = /* @__PURE__ */ new Map();
+  let imageOrder = 0;
+  IMAGE_TOKEN_RE.lastIndex = 0;
+  let match;
+  while ((match = IMAGE_TOKEN_RE.exec(markdown)) !== null) {
+    const assetPath = normalizeAssetPath(match[2] || match[3] || match[4]);
+    if (!assetPath) continue;
+    const id = `md-img-${String(imageOrder).padStart(4, "0")}`;
+    imageOrder += 1;
+    occurrences.set(id, { id, start: match.index, end: IMAGE_TOKEN_RE.lastIndex });
+  }
+  return occurrences;
+}
+function previousMarkdownLine(markdown, lineStart) {
+  if (lineStart <= 0) return null;
+  const contentEnd = lineStart - 1;
+  const previousNewline = markdown.lastIndexOf("\n", Math.max(0, contentEnd - 1));
+  const start = previousNewline + 1;
+  return {
+    start,
+    contentEnd,
+    end: lineStart,
+    text: markdown.slice(start, contentEnd)
+  };
+}
+function nextMarkdownLine(markdown, lineStart) {
+  if (lineStart >= markdown.length) return null;
+  const newline = markdown.indexOf("\n", lineStart);
+  const contentEnd = newline < 0 ? markdown.length : newline;
+  return {
+    start: lineStart,
+    contentEnd,
+    end: newline < 0 ? markdown.length : newline + 1,
+    text: markdown.slice(lineStart, contentEnd)
+  };
+}
+function previousNonBlankMarkdownLines(markdown, lineStart, limit) {
+  const lines = [];
+  let cursor = lineStart;
+  let blankCount = 0;
+  while (lines.length < limit) {
+    const line = previousMarkdownLine(markdown, cursor);
+    if (!line) break;
+    cursor = line.start;
+    if (!line.text.trim()) {
+      blankCount += 1;
+      if (blankCount > 2) break;
+      continue;
+    }
+    blankCount = 0;
+    lines.push(line);
+  }
+  return lines;
+}
+function nextNonBlankMarkdownLines(markdown, lineStart, limit) {
+  const lines = [];
+  let cursor = lineStart;
+  let blankCount = 0;
+  while (lines.length < limit) {
+    const line = nextMarkdownLine(markdown, cursor);
+    if (!line) break;
+    cursor = line.end;
+    if (!line.text.trim()) {
+      blankCount += 1;
+      if (blankCount > 2) break;
+      continue;
+    }
+    blankCount = 0;
+    lines.push(line);
+  }
+  return lines;
+}
+function adjacentProjectedTextRunRanges(markdown, occurrence, parts) {
+  const normalizedParts = parts.map((part) => ({
+    ...part,
+    text: part.text.trim(),
+    suppressText: part.suppressText?.trim()
+  })).filter((part) => Boolean(part.text));
+  if (!normalizedParts.length || normalizedParts.some((part) => /[\r\n]/.test(part.text)) || normalizedParts.some((part) => part.suppressText && /[\r\n]/.test(part.suppressText))) return null;
+  const imageLineStart = markdown.lastIndexOf("\n", Math.max(0, occurrence.start - 1)) + 1;
+  const imageNewline = markdown.indexOf("\n", occurrence.end);
+  const imageLineEnd = imageNewline < 0 ? markdown.length : imageNewline;
+  if (markdown.slice(imageLineStart, occurrence.start).trim() || markdown.slice(occurrence.end, imageLineEnd).trim()) return null;
+  const previousLines = previousNonBlankMarkdownLines(
+    markdown,
+    imageLineStart,
+    normalizedParts.length
+  );
+  const nextLines = nextNonBlankMarkdownLines(
+    markdown,
+    imageNewline < 0 ? markdown.length : imageNewline + 1,
+    normalizedParts.length
+  );
+  const matchingSplits = [];
+  for (let beforeCount2 = 0; beforeCount2 <= normalizedParts.length; beforeCount2 += 1) {
+    const afterCount2 = normalizedParts.length - beforeCount2;
+    const beforeMatches = previousLines.length >= beforeCount2 && previousLines.slice(0, beforeCount2).reverse().every((line, index) => line.text.trim() === normalizedParts[index].text);
+    const afterMatches = nextLines.length >= afterCount2 && nextLines.slice(0, afterCount2).every((line, index) => line.text.trim() === normalizedParts[beforeCount2 + index].text);
+    if (beforeMatches && afterMatches) matchingSplits.push({ beforeCount: beforeCount2, afterCount: afterCount2 });
+  }
+  if (matchingSplits.length !== 1) return null;
+  const [{ beforeCount, afterCount }] = matchingSplits;
+  const matched = [
+    ...previousLines.slice(0, beforeCount).reverse().map((line, index) => ({ line, part: normalizedParts[index] })),
+    ...nextLines.slice(0, afterCount).map((line, index) => ({ line, part: normalizedParts[beforeCount + index] }))
+  ];
+  const ranges = [];
+  for (const { line, part } of matched) {
+    if (!part.suppressText) {
+      ranges.push({ start: line.start, end: line.end });
+      continue;
+    }
+    const localIndex = line.text.indexOf(part.suppressText);
+    if (localIndex < 0 || line.text.indexOf(part.suppressText, localIndex + part.suppressText.length) >= 0) return null;
+    ranges.push({
+      start: line.start + localIndex,
+      end: line.start + localIndex + part.suppressText.length
+    });
+  }
+  return ranges;
+}
+function verifiedSourceProjectionRanges(markdown, visuals, localRangesByVisual, occurrences) {
+  const ranges = [];
+  for (const visual of visuals) {
+    const projections = visual.captionSourceProjections || [];
+    const bounds = visual.captionSourceImageBounds;
+    const beforeImage = bounds ? occurrences.get(bounds.beforeMarkdownImageId) : void 0;
+    const afterImage = bounds ? occurrences.get(bounds.afterMarkdownImageId) : void 0;
+    if (!projections.length || !beforeImage || !afterImage || beforeImage.start >= afterImage.start) continue;
+    const verified = [];
+    let valid = true;
+    for (const projection of projections) {
+      const { start, end } = projection;
+      const expected = projection.text.trim();
+      const source = Number.isInteger(start) && Number.isInteger(end) ? markdown.slice(start, end) : "";
+      const content = source.endsWith("\n") ? source.slice(0, -1).replace(/\r$/, "") : source;
+      IMAGE_TOKEN_RE.lastIndex = 0;
+      const containsImageToken = IMAGE_TOKEN_RE.test(content);
+      IMAGE_TOKEN_RE.lastIndex = 0;
+      if (!expected || start < 0 || end <= start || end > markdown.length || start > 0 && markdown[start - 1] !== "\n" || end < markdown.length && markdown[end - 1] !== "\n" || /[\r\n]/.test(content) || content.trim() !== expected || containsImageToken) {
+        valid = false;
+        break;
+      }
+      verified.push({ start, end });
+    }
+    if (!valid || verified.length !== projections.length) continue;
+    if (verified[0].start < beforeImage.end || verified[verified.length - 1].end > afterImage.start) continue;
+    for (let index = 1; index < verified.length; index += 1) {
+      const previous = verified[index - 1];
+      const current = verified[index];
+      if (current.start < previous.end || markdown.slice(previous.end, current.start).trim()) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) continue;
+    const targetChainBound = verified.length >= 2;
+    const occurrenceBound = verified.length === 1 && (localRangesByVisual.get(visual.id) || []).some((localRange) => localRange.end <= verified[0].start && !markdown.slice(localRange.end, verified[0].start).trim());
+    if (!targetChainBound && !occurrenceBound) continue;
+    verified.forEach((range, index) => {
+      if (projections[index].suppress !== false) ranges.push(range);
+    });
+  }
+  return ranges;
+}
+function verifiedBoundedHeadingRanges(markdown, visuals, occurrences) {
+  const boundaryRange = (boundary) => {
+    if (boundary.kind === "image") return occurrences.get(boundary.markdownImageId) || null;
+    const range = boundary.markdownTableRange;
+    if (range.offset_unit !== "utf16-code-unit" || !Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 0 || range.end <= range.start || range.end > markdown.length) return null;
+    const source = markdown.slice(range.start, range.end);
+    const lineStart = markdown.lastIndexOf("\n", Math.max(0, range.start - 1)) + 1;
+    const nextNewline = markdown.indexOf("\n", range.end);
+    const lineEnd = nextNewline < 0 ? markdown.length : nextNewline;
+    if (!/^<table\b[^>]*>[\s\S]*<\/table>$/i.test(source) || markdown.slice(lineStart, range.start).trim() || markdown.slice(range.end, lineEnd).trim() || markdown.indexOf(source) !== range.start || markdown.indexOf(source, range.start + source.length) >= 0) return null;
+    return { start: range.start, end: range.end };
+  };
+  const ranges = [];
+  for (const visual of visuals) {
+    for (const projection of visual.boundedHeadingProjections || []) {
+      const expected = projection.text.trim();
+      const beforeBoundary = boundaryRange(projection.before);
+      const afterBoundary = boundaryRange(projection.after);
+      if (!expected || !beforeBoundary || !afterBoundary || beforeBoundary.start >= afterBoundary.start) continue;
+      const beforeLineEnd = markdown.indexOf("\n", beforeBoundary.end);
+      const scanStart = beforeLineEnd < 0 ? markdown.length : beforeLineEnd + 1;
+      const afterLineStart = markdown.lastIndexOf("\n", Math.max(0, afterBoundary.start - 1)) + 1;
+      if (scanStart > afterLineStart) continue;
+      const matches = [];
+      let cursor = scanStart;
+      while (cursor < afterLineStart) {
+        const line = nextMarkdownLine(markdown, cursor);
+        if (!line || line.start >= afterLineStart) break;
+        cursor = line.end;
+        const heading = /^\s{0,3}#{1,6}[\t ]+(.+?)(?:[\t ]+#+)?[\t ]*$/.exec(line.text);
+        if (heading?.[1].trim() === expected) matches.push(line);
+      }
+      if (matches.length === 1) ranges.push({ start: matches[0].start, end: matches[0].end });
+    }
+  }
+  return ranges;
+}
+function suppressProjectedReaderText(markdown, visuals) {
+  const occurrences = markdownImageOccurrences(markdown);
+  const ranges = /* @__PURE__ */ new Map();
+  const captionTexts = /* @__PURE__ */ new Map();
+  const localRangesByVisual = /* @__PURE__ */ new Map();
+  for (const visual of visuals) {
+    const captionRuns = /* @__PURE__ */ new Map();
+    for (const projection of visual.samePageCaptionProjections || []) {
+      const text = projection.text.trim();
+      if (!text) continue;
+      const run = captionRuns.get(projection.markdownImageId) || [];
+      run.push({
+        ...projection,
+        text,
+        ...projection.suppressText ? { suppressText: projection.suppressText.trim() } : {}
+      });
+      captionRuns.set(projection.markdownImageId, run);
+      const texts = captionTexts.get(projection.markdownImageId) || /* @__PURE__ */ new Set();
+      texts.add(text);
+      captionTexts.set(projection.markdownImageId, texts);
+    }
+    for (const [markdownImageId, parts] of captionRuns) {
+      const occurrence = occurrences.get(markdownImageId);
+      if (!occurrence) continue;
+      const matchedRanges = adjacentProjectedTextRunRanges(markdown, occurrence, parts);
+      if (!matchedRanges?.length) continue;
+      const visualRanges = localRangesByVisual.get(visual.id) || [];
+      visualRanges.push(...matchedRanges);
+      localRangesByVisual.set(visual.id, visualRanges);
+      for (const range of matchedRanges) ranges.set(`${range.start}:${range.end}`, range);
+    }
+  }
+  for (const visual of visuals) {
+    for (const projection of visual.panelLabelProjections || []) {
+      const label = projection.label.trim();
+      if (!label || !isPanelLabelText(label) || captionTexts.get(projection.markdownImageId)?.has(label)) continue;
+      const occurrence = occurrences.get(projection.markdownImageId);
+      if (!occurrence) continue;
+      const matchedRanges = adjacentProjectedTextRunRanges(markdown, occurrence, [{
+        markdownImageId: projection.markdownImageId,
+        text: label
+      }]);
+      for (const range of matchedRanges || []) ranges.set(`${range.start}:${range.end}`, range);
+    }
+  }
+  for (const range of verifiedSourceProjectionRanges(markdown, visuals, localRangesByVisual, occurrences)) {
+    ranges.set(`${range.start}:${range.end}`, range);
+  }
+  for (const range of verifiedBoundedHeadingRanges(markdown, visuals, occurrences)) {
+    ranges.set(`${range.start}:${range.end}`, range);
+  }
+  return [...ranges.values()].sort((left, right) => right.start - left.start).reduce(
+    (result, range) => `${result.slice(0, range.start)}${result.slice(range.end)}`,
+    markdown
+  );
+}
+function sameIds(actual, expected) {
+  return actual.length === expected.length && actual.every((id, index) => id === expected[index]);
+}
+function nextPagePlaceholdersForFigure(caption, figureKey) {
+  if (!caption) return [];
+  if (caption.next_page_placeholders !== void 0) {
+    return caption.next_page_placeholders.filter((placeholder) => placeholder.figure_key === figureKey).map((placeholder) => String(placeholder.text || "").trim()).filter(Boolean);
+  }
+  const legacy = nextPageCaptionPlaceholderFromText(String(caption.text || ""), figureKey);
+  return legacy ? [legacy] : [];
+}
+function markdownImageOrder(markdownImageId) {
+  const match = /^md-img-(\d+)$/.exec(markdownImageId);
+  return match ? Number(match[1]) : null;
+}
+function sourceImageBoundsForProjectionBlocks(projectionBlocks, allBlocks) {
+  if (!projectionBlocks.length) return null;
+  const mappedVisuals = allBlocks.filter((block) => block.role === "visual" && block.markdown_image_ids?.length === 1).map((block) => ({
+    block,
+    markdownImageId: block.markdown_image_ids[0],
+    markdownOrder: markdownImageOrder(block.markdown_image_ids[0])
+  })).filter((entry) => entry.markdownOrder !== null).sort((left, right) => left.block.source_index - right.block.source_index);
+  if (mappedVisuals.length < 2) return null;
+  for (let index = 1; index < mappedVisuals.length; index += 1) {
+    if (mappedVisuals[index].block.source_index <= mappedVisuals[index - 1].block.source_index || mappedVisuals[index].markdownOrder <= mappedVisuals[index - 1].markdownOrder) return null;
+  }
+  const firstSourceIndex = Math.min(...projectionBlocks.map((block) => block.source_index));
+  const lastSourceIndex = Math.max(...projectionBlocks.map((block) => block.source_index));
+  const before = [...mappedVisuals].reverse().find((entry) => entry.block.source_index < firstSourceIndex);
+  const after = mappedVisuals.find((entry) => entry.block.source_index > lastSourceIndex);
+  if (!before || !after) return null;
+  const intervalTextBlocks = allBlocks.filter((block) => block.source_index > before.block.source_index && block.source_index < after.block.source_index && ["text", "title"].includes(block.role) && Boolean(blockText(block)));
+  for (const projectionBlock of projectionBlocks) {
+    const text = blockText(projectionBlock);
+    if (intervalTextBlocks.filter((block) => blockText(block) === text).length !== 1) return null;
+  }
+  return {
+    beforeMarkdownImageId: before.markdownImageId,
+    afterMarkdownImageId: after.markdownImageId
+  };
+}
+function runningHeaderSourceBounds(block, allBlocks) {
+  const anchors = [];
+  for (const candidate of allBlocks) {
+    if (candidate.role === "visual" && candidate.markdown_image_ids?.length === 1) {
+      anchors.push({
+        sourceIndex: candidate.source_index,
+        boundary: {
+          kind: "image",
+          markdownImageId: candidate.markdown_image_ids[0]
+        }
+      });
+      continue;
+    }
+    if (candidate.role === "table" && candidate.markdown_table_range) {
+      anchors.push({
+        sourceIndex: candidate.source_index,
+        boundary: {
+          kind: "table",
+          markdownTableRange: candidate.markdown_table_range
+        }
+      });
+    }
+  }
+  anchors.sort((left, right) => left.sourceIndex - right.sourceIndex);
+  const before = [...anchors].reverse().find((anchor) => anchor.sourceIndex < block.source_index);
+  const after = anchors.find((anchor) => anchor.sourceIndex > block.source_index);
+  if (!before || !after) return null;
+  const sameTextBlocks = allBlocks.filter((candidate) => candidate.source_index > before.sourceIndex && candidate.source_index < after.sourceIndex && blockText(candidate) === blockText(block) && (candidate.id === block.id || ["text", "title"].includes(candidate.role)));
+  if (sameTextBlocks.length !== 1 || sameTextBlocks[0].id !== block.id) return null;
+  return { before: before.boundary, after: after.boundary };
+}
+function runningHeaderProjectionsForPages(allBlocks, pageIndices) {
+  const explicitHeaders = allBlocks.filter((block) => block.role === "discarded" && ["header", "page_header"].includes(block.source_type.toLowerCase()) && Boolean(block.bbox_norm) && Boolean(blockText(block)));
+  if (!explicitHeaders.length) return [];
+  const projections = /* @__PURE__ */ new Map();
+  for (const block of allBlocks) {
+    const pageIdx = blockPageIdx(block);
+    const text = blockText(block);
+    if (pageIdx === null || !pageIndices.has(pageIdx) || block.role !== "discarded" || ["header", "page_header"].includes(block.source_type.toLowerCase()) || !block.bbox_norm || !text || text.length > 80 || /[\r\n]/.test(text)) continue;
+    const hasExactHeaderTwin = explicitHeaders.some((header) => {
+      const headerPageIdx = blockPageIdx(header);
+      return headerPageIdx !== null && headerPageIdx !== pageIdx && blockText(header) === text && Boolean(header.bbox_norm) && block.bbox_norm.every((coordinate, index) => Math.abs(coordinate - header.bbox_norm[index]) <= 10);
+    });
+    if (!hasExactHeaderTwin) continue;
+    const bounds = runningHeaderSourceBounds(block, allBlocks);
+    if (!bounds) continue;
+    const boundaryKey = (boundary) => boundary.kind === "image" ? `image:${boundary.markdownImageId}` : `table:${boundary.markdownTableRange.start}:${boundary.markdownTableRange.end}`;
+    const key = `${text}\0${boundaryKey(bounds.before)}\0${boundaryKey(bounds.after)}`;
+    projections.set(key, { text, ...bounds });
+  }
+  return [...projections.values()];
+}
+function sourceMatchesCaptionLink(source, link) {
+  const caption = source?.caption;
+  const placeholders = nextPagePlaceholdersForFigure(caption, link.figure_key);
+  return link.relation === "next_page_figure_caption" && link.target_page_idx === link.source_page_idx + 1 && source?.role === "visual" && Boolean(source.asset_path && source.bbox_norm) && caption?.next_page_marker === true && sameIds(caption.figure_keys || [], [link.figure_key]) && sameIds(caption.next_page_figure_keys || [], [link.figure_key]) && placeholders.length === 1;
+}
+function captionLinkMatchesBlocks(link, source, targetPageBlocks) {
+  if (!sourceMatchesCaptionLink(source, link)) return false;
+  const ordered = [...targetPageBlocks].sort(
+    (left, right) => left.page_order - right.page_order || left.source_index - right.source_index
+  );
+  const anchorPosition = ordered.findIndex((block) => block.id === link.caption_block_ids[0]);
+  if (anchorPosition < 0) return false;
+  for (let position = 0; position < anchorPosition; position += 1) {
+    const block = ordered[position];
+    if (block.role === "discarded") continue;
+    if (["visual", "table", "equation"].includes(block.role)) return false;
+    if (!["text", "title"].includes(block.role) || !blockText(block)) continue;
+    return false;
+  }
+  const anchor = ordered[anchorPosition];
+  const anchorText = blockText(anchor);
+  if (!isTopTextBlock(anchor) || formalFigureCaptionKeyFromText(anchorText) !== link.figure_key) return false;
+  const expectedIds = [anchor.id];
+  let expectedStatus = "partial";
+  if (endsWithTerminalPunctuation2(anchorText)) {
+    expectedStatus = "complete";
+  } else {
+    for (const next of ordered.slice(anchorPosition + 1)) {
+      if (next.role === "discarded") continue;
+      if (["visual", "table", "equation"].includes(next.role)) break;
+      if (!["text", "title"].includes(next.role)) continue;
+      const nextText = blockText(next);
+      if (!nextText) {
+        if (sameTopCaptionBand(anchor, next)) break;
+        continue;
+      }
+      const nextFormalKey = formalFigureCaptionKeyFromText(nextText);
+      if (nextFormalKey === link.figure_key && sameTopCaptionBand(anchor, next)) return false;
+      if (next.role === "text" && !figureKeyFromText(nextText) && sameTopCaptionBand(anchor, next) && (firstAlphaIsLowercase2(nextText) || startsWithPanelLabel(nextText))) {
+        expectedIds.push(next.id);
+        expectedStatus = endsWithTerminalPunctuation2(nextText) ? "complete" : "partial";
+      }
+      break;
+    }
+  }
+  return sameIds(link.caption_block_ids, expectedIds) && link.status === expectedStatus;
+}
+function inferredLinksForSource(source, allBlocks, pageIdx) {
+  const figureKeys = source.caption?.next_page_figure_keys || [];
+  if (figureKeys.length !== 1) return [];
+  const figureKey = figureKeys[0];
+  const targetPageIdx = pageIdx + 1;
+  const targetBlocks = allBlocks.filter((block) => blockPageIdx(block) === targetPageIdx);
+  const anchors = targetBlocks.filter((block) => ["text", "title"].includes(block.role) && isTopTextBlock(block) && formalFigureCaptionKeyFromText(blockText(block)) === figureKey);
+  const candidates = [];
+  for (const anchor of anchors) {
+    const possibleIds = [[anchor.id]];
+    for (const continuation of targetBlocks) {
+      if (continuation.id !== anchor.id && ["text", "title"].includes(continuation.role)) {
+        possibleIds.push([anchor.id, continuation.id]);
+      }
+    }
+    for (const captionBlockIds of possibleIds) {
+      for (const status of ["complete", "partial"]) {
+        const link = {
+          visual_block_id: source.id,
+          caption_block_ids: captionBlockIds,
+          source_page_idx: pageIdx,
+          target_page_idx: targetPageIdx,
+          figure_key: figureKey,
+          relation: "next_page_figure_caption",
+          status
+        };
+        if (captionLinkMatchesBlocks(link, source, targetBlocks)) candidates.push(link);
+      }
+    }
+  }
+  return candidates;
+}
+function inferRuntimeNextPageCaptionLink(blocks, allBlocks, pageIdx) {
+  const candidates = blocks.flatMap((block) => inferredLinksForSource(block, allBlocks, pageIdx));
+  return candidates.length === 1 ? candidates[0] : null;
+}
+function prepareReaderMarkdown(markdown, visuals) {
+  const atomicCaptures = visuals.flatMap((visual) => {
+    const projection = visual.atomicBlockProjection;
+    if (!projection) return [];
+    const tableRange = projection.tableRange;
+    const captionRange = projection.captionRange;
+    if (tableRange.offset_unit !== "utf16-code-unit" || captionRange.offset_unit !== "utf16-code-unit" || !Number.isInteger(tableRange.start) || !Number.isInteger(tableRange.end) || !Number.isInteger(captionRange.start) || !Number.isInteger(captionRange.end) || tableRange.start < 0 || tableRange.end <= tableRange.start || captionRange.start < tableRange.end || captionRange.end <= captionRange.start || captionRange.end > markdown.length) return [];
+    const tableText = markdown.slice(tableRange.start, tableRange.end);
+    const captionSource = markdown.slice(captionRange.start, captionRange.end);
+    const captionContent = captionSource.endsWith("\n") ? captionSource.slice(0, -1).replace(/\r$/, "") : captionSource;
+    const captionText = projection.captionText.trim();
+    if (!/^<table\b[^>]*>[\s\S]*<\/table>$/i.test(tableText) || !captionText || captionContent.trim() !== captionText || markdown.indexOf(tableText) !== tableRange.start || markdown.indexOf(tableText, tableRange.start + tableText.length) >= 0 || markdown.indexOf(captionText) !== captionRange.start + captionContent.indexOf(captionText) || markdown.indexOf(captionText, captionRange.start + captionContent.indexOf(captionText) + captionText.length) >= 0 || markdown.slice(tableRange.end, captionRange.start).trim() || captionRange.start > 0 && markdown[captionRange.start - 1] !== "\n" || captionRange.end < markdown.length && markdown[captionRange.end - 1] !== "\n") return [];
+    return [{ visualId: visual.id, tableText, captionSource, captionText }];
+  });
+  const locateAtomicCapture = (value, capture) => {
+    const tableStart = value.indexOf(capture.tableText);
+    if (tableStart < 0 || value.indexOf(capture.tableText, tableStart + capture.tableText.length) >= 0) return null;
+    const captionStart = value.indexOf(capture.captionSource, tableStart + capture.tableText.length);
+    if (captionStart < 0 || value.indexOf(capture.captionSource, captionStart + capture.captionSource.length) >= 0 || value.indexOf(capture.captionText) < 0 || value.indexOf(capture.captionText, value.indexOf(capture.captionText) + capture.captionText.length) >= 0) return null;
+    const tableEnd = tableStart + capture.tableText.length;
+    const captionEnd = captionStart + capture.captionSource.length;
+    if (value.slice(tableEnd, captionStart).trim()) return null;
+    return { tableStart, tableEnd, captionStart, captionEnd };
+  };
+  const imageToVisual = /* @__PURE__ */ new Map();
+  const assetCandidates = /* @__PURE__ */ new Map();
+  visuals.forEach((visual) => {
+    (visual.memberMarkdownImageIds || []).forEach((imageId) => imageToVisual.set(imageId, visual.id));
+    visual.memberAssetPaths.forEach((assetPath) => {
+      const candidates = assetCandidates.get(assetPath) || /* @__PURE__ */ new Set();
+      candidates.add(visual.id);
+      assetCandidates.set(assetPath, candidates);
+    });
+  });
+  let prepared = suppressProjectedReaderText(markdown, visuals);
+  const protectedTableRanges = atomicCaptures.flatMap((capture) => {
+    const start = prepared.indexOf(capture.tableText);
+    if (start < 0 || prepared.indexOf(capture.tableText, start + capture.tableText.length) >= 0) return [];
+    return [{ start, end: start + capture.tableText.length }];
+  });
+  const inserted = /* @__PURE__ */ new Set();
+  let imageOrder = 0;
+  IMAGE_TOKEN_RE.lastIndex = 0;
+  prepared = prepared.replace(
+    IMAGE_TOKEN_RE,
+    (_match, _alt, anglePath, plainPath, htmlPath, offset) => {
+      const assetPath = normalizeAssetPath(anglePath || plainPath || htmlPath);
+      if (!assetPath) return _match;
+      const imageId = `md-img-${String(imageOrder).padStart(4, "0")}`;
+      imageOrder += 1;
+      if (protectedTableRanges.some((range) => offset >= range.start && offset + _match.length <= range.end)) {
+        return _match;
+      }
+      const candidates = assetCandidates.get(assetPath);
+      const visualId = imageToVisual.get(imageId) || (candidates?.size === 1 ? [...candidates][0] : void 0);
+      if (!visualId) return _match;
+      if (inserted.has(visualId)) return "";
+      inserted.add(visualId);
+      return `<span class="agent-dashboard-mineru-reading-anchor" data-visual-id="${escapeHtmlAttribute(visualId)}" aria-label="图像位置"></span>`;
+    }
+  );
+  const atomicReplacements = atomicCaptures.flatMap((capture) => {
+    const located = locateAtomicCapture(prepared, capture);
+    if (!located) return [];
+    return [{ capture, ...located }];
+  }).sort((left, right) => right.tableStart - left.tableStart);
+  for (const replacement of atomicReplacements) {
+    if (inserted.has(replacement.capture.visualId)) continue;
+    const anchor = `<span class="agent-dashboard-mineru-reading-anchor" data-visual-id="${escapeHtmlAttribute(replacement.capture.visualId)}" aria-label="图像位置"></span>`;
+    prepared = `${prepared.slice(0, replacement.tableStart)}${anchor}${prepared.slice(replacement.tableEnd, replacement.captionStart)}${prepared.slice(replacement.captionEnd)}`;
+    inserted.add(replacement.capture.visualId);
+  }
+  return prepared;
+}
+function resolveVisualCaptionDetails(blocks, allBlocks, repair, pageIdx) {
+  const memberIds = new Set(blocks.map((block) => block.id));
+  const storedLinks = (repair?.caption_links || []).filter((candidate) => memberIds.has(candidate.visual_block_id));
+  const link = storedLinks.length === 1 ? storedLinks[0] : storedLinks.length === 0 ? inferRuntimeNextPageCaptionLink(blocks, allBlocks, pageIdx) || void 0 : void 0;
+  const memberCaptions = blocks.map((block) => String(block.caption?.text || "").trim()).filter((caption) => caption.length > 1);
+  const samePageCaption = samePageCaptionDetails(blocks, allBlocks, pageIdx);
+  const panelLabelProjections = panelLabelProjectionsForBlocks(blocks, allBlocks, pageIdx);
+  const samePageHeadingProjections = runningHeaderProjectionsForPages(allBlocks, /* @__PURE__ */ new Set([pageIdx]));
+  const targetPageBlocks = allBlocks.filter((block) => blockPageIdx(block) === link?.target_page_idx);
+  if (!link) {
+    return {
+      ...samePageCaption,
+      captionSourceBlockIds: [],
+      captionSourceProjections: [],
+      captionSourceImageBounds: void 0,
+      panelLabelProjections,
+      boundedHeadingProjections: samePageHeadingProjections,
+      pageRange: [pageIdx, pageIdx]
+    };
+  }
+  const blockById = new Map(allBlocks.map((block) => [block.id, block]));
+  const source = blockById.get(link.visual_block_id);
+  const linkedBlocks = link.caption_block_ids.map((blockId) => blockById.get(blockId));
+  if (linkedBlocks.some((block) => !block) || !captionLinkMatchesBlocks(link, source, targetPageBlocks)) {
+    return {
+      ...samePageCaption,
+      captionSourceBlockIds: [],
+      captionSourceProjections: [],
+      captionSourceImageBounds: void 0,
+      panelLabelProjections,
+      boundedHeadingProjections: samePageHeadingProjections,
+      pageRange: [pageIdx, pageIdx]
+    };
+  }
+  const sourceParts = link.caption_block_ids.map((blockId) => String(blockById.get(blockId)?.text?.text || "").trim()).filter(Boolean);
+  const formalCaption = sourceParts.join(" ").replace(/\s+/g, " ").trim();
+  const placeholderCaptions = blocks.filter((block) => block.caption?.next_page_marker === true).flatMap((block) => nextPagePlaceholdersForFigure(block.caption, link.figure_key)).filter(Boolean);
+  const resolvedLinkedBlocks = linkedBlocks.filter(
+    (block) => Boolean(block)
+  );
+  let sourceProjectionBlocks = resolvedLinkedBlocks;
+  if (resolvedLinkedBlocks.length === 1) {
+    const orderedTargetPageBlocks = [...targetPageBlocks].sort((left, right) => left.page_order - right.page_order || left.source_index - right.source_index);
+    const linkedPosition = orderedTargetPageBlocks.findIndex((block) => block.id === resolvedLinkedBlocks[0].id);
+    for (const candidate of orderedTargetPageBlocks.slice(linkedPosition + 1)) {
+      if (candidate.role === "discarded") continue;
+      if (["visual", "table", "equation", "other"].includes(candidate.role)) break;
+      if (!["text", "title"].includes(candidate.role) || !blockText(candidate)) continue;
+      sourceProjectionBlocks = [...resolvedLinkedBlocks, candidate];
+      break;
+    }
+  }
+  const linkedIds = new Set(link.caption_block_ids);
+  const captionSourceImageBounds = sourceImageBoundsForProjectionBlocks(sourceProjectionBlocks, allBlocks);
+  const captionSourceProjections = captionSourceImageBounds && sourceProjectionBlocks.every((block) => Boolean(block.markdown_text_range)) ? sourceProjectionBlocks.map((block) => ({
+    start: block.markdown_text_range.start,
+    end: block.markdown_text_range.end,
+    text: blockText(block),
+    suppress: linkedIds.has(block.id)
+  })) : [];
+  return {
+    caption: selectVisualCaption([formalCaption, ...memberCaptions]),
+    captionParts: [.../* @__PURE__ */ new Set([...sourceParts, ...placeholderCaptions])],
+    captionSourceBlockIds: [...link.caption_block_ids],
+    captionSourceProjections,
+    captionSourceImageBounds: captionSourceImageBounds || void 0,
+    captionPageIdx: link.target_page_idx,
+    captionStatus: link.status,
+    panelLabelProjections,
+    boundedHeadingProjections: runningHeaderProjectionsForPages(
+      allBlocks,
+      /* @__PURE__ */ new Set([pageIdx, link.target_page_idx])
+    ),
+    samePageCaptionProjections: samePageCaption.samePageCaptionProjections,
+    pageRange: [Math.min(pageIdx, link.target_page_idx), Math.max(pageIdx, link.target_page_idx)]
+  };
+}
+function visualLabelFromCaption(caption, sequence) {
+  const normalized = caption.replace(/\s+/g, " ").trim();
+  const match = /^(Extended Data Fig(?:ure)?\.?|Supplementary Fig(?:ure)?\.?|Fig(?:ure)?\.?|Table|图|表)\s*([A-Za-z0-9_-]+)/i.exec(normalized);
+  if (match) return `${match[1]} ${match[2]}`.replace(/\s+/g, " ").trim();
+  return `图像 ${sequence}`;
+}
+function selectVisualCaption(captions) {
+  const unique = [...new Set(captions.map((caption) => caption.trim()).filter(Boolean))];
+  const figureCaptions = unique.filter(
+    (caption) => Boolean(formalFigureCaptionKeyFromText(caption)) || /^(?:Table|表)\s*[A-Za-z0-9_-]+\s*[|｜:：.]\s*[^|｜:：.\s]/i.test(caption)
+  );
+  if (figureCaptions.length) {
+    return figureCaptions.sort((left, right) => right.length - left.length)[0];
+  }
+  const safeFallbacks = unique.filter((caption) => !figureKeyFromText(caption));
+  const longCaptions = safeFallbacks.filter((caption) => caption.length >= 24);
+  if (longCaptions.length) return longCaptions.join(" ");
+  return safeFallbacks.sort((left, right) => right.length - left.length)[0] || "";
+}
+
+// src/mineru/package-loader.ts
+var import_node_crypto = require("node:crypto");
+var import_obsidian8 = require("obsidian");
+var MIB = 1024 * 1024;
+var MAX_ARTICLE_BYTES = 64 * MIB;
+var MAX_MINERU_JSON_BYTES = 256 * MIB;
+var MAX_CONTRACT_BYTES = 32 * MIB;
+var MAX_PDF_BYTES = 768 * MIB;
+var MAX_OUTPUT_ASSET_BYTES = 256 * MIB;
+function asRecord6(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function asStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+var CAPTION_PART_KINDS = /* @__PURE__ */ new Set([
+  "formal-caption",
+  "next-page-placeholder",
+  "panel-label",
+  "caption-continuation",
+  "other"
+]);
+function normalizeCaptionParts(value, fallback = []) {
+  if (value === void 0) return fallback.map((part) => ({ ...part }));
+  if (!Array.isArray(value)) return null;
+  const parts = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const record = asRecord6(value[index]);
+    const text = String(record.text || "").trim();
+    const kind = String(record.kind || "");
+    const declaredIndex = record.index;
+    if (!text || !CAPTION_PART_KINDS.has(kind) || declaredIndex !== void 0 && Number(declaredIndex) !== index) return null;
+    parts.push({ text, kind });
+  }
+  return parts;
+}
+function normalizeNextPagePlaceholders(value, fallback = []) {
+  if (value === void 0) return (fallback || []).map((placeholder) => ({ ...placeholder }));
+  if (!Array.isArray(value)) return null;
+  const placeholders = [];
+  for (const item of value) {
+    const record = asRecord6(item);
+    const index = Number(record.index);
+    const text = String(record.text || "").trim();
+    const figureKey = String(record.figure_key || "").trim().toLowerCase();
+    if (!Number.isInteger(index) || index < 0 || !text || !/^(?:figure|extended-data-figure|supplementary-figure|supporting-figure|图):[a-z0-9]+(?:[_-][a-z0-9]+)*$/.test(figureKey)) return null;
+    placeholders.push({ index, text, figure_key: figureKey });
+  }
+  return placeholders;
+}
+function normalizeMarkdownTextRange(value, fallback) {
+  if (value === void 0) return fallback ? { ...fallback } : void 0;
+  const record = asRecord6(value);
+  const start = Number(record.start);
+  const end = Number(record.end);
+  if (record.offset_unit !== "utf16-code-unit" || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) return null;
+  return { offset_unit: "utf16-code-unit", start, end };
+}
+function issueText(value) {
+  if (typeof value === "string") return value;
+  const record = asRecord6(value);
+  return String(record.message || record.code || JSON.stringify(value));
+}
+function sha256(value) {
+  return (0, import_node_crypto.createHash)("sha256").update(value).digest("hex");
+}
+function decodeUtf8(value) {
+  return new TextDecoder("utf-8").decode(value instanceof Uint8Array ? value : new Uint8Array(value));
+}
+function parseJson(value, label) {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new Error(`${label} 不是有效 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+function normalizePackageArticlePath(value) {
+  const path8 = (0, import_obsidian8.normalizePath)(value.trim());
+  if (!/^papers\/[^/]+\/article\.md$/i.test(path8)) {
+    throw new Error("MinerU 阅读器只能打开 papers/<citekey>/article.md");
+  }
+  return path8;
+}
+function packagePathFromArticle(articlePath) {
+  return articlePath.slice(0, -"/article.md".length);
+}
+function resolvePackageAssetPath(packagePath, rawPath) {
+  const assetPath = normalizeAssetPath(rawPath);
+  if (!assetPath) return "";
+  const resolved = (0, import_obsidian8.normalizePath)(`${packagePath}/${assetPath}`);
+  return resolved.startsWith(`${packagePath}/`) ? resolved : "";
+}
+function findTFile(app, path8) {
+  const file = app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path8));
+  return file instanceof import_obsidian8.TFile ? file : null;
+}
+async function readRequiredBinary(app, path8, label, maxBytes = MAX_MINERU_JSON_BYTES) {
+  const file = findTFile(app, path8);
+  if (!file) throw new Error(`缺少 ${label}：${path8}`);
+  if (file.stat.size > maxBytes) {
+    throw new Error(`${label} 超过阅读器安全上限（${Math.round(maxBytes / MIB)} MiB）：${path8}`);
+  }
+  const buffer = await app.vault.readBinary(file);
+  return { file, bytes: new Uint8Array(buffer), text: decodeUtf8(buffer) };
+}
+async function readOptionalJson(app, path8, maxBytes = MAX_CONTRACT_BYTES) {
+  const file = findTFile(app, path8);
+  if (!file) return null;
+  if (file.stat.size > maxBytes) throw new Error(`${path8} 超过阅读器安全上限`);
+  return parseJson(await app.vault.read(file), path8);
+}
+async function readOptionalDerivedJson(app, path8, issues, manifestRecord) {
+  try {
+    const file = findTFile(app, path8);
+    if (!file) {
+      if (manifestRecord) throw new Error("manifest.json 已登记该文件，但文件不存在");
+      return null;
+    }
+    if (!manifestRecord) throw new Error("manifest.json 未登记该派生文件");
+    if (file.stat.size > MAX_CONTRACT_BYTES || Number(manifestRecord.size) !== file.stat.size) {
+      throw new Error("文件大小与 manifest.json 不一致或超过安全上限");
+    }
+    const bytes = new Uint8Array(await app.vault.readBinary(file));
+    const expectedHash = String(manifestRecord.sha256 || "").toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) {
+      throw new Error("文件哈希与 manifest.json 不一致");
+    }
+    return parseJson(decodeUtf8(bytes), path8);
+  } catch (error) {
+    issues.push(`${path8} 无法解析，已回退到原始 MinerU 产物：${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+function normalizeBlock(value, fallback) {
+  const record = asRecord6(value);
+  const id = String(record.id || fallback?.id || "").trim();
+  const sourceIndex = Number(record.source_index ?? fallback?.source_index ?? -1);
+  const pageOrder = Number(record.page_order ?? fallback?.page_order ?? 0);
+  if (!id || !Number.isInteger(sourceIndex) || sourceIndex < 0) return null;
+  const captionRecord = asRecord6(record.caption);
+  const captionParts = normalizeCaptionParts(
+    captionRecord.items ?? captionRecord.parts,
+    fallback?.caption?.parts || []
+  );
+  if (captionParts === null) return null;
+  const captionNextPagePlaceholders = normalizeNextPagePlaceholders(
+    captionRecord.next_page_placeholders,
+    fallback?.caption?.next_page_placeholders
+  );
+  if (captionNextPagePlaceholders === null) return null;
+  const markdownTextRange = normalizeMarkdownTextRange(
+    record.markdown_text_range,
+    fallback?.markdown_text_range
+  );
+  if (markdownTextRange === null) return null;
+  const markdownTableRange = fallback?.markdown_table_range ? { ...fallback.markdown_table_range } : void 0;
+  const captionText = String(captionRecord.text || fallback?.caption?.text || "").trim() || captionParts.map((part) => part.text).join(" ").replace(/\s+/g, " ").trim();
+  const captionFigureKeys = asStringArray(captionRecord.figure_keys).length ? asStringArray(captionRecord.figure_keys) : [...fallback?.caption?.figure_keys || []];
+  const captionLeadingFigureKey = String(
+    captionRecord.leading_figure_key || fallback?.caption?.leading_figure_key || ""
+  ).trim().toLowerCase();
+  const captionNextPageMarker = typeof captionRecord.next_page_marker === "boolean" ? captionRecord.next_page_marker : Boolean(fallback?.caption?.next_page_marker);
+  const captionNextPageFigureKeys = asStringArray(captionRecord.next_page_figure_keys).length ? asStringArray(captionRecord.next_page_figure_keys) : [...fallback?.caption?.next_page_figure_keys || []];
+  const textRecord = asRecord6(record.text);
+  const blockText2 = String(textRecord.text || fallback?.text?.text || "").trim();
+  const textFigureKeys = asStringArray(textRecord.figure_keys).length ? asStringArray(textRecord.figure_keys) : [...fallback?.text?.figure_keys || []];
+  const textLeadingFigureKey = String(
+    textRecord.leading_figure_key || fallback?.text?.leading_figure_key || ""
+  ).trim().toLowerCase();
+  const assetPath = normalizeAssetPath(record.asset_path ?? fallback?.asset_path);
+  const bbox = normalizeBbox(record.bbox_norm ?? record.bbox, false) || fallback?.bbox_norm || null;
+  const rawRole = String(record.role || fallback?.role || "other");
+  const role = rawRole === "marginalia" ? "discarded" : rawRole;
+  return {
+    id,
+    source_index: sourceIndex,
+    page_order: Number.isFinite(pageOrder) ? pageOrder : 0,
+    source_type: String(record.source_type || fallback?.source_type || "unknown"),
+    role: ["text", "title", "visual", "table", "equation", "discarded", "other"].includes(role) ? role : "other",
+    bbox_norm: bbox,
+    ...assetPath ? { asset_path: assetPath } : {},
+    ...captionText || captionParts.length || fallback?.caption ? {
+      caption: {
+        text: captionText,
+        parts: captionParts,
+        char_count: Number(captionRecord.char_count || captionText.length || fallback?.caption?.char_count || 0),
+        item_count: Number(captionRecord.item_count || fallback?.caption?.item_count || 0),
+        figure_keys: captionFigureKeys,
+        leading_figure_key: captionLeadingFigureKey || void 0,
+        next_page_marker: captionNextPageMarker,
+        next_page_figure_keys: captionNextPageFigureKeys,
+        next_page_placeholders: captionNextPagePlaceholders,
+        ends_with_terminal_punctuation: typeof captionRecord.ends_with_terminal_punctuation === "boolean" ? captionRecord.ends_with_terminal_punctuation : fallback?.caption?.ends_with_terminal_punctuation,
+        starts_with_lowercase: typeof captionRecord.starts_with_lowercase === "boolean" ? captionRecord.starts_with_lowercase : fallback?.caption?.starts_with_lowercase,
+        starts_with_panel_label: typeof captionRecord.starts_with_panel_label === "boolean" ? captionRecord.starts_with_panel_label : fallback?.caption?.starts_with_panel_label,
+        next_page_reference_count: Number(
+          captionRecord.next_page_reference_count ?? fallback?.caption?.next_page_reference_count ?? (captionNextPageMarker ? 1 : 0)
+        )
+      }
+    } : {},
+    ...blockText2 || fallback?.text ? {
+      text: {
+        text: blockText2,
+        char_count: Number(textRecord.char_count || blockText2.length || fallback?.text?.char_count || 0),
+        item_count: Number(textRecord.item_count || fallback?.text?.item_count || 0),
+        figure_keys: textFigureKeys,
+        leading_figure_key: textLeadingFigureKey || void 0,
+        next_page_marker: typeof textRecord.next_page_marker === "boolean" ? textRecord.next_page_marker : Boolean(fallback?.text?.next_page_marker),
+        next_page_figure_keys: asStringArray(textRecord.next_page_figure_keys).length ? asStringArray(textRecord.next_page_figure_keys) : [...fallback?.text?.next_page_figure_keys || []],
+        starts_with_lowercase: typeof textRecord.starts_with_lowercase === "boolean" ? textRecord.starts_with_lowercase : fallback?.text?.starts_with_lowercase,
+        starts_with_panel_label: typeof textRecord.starts_with_panel_label === "boolean" ? textRecord.starts_with_panel_label : fallback?.text?.starts_with_panel_label,
+        ends_with_terminal_punctuation: typeof textRecord.ends_with_terminal_punctuation === "boolean" ? textRecord.ends_with_terminal_punctuation : fallback?.text?.ends_with_terminal_punctuation
+      }
+    } : {},
+    markdown_image_ids: asStringArray(record.markdown_image_ids).length ? asStringArray(record.markdown_image_ids) : [...fallback?.markdown_image_ids || []],
+    ...markdownTextRange ? { markdown_text_range: markdownTextRange } : {},
+    ...markdownTableRange ? { markdown_table_range: markdownTableRange } : {}
+  };
+}
+function normalizeViewerIndex(value, fallback) {
+  const record = asRecord6(value);
+  if (Number(record.schema_version) !== 1 || !Array.isArray(record.pages)) return null;
+  const fallbackBySource = /* @__PURE__ */ new Map();
+  fallback.pages.forEach((page) => page.blocks.forEach((block) => fallbackBySource.set(block.source_index, block)));
+  const pages = [];
+  for (const pageValue of record.pages) {
+    const pageRecord = asRecord6(pageValue);
+    const pageIdx = Number(pageRecord.page_idx);
+    if (!Number.isInteger(pageIdx) || pageIdx < 0 || !Array.isArray(pageRecord.blocks)) continue;
+    const normalizedBlocks = pageRecord.blocks.map((blockValue) => {
+      const sourceIndex = Number(asRecord6(blockValue).source_index);
+      return normalizeBlock(blockValue, fallbackBySource.get(sourceIndex));
+    });
+    if (normalizedBlocks.some((block) => block === null)) return null;
+    const blocks = normalizedBlocks;
+    pages.push({ page_idx: pageIdx, blocks });
+  }
+  if (!pages.length) return null;
+  const markdownImages = Array.isArray(record.markdown_images) ? record.markdown_images.map((value2, order) => {
+    const image = asRecord6(value2);
+    return {
+      id: String(image.id || `md-img-${String(order).padStart(4, "0")}`),
+      order: Number(image.order ?? order),
+      asset_path: normalizeAssetPath(image.asset_path),
+      occurrence: Number(image.occurrence || 0)
+    };
+  }).filter((image) => image.asset_path) : fallback.markdown_images;
+  return {
+    schema_version: 1,
+    status: record.status === "unavailable" ? "unavailable" : record.status === "partial" ? "partial" : "complete",
+    inputs: asRecord6(record.inputs),
+    coordinate_system: asRecord6(record.coordinate_system),
+    pdf_source: asRecord6(record.pdf_source),
+    markdown_images: markdownImages,
+    pages: pages.sort((a, b) => a.page_idx - b.page_idx),
+    issues: Array.isArray(record.issues) ? record.issues.map(issueText) : []
+  };
+}
+function normalizeDecision(value) {
+  if (value === "auto") return "auto";
+  if (value === "review") return "review";
+  return "keep-original";
+}
+function normalizeReplacementMode(value) {
+  if (value === "existing_asset") return "existing_asset";
+  if (value === "pdf_crop") return "pdf_crop";
+  return "none";
+}
+function normalizeCaptionLink(value) {
+  const record = asRecord6(value);
+  const visualBlockId = String(record.visual_block_id || "").trim();
+  const captionBlockIds = asStringArray(record.caption_block_ids);
+  const sourcePageIdx = Number(record.source_page_idx);
+  const targetPageIdx = Number(record.target_page_idx);
+  const figureKey = String(record.figure_key || "").trim().toLowerCase();
+  const relation = String(record.relation || "");
+  const status = record.status === "partial" ? "partial" : record.status === "complete" ? "complete" : "";
+  if (!visualBlockId || !captionBlockIds.length || !Number.isInteger(sourcePageIdx) || !Number.isInteger(targetPageIdx) || sourcePageIdx < 0 || targetPageIdx !== sourcePageIdx + 1 || !/^(?:figure|extended-data-figure|supplementary-figure|supporting-figure|图):[a-z0-9]+(?:[_-][a-z0-9]+)*$/.test(figureKey) || relation !== "next_page_figure_caption" || !status) return null;
+  return {
+    visual_block_id: visualBlockId,
+    caption_block_ids: captionBlockIds,
+    source_page_idx: sourcePageIdx,
+    target_page_idx: targetPageIdx,
+    figure_key: figureKey,
+    relation: "next_page_figure_caption",
+    status
+  };
+}
+function normalizeRepair(value) {
+  const record = asRecord6(value);
+  if (Number(record.schema_version) !== 1 || !Array.isArray(record.groups)) return null;
+  const algorithmVersion = String(record.algorithm_version || "");
+  if (!["visual-repair-v1.1", "visual-repair-v1.2", "visual-repair-v1.3", "visual-repair-v1.4", "visual-repair-v1.5", "visual-repair-v1.6"].includes(algorithmVersion)) return null;
+  const groups = record.groups.map((value2) => {
+    const group = asRecord6(value2);
+    const replacement = asRecord6(group.replacement);
+    const id = String(group.id || "").trim();
+    const pageIdx = Number(group.page_idx);
+    const memberBlockIds = asStringArray(group.member_block_ids);
+    if (!id || !Number.isInteger(pageIdx) || pageIdx < 0 || memberBlockIds.length < 2) return null;
+    const bbox = normalizeBbox(replacement.bbox_norm ?? replacement.bbox);
+    const assetPath = normalizeAssetPath(
+      replacement.asset_path ?? replacement.existing_asset_path
+    );
+    return {
+      id,
+      page_idx: pageIdx,
+      member_block_ids: memberBlockIds,
+      member_markdown_image_ids: asStringArray(group.member_markdown_image_ids),
+      decision: normalizeDecision(group.decision),
+      confidence: Math.max(0, Math.min(1, Number(group.confidence || 0))),
+      replacement: {
+        mode: normalizeReplacementMode(replacement.mode),
+        block_id: String(replacement.block_id || "").trim() || void 0,
+        ...bbox ? { bbox_norm: bbox } : {},
+        padding_norm: Math.max(0, Math.min(40, Number(replacement.padding_norm || 0))),
+        ...assetPath ? { asset_path: assetPath } : {}
+      },
+      caption_anchor_block_ids: asStringArray(group.caption_anchor_block_ids),
+      signals: asRecord6(group.signals),
+      reason_codes: asStringArray(group.reason_codes),
+      fallback: String(group.fallback || "original_assets")
+    };
+  }).filter((group) => Boolean(group));
+  const rawCaptionLinks = Array.isArray(record.caption_links) ? record.caption_links : [];
+  const captionLinks = rawCaptionLinks.map(normalizeCaptionLink).filter((link) => Boolean(link));
+  if (rawCaptionLinks.length !== captionLinks.length) return null;
+  return {
+    schema_version: 1,
+    algorithm_version: algorithmVersion,
+    viewer_index: String(record.viewer_index || "viewer-index.json"),
+    status: record.status === "unavailable" ? "unavailable" : record.status === "partial" ? "partial" : "complete",
+    inputs: asRecord6(record.inputs),
+    groups,
+    caption_links: captionLinks,
+    issues: Array.isArray(record.issues) ? record.issues.map(issueText) : []
+  };
+}
+function bboxArea2(bbox) {
+  return bbox ? (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) : 0;
+}
+function manifestRecords(value, label) {
+  if (!Array.isArray(value)) throw new Error(`manifest.json 缺少 ${label} 文件清单`);
+  const records = /* @__PURE__ */ new Map();
+  for (const item of value) {
+    const record = asRecord6(item);
+    const path8 = normalizeAssetPath(record.path);
+    if (!path8 || records.has(path8)) throw new Error(`manifest.json 含无效或重复路径：${String(record.path || "")}`);
+    records.set(path8, record);
+  }
+  return records;
+}
+function optionalManifestRecords(value) {
+  return Array.isArray(value) ? manifestRecords(value, "derived_contracts") : /* @__PURE__ */ new Map();
+}
+async function verifyManifestOutputs(app, packagePath, manifest, article, mineru, pdfPath) {
+  if (Number(manifest.schema_version) !== 1) throw new Error("manifest.json 版本不受支持");
+  const records = manifestRecords(manifest.outputs, "outputs");
+  const knownBytes = /* @__PURE__ */ new Map([
+    ["article.md", article.bytes],
+    ["mineru-result.json", mineru.bytes]
+  ]);
+  for (const required of knownBytes.keys()) {
+    if (!records.has(required)) throw new Error(`manifest.json 未登记核心文件：${required}`);
+  }
+  for (const [relativePath, record] of records) {
+    const resolvedPath = resolvePackageAssetPath(packagePath, relativePath);
+    const file = findTFile(app, resolvedPath);
+    if (!resolvedPath || !file) throw new Error(`manifest.json 登记的文件不存在：${relativePath}`);
+    const expectedSize = Number(record.size);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || file.stat.size !== expectedSize) {
+      throw new Error(`原文包文件大小与 manifest.json 不一致：${relativePath}`);
+    }
+    const maxBytes = relativePath === "article.md" ? MAX_ARTICLE_BYTES : relativePath === "mineru-result.json" ? MAX_MINERU_JSON_BYTES : MAX_OUTPUT_ASSET_BYTES;
+    if (file.stat.size > maxBytes) throw new Error(`原文包文件超过阅读器安全上限：${relativePath}`);
+    const bytes = knownBytes.get(relativePath) || new Uint8Array(await app.vault.readBinary(file));
+    const expectedHash = String(record.sha256 || "").toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) {
+      throw new Error(`原文包文件哈希与 manifest.json 不一致：${relativePath}`);
+    }
+  }
+  if (pdfPath) {
+    const file = findTFile(app, pdfPath);
+    const source = asRecord6(manifest.source);
+    const expectedHash = String(source.sha256 || "").toLowerCase();
+    if (!file || file.stat.size > MAX_PDF_BYTES) throw new Error("包内 source.pdf 缺失或超过安全上限");
+    const bytes = new Uint8Array(await app.vault.readBinary(file));
+    if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) {
+      throw new Error("包内 source.pdf 与 manifest.json 来源哈希不一致");
+    }
+  }
+}
+function markdownOrderForAsset(index, assetPath) {
+  return index.markdown_images.find((image) => image.asset_path === assetPath)?.order ?? Number.MAX_SAFE_INTEGER;
+}
+function buildVisuals(index, repair, packagePath, app, pdfPath, issues) {
+  const blocks = index.pages.flatMap((page) => page.blocks);
+  const blockById = new Map(blocks.map((block) => [block.id, block]));
+  const consumed = /* @__PURE__ */ new Set();
+  const visuals = [];
+  const repairGroups = mergeStandaloneCaptionRepairGroups(repair?.groups || [], blocks);
+  for (const group of repairGroups) {
+    if (group.decision !== "auto") continue;
+    const members = group.member_block_ids.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+    if (members.length < 2) continue;
+    const rawAssetPaths = [...new Set(members.map((block) => block.asset_path || "").filter(Boolean))];
+    const assetPaths = rawAssetPaths.filter((assetPath) => {
+      const available = Boolean(findTFile(app, resolvePackageAssetPath(packagePath, assetPath)));
+      if (!available) issues.push(`视觉修复跳过缺失图片：${assetPath}`);
+      return available;
+    });
+    if (!assetPaths.length) continue;
+    let display;
+    if (group.replacement.mode === "pdf_crop" && group.replacement.bbox_norm && pdfPath) {
+      display = {
+        mode: "pdf-crop",
+        bbox: group.replacement.bbox_norm,
+        padding: Number(group.replacement.padding_norm || 0)
+      };
+    } else if (group.replacement.mode === "existing_asset") {
+      const replacementAsset = group.replacement.asset_path || [...members].sort((a, b) => bboxArea2(b.bbox_norm) - bboxArea2(a.bbox_norm))[0]?.asset_path || assetPaths[0];
+      const availableReplacement = assetPaths.includes(replacementAsset) ? replacementAsset : assetPaths[0];
+      display = { mode: "asset", assetPath: availableReplacement };
+    } else {
+      display = { mode: "fragment-set", assetPaths };
+    }
+    members.forEach((block) => consumed.add(block.id));
+    const orderedAssets = [...assetPaths].sort(
+      (a, b) => markdownOrderForAsset(index, a) - markdownOrderForAsset(index, b)
+    );
+    const captions = resolveVisualCaptionDetails(members, blocks, repair, group.page_idx);
+    visuals.push({
+      id: group.id,
+      pageIdx: group.page_idx,
+      label: "",
+      ...captions,
+      memberBlockIds: members.map((block) => block.id),
+      memberAssetPaths: orderedAssets,
+      memberMarkdownImageIds: [...new Set(
+        group.member_markdown_image_ids?.length ? group.member_markdown_image_ids : members.flatMap((block) => block.markdown_image_ids || [])
+      )],
+      anchorAssetPath: orderedAssets[0],
+      display,
+      repairDecision: "auto",
+      confidence: group.confidence
+    });
+  }
+  for (const block of blocks) {
+    if (consumed.has(block.id) || !["visual", "table"].includes(block.role) || !block.asset_path) continue;
+    const assetPath = block.asset_path;
+    if (!findTFile(app, resolvePackageAssetPath(packagePath, assetPath))) {
+      issues.push(`阅读器跳过缺失图片：${assetPath}`);
+      continue;
+    }
+    visuals.push({
+      id: `visual-${block.id}`,
+      pageIdx: index.pages.find((page) => page.blocks.includes(block))?.page_idx || 0,
+      label: "",
+      ...resolveVisualCaptionDetails(
+        [block],
+        blocks,
+        repair,
+        index.pages.find((page) => page.blocks.includes(block))?.page_idx || 0
+      ),
+      memberBlockIds: [block.id],
+      memberAssetPaths: [assetPath],
+      memberMarkdownImageIds: [...block.markdown_image_ids || []],
+      anchorAssetPath: assetPath,
+      display: { mode: "asset", assetPath },
+      repairDecision: "keep-original",
+      confidence: 1
+    });
+  }
+  visuals.sort((a, b) => {
+    const aOrder = markdownOrderForAsset(index, a.anchorAssetPath);
+    const bOrder = markdownOrderForAsset(index, b.anchorAssetPath);
+    return aOrder - bOrder || a.pageIdx - b.pageIdx || a.id.localeCompare(b.id);
+  });
+  visuals.forEach((visual, index2) => {
+    visual.label = visualLabelFromCaption(visual.caption, index2 + 1);
+  });
+  return visuals;
+}
+function titleFromMarkdown(markdown, packagePath) {
+  const heading = /^#\s+(.+)$/m.exec(markdown)?.[1]?.replace(/<[^>]+>/g, "").trim();
+  return heading || packagePath.split("/").pop() || "MinerU 文献";
+}
+function viewerHashesMatch(index, articleHash, mineruHash) {
+  const expectedArticle = String(index.inputs?.article?.sha256 || "").toLowerCase();
+  const expectedMineru = String(index.inputs?.mineru_result?.sha256 || "").toLowerCase();
+  return /^[a-f0-9]{64}$/.test(expectedArticle) && /^[a-f0-9]{64}$/.test(expectedMineru) && expectedArticle === articleHash.toLowerCase() && expectedMineru === mineruHash.toLowerCase();
+}
+function bboxContains(container, child) {
+  return container[0] <= child[0] + 0.01 && container[1] <= child[1] + 0.01 && container[2] + 0.01 >= child[2] && container[3] + 0.01 >= child[3];
+}
+function repairMatchesIndex(repair, index, articleHash, mineruHash) {
+  if (!viewerHashesMatch({ ...index, inputs: repair.inputs }, articleHash, mineruHash)) return false;
+  const blockById = /* @__PURE__ */ new Map();
+  index.pages.forEach((page) => page.blocks.forEach((block) => {
+    blockById.set(block.id, { block, pageIdx: page.page_idx });
+  }));
+  const markdownImageIds = new Set(index.markdown_images.map((image) => image.id));
+  const consumed = /* @__PURE__ */ new Set();
+  for (const group of repair.groups) {
+    const memberIds = group.member_block_ids;
+    if (memberIds.length < 2 || new Set(memberIds).size !== memberIds.length) return false;
+    const members = memberIds.map((id) => blockById.get(id));
+    if (members.some((member) => !member || member.pageIdx !== group.page_idx)) return false;
+    if (memberIds.some((id) => consumed.has(id))) return false;
+    memberIds.forEach((id) => consumed.add(id));
+    if ((group.member_markdown_image_ids || []).some((id) => !markdownImageIds.has(id))) return false;
+    if ((group.caption_anchor_block_ids || []).some((id) => !memberIds.includes(id))) return false;
+    if (group.replacement.mode === "existing_asset") {
+      if (!group.replacement.block_id || !memberIds.includes(group.replacement.block_id)) return false;
+      const memberAssets = new Set(members.map((member) => member?.block.asset_path).filter(Boolean));
+      if (!group.replacement.asset_path || !memberAssets.has(group.replacement.asset_path)) return false;
+    } else if (group.replacement.mode === "pdf_crop") {
+      const crop = group.replacement.bbox_norm;
+      if (!crop || members.some((member) => member?.block.bbox_norm && !bboxContains(crop, member.block.bbox_norm))) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  const linkedVisuals = /* @__PURE__ */ new Set();
+  const linkedCaptionBlocks = /* @__PURE__ */ new Set();
+  for (const link of repair.caption_links || []) {
+    if (linkedVisuals.has(link.visual_block_id)) return false;
+    linkedVisuals.add(link.visual_block_id);
+    const visual = blockById.get(link.visual_block_id);
+    if (!visual || visual.pageIdx !== link.source_page_idx || visual.block.role !== "visual" || link.target_page_idx !== link.source_page_idx + 1 || new Set(link.caption_block_ids).size !== link.caption_block_ids.length) return false;
+    const captionBlocks = link.caption_block_ids.map((id) => blockById.get(id));
+    if (captionBlocks.some((entry) => !entry || entry.pageIdx !== link.target_page_idx || !["text", "title"].includes(entry.block.role) || !String(entry.block.text?.text || "").trim()) || link.caption_block_ids.some((id) => consumed.has(id)) || link.caption_block_ids.some((id) => linkedCaptionBlocks.has(id)) || !captionLinkMatchesBlocks(
+      link,
+      visual.block,
+      index.pages.find((page) => page.page_idx === link.target_page_idx)?.blocks || []
+    )) return false;
+    link.caption_block_ids.forEach((id) => linkedCaptionBlocks.add(id));
+  }
+  return true;
+}
+var MineruPackageLoader = class {
+  constructor(app) {
+    this.app = app;
+  }
+  async load(rawArticlePath) {
+    const articlePath = normalizePackageArticlePath(rawArticlePath);
+    const packagePath = packagePathFromArticle(articlePath);
+    const article = await readRequiredBinary(this.app, articlePath, "article.md", MAX_ARTICLE_BYTES);
+    const mineru = await readRequiredBinary(
+      this.app,
+      `${packagePath}/mineru-result.json`,
+      "mineru-result.json",
+      MAX_MINERU_JSON_BYTES
+    );
+    const validationValue = await readOptionalJson(
+      this.app,
+      `${packagePath}/_extraction/validation.json`
+    );
+    const validation = asRecord6(validationValue);
+    if (validation.status !== "passed") {
+      throw new Error("该 MinerU 包未通过 _extraction/validation.json 验证，阅读器拒绝加载");
+    }
+    const manifestValue = await readOptionalJson(
+      this.app,
+      `${packagePath}/_extraction/manifest.json`
+    );
+    const manifest = asRecord6(manifestValue);
+    const derivedRecords = optionalManifestRecords(manifest.derived_contracts);
+    const pdfPathCandidate = `${packagePath}/_extraction/source.pdf`;
+    const pdfPath = findTFile(this.app, pdfPathCandidate) ? pdfPathCandidate : null;
+    await verifyManifestOutputs(this.app, packagePath, manifest, article, mineru, pdfPath);
+    const mineruPayload = parseJson(mineru.text, "mineru-result.json");
+    const fallbackIndex = buildRuntimeViewerIndex(mineruPayload, article.text);
+    const issues = [...fallbackIndex.issues];
+    const articleHash = sha256(article.bytes);
+    const mineruHash = sha256(mineru.bytes);
+    const contractValue = await readOptionalDerivedJson(
+      this.app,
+      `${packagePath}/_extraction/viewer-index.json`,
+      issues,
+      derivedRecords.get("_extraction/viewer-index.json")
+    );
+    let viewerIndex = contractValue ? normalizeViewerIndex(contractValue, fallbackIndex) : null;
+    if (contractValue && !viewerIndex) {
+      issues.push("viewer-index.json 结构不受支持，已从原始 MinerU JSON 临时重建");
+    }
+    if (viewerIndex && !viewerHashesMatch(viewerIndex, articleHash, mineruHash)) {
+      issues.push("viewer-index.json 与原始文件哈希不一致，已从原始 MinerU JSON 临时重建");
+      viewerIndex = null;
+    }
+    viewerIndex || (viewerIndex = fallbackIndex);
+    viewerIndex = reclassifyRuntimeRunningHeaders(viewerIndex);
+    issues.push(...viewerIndex.issues);
+    const repairValue = await readOptionalDerivedJson(
+      this.app,
+      `${packagePath}/_extraction/visual-repair.json`,
+      issues,
+      derivedRecords.get("_extraction/visual-repair.json")
+    );
+    let visualRepair = repairValue ? normalizeRepair(repairValue) : null;
+    if (repairValue && !visualRepair) {
+      issues.push("visual-repair.json 结构或算法版本不受支持，已保留 MinerU 原图显示");
+    }
+    if (visualRepair && !repairMatchesIndex(visualRepair, viewerIndex, articleHash, mineruHash)) {
+      issues.push("visual-repair.json 与当前原文或阅读索引不一致，已保留 MinerU 原图显示");
+      visualRepair = null;
+    }
+    if (visualRepair) issues.push(...visualRepair.issues);
+    const externalPdfRecorded = Boolean(asRecord6(manifest.source).path);
+    return {
+      packagePath,
+      articlePath,
+      title: titleFromMarkdown(article.text, packagePath),
+      articleMarkdown: article.text,
+      mineruPayload,
+      viewerIndex,
+      visualRepair,
+      visuals: buildVisuals(viewerIndex, visualRepair, packagePath, this.app, pdfPath, issues),
+      pdfPath,
+      externalPdfRecorded,
+      issues: [...new Set(issues.filter(Boolean))]
+    };
+  }
+};
+
+// src/mineru/pdf-renderer.ts
+var import_obsidian9 = require("obsidian");
+function outputScale() {
+  return Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+}
+function getCanvasContext(canvas) {
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("当前环境无法创建 PDF Canvas");
+  return context;
+}
+function isCancelledRender(error) {
+  const message = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /RenderingCancelled|cancelled|canceled/i.test(message);
+}
+var MineruPdfRenderer = class {
+  constructor() {
+    this.document = null;
+    this.loadingTask = null;
+    this.pageTask = null;
+    this.cropTask = null;
+    this.generation = 0;
+    this.pageGeneration = 0;
+    this.cropGeneration = 0;
+  }
+  get numPages() {
+    return this.document?.numPages || 0;
+  }
+  async load(app, pdfPath) {
+    const generation = ++this.generation;
+    await this.clearResources();
+    if (generation !== this.generation) return;
+    const file = app.vault.getAbstractFileByPath(pdfPath);
+    if (!(file instanceof import_obsidian9.TFile)) throw new Error(`未找到阅读器 PDF：${pdfPath}`);
+    const bytes = new Uint8Array(await app.vault.readBinary(file));
+    if (generation !== this.generation) return;
+    const pdfjs = await (0, import_obsidian9.loadPdfJs)();
+    if (generation !== this.generation) return;
+    const loadingTask = pdfjs.getDocument({ data: bytes });
+    this.loadingTask = loadingTask;
+    const document2 = await loadingTask.promise;
+    if (generation !== this.generation) {
+      await document2.destroy();
+      return;
+    }
+    if (this.loadingTask === loadingTask) this.loadingTask = null;
+    this.document = document2;
+  }
+  async renderPage(pageNumber, canvas, availableWidth, zoom) {
+    const document2 = this.document;
+    if (!document2) throw new Error("PDF 尚未加载");
+    this.cancelPageRender();
+    const generation = ++this.pageGeneration;
+    const documentGeneration = this.generation;
+    const page = await document2.getPage(Math.max(1, Math.min(document2.numPages, pageNumber)));
+    if (generation !== this.pageGeneration || documentGeneration !== this.generation || document2 !== this.document) {
+      page.cleanup?.();
+      throw new DOMException("PDF page render superseded", "AbortError");
+    }
+    const baseViewport = page.getViewport({ scale: 1 });
+    const fitScale = Math.max(0.25, availableWidth / Math.max(1, baseViewport.width));
+    const viewport = page.getViewport({ scale: fitScale * Math.max(0.4, Math.min(4, zoom)) });
+    const ratio = outputScale();
+    canvas.width = Math.max(1, Math.floor(viewport.width * ratio));
+    canvas.height = Math.max(1, Math.floor(viewport.height * ratio));
+    canvas.style.width = `${Math.floor(viewport.width)}px`;
+    canvas.style.height = `${Math.floor(viewport.height)}px`;
+    const task = page.render({
+      canvasContext: getCanvasContext(canvas),
+      viewport,
+      transform: ratio === 1 ? void 0 : [ratio, 0, 0, ratio, 0, 0],
+      background: "#ffffff"
+    });
+    this.pageTask = task;
+    try {
+      await task.promise;
+    } catch (error) {
+      if (isCancelledRender(error)) throw new DOMException("PDF page render cancelled", "AbortError");
+      throw error;
+    } finally {
+      if (this.pageTask === task) this.pageTask = null;
+      page.cleanup?.();
+    }
+    if (generation !== this.pageGeneration || documentGeneration !== this.generation) {
+      throw new DOMException("PDF page render superseded", "AbortError");
+    }
+    return { width: viewport.width, height: viewport.height };
+  }
+  async renderCrop(pageNumber, bbox, padding, canvas, availableWidth) {
+    const document2 = this.document;
+    if (!document2) throw new Error("缺少 PDF，无法重建完整图");
+    this.cancelCropRender();
+    const generation = ++this.cropGeneration;
+    const documentGeneration = this.generation;
+    const page = await document2.getPage(Math.max(1, Math.min(document2.numPages, pageNumber)));
+    if (generation !== this.cropGeneration || documentGeneration !== this.generation || document2 !== this.document) {
+      page.cleanup?.();
+      throw new DOMException("PDF crop render superseded", "AbortError");
+    }
+    const baseViewport = page.getViewport({ scale: 1 });
+    const crop = paddedBbox(bbox, padding);
+    const cropWidthAtOne = baseViewport.width * (crop[2] - crop[0]) / 1e3;
+    const scale = Math.max(0.5, Math.min(4, availableWidth / Math.max(1, cropWidthAtOne)));
+    const viewport = page.getViewport({ scale });
+    const left = viewport.width * crop[0] / 1e3;
+    const top = viewport.height * crop[1] / 1e3;
+    const width = viewport.width * (crop[2] - crop[0]) / 1e3;
+    const height = viewport.height * (crop[3] - crop[1]) / 1e3;
+    const ratio = outputScale();
+    canvas.width = Math.max(1, Math.floor(width * ratio));
+    canvas.height = Math.max(1, Math.floor(height * ratio));
+    canvas.style.width = `${Math.floor(width)}px`;
+    canvas.style.height = `${Math.floor(height)}px`;
+    const task = page.render({
+      canvasContext: getCanvasContext(canvas),
+      viewport,
+      transform: [ratio, 0, 0, ratio, -left * ratio, -top * ratio],
+      background: "#ffffff"
+    });
+    this.cropTask = task;
+    try {
+      await task.promise;
+    } catch (error) {
+      if (isCancelledRender(error)) throw new DOMException("PDF crop render cancelled", "AbortError");
+      throw error;
+    } finally {
+      if (this.cropTask === task) this.cropTask = null;
+      page.cleanup?.();
+    }
+    if (generation !== this.cropGeneration || documentGeneration !== this.generation) {
+      throw new DOMException("PDF crop render superseded", "AbortError");
+    }
+    return { width, height };
+  }
+  cancelPageRender() {
+    this.pageGeneration += 1;
+    try {
+      this.pageTask?.cancel();
+    } catch {
+    }
+    this.pageTask = null;
+  }
+  cancelCropRender() {
+    this.cropGeneration += 1;
+    try {
+      this.cropTask?.cancel();
+    } catch {
+    }
+    this.cropTask = null;
+  }
+  async destroy() {
+    this.generation += 1;
+    await this.clearResources();
+  }
+  async clearResources() {
+    this.cancelPageRender();
+    this.cancelCropRender();
+    const document2 = this.document;
+    const loadingTask = this.loadingTask;
+    this.document = null;
+    this.loadingTask = null;
+    if (document2) {
+      try {
+        await document2.destroy();
+      } catch {
+      }
+    } else if (loadingTask?.destroy) {
+      try {
+        await loadingTask.destroy();
+      } catch {
+      }
+    }
+  }
+};
+
+// src/views/mineru-reader.ts
+var import_obsidian10 = require("obsidian");
+var DEFAULT_STATE = {
+  articlePath: "",
+  mode: "pdf",
+  followReading: true,
+  showLayoutBoxes: true,
+  currentVisualId: "",
+  markdownAnchor: "",
+  pdfPage: 1,
+  pdfZoom: 1,
+  splitRatio: 0.64
+};
+function boundedNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(min, Math.min(max, numeric)) : fallback;
+}
+function normalizeState(value) {
+  const record = value !== null && typeof value === "object" ? value : {};
+  const mode = record.mode === "visuals" ? "visuals" : "pdf";
+  return {
+    articlePath: String(record.articlePath || ""),
+    mode,
+    followReading: record.followReading !== false,
+    showLayoutBoxes: record.showLayoutBoxes !== false,
+    currentVisualId: String(record.currentVisualId || ""),
+    markdownAnchor: String(record.markdownAnchor || ""),
+    pdfPage: Math.floor(boundedNumber(record.pdfPage, 1, 1, Number.MAX_SAFE_INTEGER)),
+    pdfZoom: boundedNumber(record.pdfZoom, 1, 0.4, 4),
+    splitRatio: boundedNumber(record.splitRatio, 0.64, 0.42, 0.78)
+  };
+}
+function iconButton(parent, icon, label, className = "") {
+  const button = parent.createEl("button", {
+    cls: `agent-dashboard-mineru-icon-button ${className}`.trim(),
+    attr: { "aria-label": label, title: label }
+  });
+  button.type = "button";
+  (0, import_obsidian10.setIcon)(button, icon);
+  return button;
+}
+var MineruReaderView = class extends import_obsidian10.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.pdfRenderer = new MineruPdfRenderer();
+    this.readerState = { ...DEFAULT_STATE };
+    this.readerPackage = null;
+    this.markdownScroller = null;
+    this.referenceHost = null;
+    this.workspaceEl = null;
+    this.readingObserver = null;
+    this.resizeObserver = null;
+    this.workspaceAbortController = null;
+    this.referenceAbortController = null;
+    this.markdownComponent = null;
+    this.loadGeneration = 0;
+    this.referenceGeneration = 0;
+    this.opened = false;
+    this.resizeTimer = null;
+    this.plugin = plugin;
+    this.loader = new MineruPackageLoader(plugin.app);
+    this.navigation = true;
+  }
+  getViewType() {
+    return MINERU_READER_VIEW_TYPE;
+  }
+  getDisplayText() {
+    return this.readerPackage?.title || "MinerU 文献阅读器";
+  }
+  getIcon() {
+    return "book-open-text";
+  }
+  getState() {
+    return { ...this.readerState };
+  }
+  async setState(state, _result) {
+    const previousPath = this.readerState.articlePath;
+    this.readerState = normalizeState(state);
+    if (this.opened && this.readerState.articlePath) {
+      if (this.readerState.articlePath !== previousPath || !this.readerPackage) {
+        await this.loadAndRender();
+      } else {
+        await this.renderWorkspace();
+      }
+    }
+  }
+  async setArticlePath(articlePath) {
+    if (articlePath === this.readerState.articlePath && this.readerPackage) return;
+    this.readerState.articlePath = articlePath;
+    this.readerState.currentVisualId = "";
+    this.readerState.markdownAnchor = "";
+    this.readerState.pdfPage = 1;
+    if (this.opened) await this.loadAndRender();
+    this.requestStateSave();
+  }
+  async onOpen() {
+    this.opened = true;
+    if (!this.readerState.articlePath) {
+      this.renderNoDocument();
+      return;
+    }
+    await this.loadAndRender();
+  }
+  async onClose() {
+    this.opened = false;
+    this.loadGeneration += 1;
+    this.referenceGeneration += 1;
+    this.clearWorkspaceLifecycle();
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = null;
+    await this.pdfRenderer.destroy();
+    this.contentEl.empty();
+  }
+  onResize() {
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = null;
+      if (this.readerState.mode === "pdf") void this.renderReference();
+    }, 140);
+  }
+  async loadAndRender() {
+    const generation = ++this.loadGeneration;
+    this.renderLoading();
+    try {
+      const loaded = await this.loader.load(this.readerState.articlePath);
+      if (!this.opened || generation !== this.loadGeneration) return;
+      this.readerPackage = loaded;
+      if (loaded.pdfPath) {
+        try {
+          await this.pdfRenderer.load(this.app, loaded.pdfPath);
+        } catch (error) {
+          loaded.issues.push(
+            `包内 PDF 无法加载，已保留 Markdown 与原始图片阅读：${error instanceof Error ? error.message : String(error)}`
+          );
+          loaded.pdfPath = null;
+          await this.pdfRenderer.destroy();
+        }
+      } else {
+        await this.pdfRenderer.destroy();
+      }
+      if (!this.opened || generation !== this.loadGeneration) return;
+      if (!loaded.visuals.some((visual) => visual.id === this.readerState.currentVisualId)) {
+        this.readerState.currentVisualId = loaded.visuals[0]?.id || "";
+      }
+      this.readerState.pdfPage = Math.max(
+        1,
+        Math.min(this.pdfRenderer.numPages || Number.MAX_SAFE_INTEGER, this.readerState.pdfPage)
+      );
+      await this.renderWorkspace();
+      this.requestStateSave();
+    } catch (error) {
+      if (!this.opened || generation !== this.loadGeneration) return;
+      this.readerPackage = null;
+      await this.pdfRenderer.destroy();
+      this.renderError(error);
+    }
+  }
+  renderLoading() {
+    this.clearWorkspaceLifecycle();
+    this.contentEl.empty();
+    this.contentEl.addClass("agent-dashboard-mineru-reader-view");
+    const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state" });
+    state.createDiv({ cls: "agent-dashboard-mineru-reader-spinner" });
+    state.createEl("h2", { text: "正在准备文献阅读器" });
+    state.createEl("p", { text: "正在核验 MinerU 包、构建图文索引并加载 PDF。" });
+  }
+  renderNoDocument() {
+    this.clearWorkspaceLifecycle();
+    this.contentEl.empty();
+    this.contentEl.addClass("agent-dashboard-mineru-reader-view");
+    const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state" });
+    (0, import_obsidian10.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "book-open-text");
+    state.createEl("h2", { text: "尚未选择 MinerU 文献" });
+    state.createEl("p", {
+      text: "请在 papers/<citekey>/article.md 上使用文件菜单，或先打开该文件再运行“打开 MinerU 文献阅读器”。"
+    });
+  }
+  renderError(error) {
+    this.clearWorkspaceLifecycle();
+    this.contentEl.empty();
+    this.contentEl.addClass("agent-dashboard-mineru-reader-view");
+    const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state is-error" });
+    (0, import_obsidian10.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "circle-alert");
+    state.createEl("h2", { text: "无法打开 MinerU 文献包" });
+    state.createEl("p", { text: error instanceof Error ? error.message : String(error) });
+  }
+  async renderWorkspace() {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    this.clearWorkspaceLifecycle();
+    this.workspaceAbortController = new AbortController();
+    this.contentEl.empty();
+    this.contentEl.addClass("agent-dashboard-mineru-reader-view");
+    const shell = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-shell" });
+    this.renderTopbar(shell);
+    const workspace = shell.createDiv({ cls: "agent-dashboard-mineru-workspace" });
+    workspace.style.setProperty(
+      "--agent-dashboard-mineru-markdown-width",
+      `${this.readerState.splitRatio * 100}%`
+    );
+    this.workspaceEl = workspace;
+    await this.renderMarkdownPane(workspace);
+    this.renderSplitter(workspace);
+    const referencePane = workspace.createEl("section", {
+      cls: "agent-dashboard-mineru-reference-pane",
+      attr: { "aria-label": "文献参考视图" }
+    });
+    this.referenceHost = referencePane;
+    await this.renderReference();
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => this.onResize()) : null;
+    this.resizeObserver?.observe(referencePane);
+  }
+  renderTopbar(parent) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    const topbar = parent.createEl("header", { cls: "agent-dashboard-mineru-topbar" });
+    const identity = topbar.createDiv({ cls: "agent-dashboard-mineru-document-identity" });
+    const openMarkdown = iconButton(identity, "file-text", "在新标签页打开原始 Markdown");
+    this.onWorkspaceEvent(openMarkdown, "click", () => void this.openArticleMarkdown());
+    const titleBlock = identity.createDiv({ cls: "agent-dashboard-mineru-title-block" });
+    titleBlock.createEl("h1", { text: readerPackage.title });
+    titleBlock.createEl("p", { text: readerPackage.articlePath });
+    const controls = topbar.createDiv({ cls: "agent-dashboard-mineru-top-controls" });
+    const follow = controls.createEl("button", {
+      cls: this.readerState.followReading ? "agent-dashboard-mineru-toggle is-active" : "agent-dashboard-mineru-toggle",
+      attr: {
+        "aria-pressed": this.readerState.followReading ? "true" : "false",
+        title: "让右侧参考内容跟随 Markdown 阅读位置"
+      }
+    });
+    follow.type = "button";
+    follow.createSpan({ text: "跟随阅读" });
+    follow.createSpan({ cls: "agent-dashboard-mineru-toggle-track" });
+    this.onWorkspaceEvent(follow, "click", () => {
+      this.readerState.followReading = !this.readerState.followReading;
+      follow.toggleClass("is-active", this.readerState.followReading);
+      follow.setAttribute("aria-pressed", this.readerState.followReading ? "true" : "false");
+      if (this.readerState.followReading) void this.syncReferenceToCurrentVisual();
+      this.requestStateSave();
+    });
+    if (readerPackage.issues.length) {
+      const issue = iconButton(controls, "info", `${readerPackage.issues.length} 条兼容性提示`);
+      this.onWorkspaceEvent(issue, "click", () => {
+        new import_obsidian10.Notice(readerPackage.issues.slice(0, 5).join("\n"), 9e3);
+      });
+    }
+  }
+  async renderMarkdownPane(parent) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    const pane = parent.createEl("section", {
+      cls: "agent-dashboard-mineru-markdown-pane",
+      attr: { "aria-label": "Markdown 正文" }
+    });
+    const paneHeader = pane.createDiv({ cls: "agent-dashboard-mineru-pane-heading" });
+    paneHeader.createEl("strong", { text: "Markdown" });
+    paneHeader.createSpan({ text: "图片与图注已移至参考栏，正文阅读位置保持独立" });
+    const scroller = pane.createDiv({
+      cls: "agent-dashboard-mineru-markdown-scroll markdown-reading-view"
+    });
+    const article = scroller.createEl("article", {
+      cls: "agent-dashboard-mineru-article markdown-preview-view markdown-rendered"
+    });
+    this.markdownScroller = scroller;
+    const prepared = prepareReaderMarkdown(readerPackage.articleMarkdown, readerPackage.visuals);
+    this.markdownComponent?.unload();
+    this.markdownComponent = new import_obsidian10.Component();
+    this.markdownComponent.load();
+    await import_obsidian10.MarkdownRenderer.render(
+      this.app,
+      prepared,
+      article,
+      readerPackage.articlePath,
+      this.markdownComponent
+    );
+    readerPackage.visuals.forEach((visual) => {
+      const anchor = article.querySelector(`[data-visual-id="${CSS.escape(visual.id)}"]`);
+      if (!anchor) return;
+      anchor.dataset.label = visual.label;
+      anchor.setAttribute("title", `在参考栏查看 ${visual.label}`);
+      anchor.setAttribute("role", "button");
+      anchor.tabIndex = 0;
+      this.onWorkspaceEvent(anchor, "click", () => void this.selectVisual(visual.id, false));
+      this.onWorkspaceEvent(anchor, "keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          void this.selectVisual(visual.id, false);
+        }
+      });
+    });
+    this.observeReadingAnchors(article, scroller);
+    window.requestAnimationFrame(() => this.restoreMarkdownPosition(article));
+  }
+  renderSplitter(parent) {
+    const splitter = parent.createDiv({
+      cls: "agent-dashboard-mineru-splitter",
+      attr: {
+        role: "separator",
+        "aria-label": "调整 Markdown 与参考栏宽度",
+        "aria-orientation": "vertical",
+        tabindex: "0"
+      }
+    });
+    splitter.createDiv({ cls: "agent-dashboard-mineru-splitter-grip" });
+    const updateRatio = (clientX) => {
+      const workspace = this.workspaceEl;
+      if (!workspace) return;
+      const rect = workspace.getBoundingClientRect();
+      if (!rect.width) return;
+      this.readerState.splitRatio = Math.max(0.42, Math.min(0.78, (clientX - rect.left) / rect.width));
+      workspace.style.setProperty(
+        "--agent-dashboard-mineru-markdown-width",
+        `${this.readerState.splitRatio * 100}%`
+      );
+    };
+    let move = null;
+    let up = null;
+    const stop = () => {
+      if (move) document.removeEventListener("pointermove", move);
+      if (up) document.removeEventListener("pointerup", up);
+      move = null;
+      up = null;
+      splitter.removeClass("is-dragging");
+      document.body.removeClass("agent-dashboard-mineru-resizing");
+      this.requestStateSave();
+      this.onResize();
+    };
+    this.onWorkspaceEvent(splitter, "pointerdown", (event) => {
+      event.preventDefault();
+      splitter.setPointerCapture?.(event.pointerId);
+      splitter.addClass("is-dragging");
+      document.body.addClass("agent-dashboard-mineru-resizing");
+      move = (pointerEvent) => updateRatio(pointerEvent.clientX);
+      up = stop;
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up, { once: true });
+    });
+    this.onWorkspaceEvent(splitter, "keydown", (event) => {
+      if (!this.workspaceEl || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      this.readerState.splitRatio = Math.max(
+        0.42,
+        Math.min(0.78, this.readerState.splitRatio + (event.key === "ArrowLeft" ? -0.02 : 0.02))
+      );
+      this.workspaceEl.style.setProperty(
+        "--agent-dashboard-mineru-markdown-width",
+        `${this.readerState.splitRatio * 100}%`
+      );
+      this.requestStateSave();
+      this.onResize();
+    });
+    this.workspaceAbortController?.signal.addEventListener("abort", stop, { once: true });
+  }
+  async renderReference() {
+    const host = this.referenceHost;
+    const readerPackage = this.readerPackage;
+    if (!host || !readerPackage) return;
+    this.referenceAbortController?.abort();
+    this.referenceAbortController = new AbortController();
+    this.pdfRenderer.cancelPageRender();
+    this.pdfRenderer.cancelCropRender();
+    const generation = ++this.referenceGeneration;
+    host.empty();
+    const header = host.createDiv({ cls: "agent-dashboard-mineru-reference-header" });
+    const tabs = header.createDiv({ cls: "agent-dashboard-mineru-reference-tabs", attr: { role: "tablist" } });
+    this.renderModeTab(tabs, "pdf", "原始 PDF");
+    this.renderModeTab(tabs, "visuals", "图片与图注");
+    const body = host.createDiv({ cls: "agent-dashboard-mineru-reference-body" });
+    try {
+      if (this.readerState.mode === "pdf") {
+        await this.renderPdfReference(body, generation);
+      } else {
+        await this.renderVisualReference(body, generation);
+      }
+    } catch (error) {
+      if (generation !== this.referenceGeneration) return;
+      body.empty();
+      const state = body.createDiv({ cls: "agent-dashboard-mineru-reference-empty is-error" });
+      (0, import_obsidian10.setIcon)(state.createDiv(), "circle-alert");
+      state.createEl("strong", { text: "参考视图渲染失败" });
+      state.createEl("p", { text: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  renderModeTab(parent, mode, label) {
+    const active = this.readerState.mode === mode;
+    const button = parent.createEl("button", {
+      cls: active ? "agent-dashboard-mineru-reference-tab is-active" : "agent-dashboard-mineru-reference-tab",
+      text: label,
+      attr: { role: "tab", "aria-selected": active ? "true" : "false" }
+    });
+    button.type = "button";
+    this.onReferenceEvent(button, "click", () => {
+      if (this.readerState.mode === mode) return;
+      this.readerState.mode = mode;
+      void this.renderReference();
+      this.requestStateSave();
+    });
+  }
+  async renderPdfReference(parent, generation) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    if (!readerPackage.pdfPath || !this.pdfRenderer.numPages) {
+      const state = parent.createDiv({ cls: "agent-dashboard-mineru-reference-empty" });
+      (0, import_obsidian10.setIcon)(state.createDiv(), "file-warning");
+      state.createEl("strong", { text: "文献包未附带原始 PDF" });
+      state.createEl("p", {
+        text: readerPackage.externalPdfRecorded ? "清单记录了外部 PDF，但阅读器不会自动读取 Vault 外的绝对路径。重新入库时勾选“在原文包中附带 PDF”即可启用版面框与整图重建。" : "重新入库时勾选“在原文包中附带 PDF”，即可启用版面框与整图重建。"
+      });
+      return;
+    }
+    const toolbar = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-toolbar" });
+    const previous = iconButton(toolbar, "chevron-left", "上一页");
+    previous.disabled = this.readerState.pdfPage <= 1;
+    this.onReferenceEvent(previous, "click", () => void this.changePdfPage(-1));
+    const pageInput = toolbar.createEl("input", {
+      cls: "agent-dashboard-mineru-page-input",
+      attr: {
+        type: "number",
+        min: "1",
+        max: String(this.pdfRenderer.numPages),
+        value: String(this.readerState.pdfPage),
+        "aria-label": "PDF 页码"
+      }
+    });
+    pageInput.value = String(this.readerState.pdfPage);
+    this.onReferenceEvent(pageInput, "change", () => {
+      const page = Math.floor(boundedNumber(
+        pageInput.value,
+        this.readerState.pdfPage,
+        1,
+        this.pdfRenderer.numPages
+      ));
+      this.readerState.pdfPage = page;
+      void this.renderReference();
+      this.requestStateSave();
+    });
+    toolbar.createSpan({ cls: "agent-dashboard-mineru-page-count", text: `/ ${this.pdfRenderer.numPages}` });
+    const next = iconButton(toolbar, "chevron-right", "下一页");
+    next.disabled = this.readerState.pdfPage >= this.pdfRenderer.numPages;
+    this.onReferenceEvent(next, "click", () => void this.changePdfPage(1));
+    toolbar.createDiv({ cls: "agent-dashboard-mineru-toolbar-divider" });
+    const zoomOut = iconButton(toolbar, "minus", "缩小 PDF");
+    this.onReferenceEvent(zoomOut, "click", () => void this.changePdfZoom(1 / 1.15));
+    toolbar.createSpan({
+      cls: "agent-dashboard-mineru-zoom-value",
+      text: `${Math.round(this.readerState.pdfZoom * 100)}%`
+    });
+    const zoomIn = iconButton(toolbar, "plus", "放大 PDF");
+    this.onReferenceEvent(zoomIn, "click", () => void this.changePdfZoom(1.15));
+    const fit = toolbar.createEl("button", { cls: "agent-dashboard-mineru-toolbar-button", text: "适合宽度" });
+    fit.type = "button";
+    this.onReferenceEvent(fit, "click", () => {
+      this.readerState.pdfZoom = 1;
+      void this.renderReference();
+      this.requestStateSave();
+    });
+    const layout = toolbar.createEl("button", {
+      cls: this.readerState.showLayoutBoxes ? "agent-dashboard-mineru-toolbar-button is-active" : "agent-dashboard-mineru-toolbar-button",
+      attr: { "aria-pressed": this.readerState.showLayoutBoxes ? "true" : "false" }
+    });
+    layout.type = "button";
+    (0, import_obsidian10.setIcon)(layout.createSpan(), "panels-top-left");
+    layout.createSpan({ text: "版面框" });
+    this.onReferenceEvent(layout, "click", () => {
+      this.readerState.showLayoutBoxes = !this.readerState.showLayoutBoxes;
+      void this.renderReference();
+      this.requestStateSave();
+    });
+    const scroll = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-scroll" });
+    const pageWrapper = scroll.createDiv({ cls: "agent-dashboard-mineru-pdf-page" });
+    const canvas = pageWrapper.createEl("canvas", { attr: { "aria-label": `PDF 第 ${this.readerState.pdfPage} 页` } });
+    const availableWidth = Math.max(260, scroll.clientWidth - 34);
+    const size = await this.pdfRenderer.renderPage(
+      this.readerState.pdfPage,
+      canvas,
+      availableWidth,
+      this.readerState.pdfZoom
+    );
+    if (generation !== this.referenceGeneration) return;
+    pageWrapper.style.width = `${Math.floor(size.width)}px`;
+    pageWrapper.style.height = `${Math.floor(size.height)}px`;
+    if (this.readerState.showLayoutBoxes) this.renderPdfOverlays(pageWrapper);
+    this.renderReferenceStatus(parent);
+  }
+  renderPdfOverlays(parent) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    const pageIdx = this.readerState.pdfPage - 1;
+    const blocks = readerPackage.viewerIndex.pages.find((page) => page.page_idx === pageIdx)?.blocks || [];
+    const overlay = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-overlay" });
+    for (const block of blocks) {
+      if (!block.bbox_norm || block.role === "discarded") continue;
+      const visual = this.visualForBlock(block.id);
+      const boxOptions = {
+        cls: [
+          "agent-dashboard-mineru-layout-box",
+          `is-${block.role}`,
+          visual?.id === this.readerState.currentVisualId ? "is-current" : ""
+        ].filter(Boolean).join(" "),
+        attr: {
+          "aria-label": visual ? `定位 ${visual.label}` : `${block.source_type} 版面块`,
+          title: visual ? `定位 ${visual.label}` : block.source_type
+        }
+      };
+      const box = visual ? overlay.createEl("button", boxOptions) : overlay.createDiv(boxOptions);
+      if (box instanceof HTMLButtonElement) box.type = "button";
+      const percent = bboxToPercent(block.bbox_norm);
+      box.style.left = `${percent.left}%`;
+      box.style.top = `${percent.top}%`;
+      box.style.width = `${percent.width}%`;
+      box.style.height = `${percent.height}%`;
+      if (visual) this.onReferenceEvent(box, "click", () => void this.selectVisual(visual.id, true));
+    }
+  }
+  async renderVisualReference(parent, generation) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    if (!readerPackage.visuals.length) {
+      const state = parent.createDiv({ cls: "agent-dashboard-mineru-reference-empty" });
+      (0, import_obsidian10.setIcon)(state.createDiv(), "image-off");
+      state.createEl("strong", { text: "没有可显示的图片或表格" });
+      state.createEl("p", { text: "正文仍可正常阅读；当前 MinerU JSON 没有可解析的视觉资源。" });
+      return;
+    }
+    const visual = this.currentVisual() || readerPackage.visuals[0];
+    const index = readerPackage.visuals.indexOf(visual);
+    const toolbar = parent.createDiv({ cls: "agent-dashboard-mineru-visual-toolbar" });
+    const title = toolbar.createDiv();
+    title.createEl("strong", { text: visual.label });
+    const pageLabel = visual.captionPageIdx !== void 0 && visual.captionPageIdx !== visual.pageIdx ? `图第 ${visual.pageIdx + 1} 页 · 图注第 ${visual.captionPageIdx + 1} 页` : `第 ${visual.pageIdx + 1} 页`;
+    title.createSpan({ text: `${pageLabel} · ${index + 1} / ${readerPackage.visuals.length}` });
+    const controls = toolbar.createDiv({ cls: "agent-dashboard-mineru-visual-nav" });
+    const previous = iconButton(controls, "chevron-left", "上一幅图片");
+    previous.disabled = index <= 0;
+    this.onReferenceEvent(previous, "click", () => void this.selectVisualAt(index - 1));
+    const next = iconButton(controls, "chevron-right", "下一幅图片");
+    next.disabled = index >= readerPackage.visuals.length - 1;
+    this.onReferenceEvent(next, "click", () => void this.selectVisualAt(index + 1));
+    const scroll = parent.createDiv({ cls: "agent-dashboard-mineru-visual-scroll" });
+    const stage = scroll.createDiv({ cls: "agent-dashboard-mineru-visual-stage" });
+    await this.renderVisualAsset(stage, visual, generation);
+    if (generation !== this.referenceGeneration) return;
+    if (visual.caption) {
+      const caption = scroll.createEl("p", { cls: "agent-dashboard-mineru-visual-caption" });
+      caption.createEl("strong", { text: `${visual.label}. ` });
+      caption.appendText(visual.caption.replace(/^\s*(?:Extended Data Fig(?:ure)?\.?|Supplementary Fig(?:ure)?\.?|Fig(?:ure)?\.?|Table|图|表)\s*[A-Za-z0-9.-]+\s*[|｜.:：-]?\s*/i, ""));
+    }
+    if (visual.captionStatus === "partial") {
+      const note = scroll.createDiv({ cls: "agent-dashboard-mineru-caption-note is-partial" });
+      (0, import_obsidian10.setIcon)(note.createSpan(), "info");
+      note.createSpan({ text: "已匹配下一页图注；MinerU 未提取到全部续栏文字，当前仅显示可验证部分。" });
+    }
+    const actions = scroll.createDiv({ cls: "agent-dashboard-mineru-visual-actions" });
+    const back = actions.createEl("button", { text: "回到正文位置" });
+    back.type = "button";
+    (0, import_obsidian10.setIcon)(back.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "locate-fixed");
+    this.onReferenceEvent(back, "click", () => this.scrollToVisualAnchor(visual.id));
+    if (visual.display.mode === "asset") {
+      const open = actions.createEl("button", { text: "打开原图" });
+      open.type = "button";
+      (0, import_obsidian10.setIcon)(open.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "external-link");
+      this.onReferenceEvent(open, "click", () => void this.openAsset(visual.display.mode === "asset" ? visual.display.assetPath : ""));
+    }
+    this.renderThumbnailRail(scroll, visual.id);
+    this.renderReferenceStatus(parent);
+  }
+  async renderVisualAsset(parent, visual, generation) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    if (visual.display.mode === "asset") {
+      const image = parent.createEl("img", {
+        attr: { alt: visual.label, loading: "eager" }
+      });
+      image.src = this.resourceUrl(visual.display.assetPath);
+      return;
+    }
+    if (visual.display.mode === "pdf-crop" && readerPackage.pdfPath && this.pdfRenderer.numPages) {
+      const canvas = parent.createEl("canvas", { attr: { "aria-label": `${visual.label} 完整图重建` } });
+      await this.pdfRenderer.renderCrop(
+        visual.pageIdx + 1,
+        visual.display.bbox,
+        visual.display.padding,
+        canvas,
+        Math.max(260, parent.clientWidth - 8)
+      );
+      if (generation !== this.referenceGeneration) return;
+      return;
+    }
+    const warning = parent.createDiv({ cls: "agent-dashboard-mineru-fragment-warning" });
+    warning.createSpan({ text: "缺少包内 PDF，暂以 MinerU 原始碎片回退显示。" });
+    const grid = parent.createDiv({ cls: "agent-dashboard-mineru-fragment-grid" });
+    visual.memberAssetPaths.forEach((assetPath) => {
+      const image = grid.createEl("img", { attr: { alt: `${visual.label} 碎片`, loading: "lazy" } });
+      image.src = this.resourceUrl(assetPath);
+    });
+  }
+  renderThumbnailRail(parent, currentVisualId) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage || readerPackage.visuals.length < 2) return;
+    const rail = parent.createDiv({ cls: "agent-dashboard-mineru-thumbnail-rail", attr: { "aria-label": "图片导航" } });
+    readerPackage.visuals.forEach((visual) => {
+      const button = rail.createEl("button", {
+        cls: visual.id === currentVisualId ? "agent-dashboard-mineru-thumbnail is-active" : "agent-dashboard-mineru-thumbnail",
+        attr: {
+          "aria-label": `查看 ${visual.label}`,
+          "aria-pressed": visual.id === currentVisualId ? "true" : "false"
+        }
+      });
+      button.type = "button";
+      const previewPath = visual.display.mode === "asset" ? visual.display.assetPath : visual.memberAssetPaths[0];
+      if (previewPath) {
+        const image = button.createEl("img", { attr: { alt: "", loading: "lazy" } });
+        image.src = this.resourceUrl(previewPath);
+      } else {
+        (0, import_obsidian10.setIcon)(button.createDiv(), "image");
+      }
+      button.createSpan({ text: visual.label });
+      if (visual.repairDecision === "auto") button.createSpan({ cls: "agent-dashboard-mineru-rebuilt-mark", text: "重建" });
+      this.onReferenceEvent(button, "click", () => void this.selectVisual(visual.id, false));
+    });
+  }
+  renderReferenceStatus(parent) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    const status = parent.createDiv({ cls: "agent-dashboard-mineru-reference-status" });
+    const visual = this.currentVisual();
+    if (visual?.captionStatus === "partial" && visual.captionPageIdx !== void 0) {
+      status.addClass("has-warning");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "triangle-alert");
+      status.createSpan({
+        text: `${visual.label}：已关联第 ${visual.captionPageIdx + 1} 页图注，但 MinerU 图注文本不完整`
+      });
+    } else if (visual?.captionPageIdx !== void 0 && visual.captionPageIdx !== visual.pageIdx) {
+      (0, import_obsidian10.setIcon)(status.createSpan(), "link");
+      status.createSpan({ text: `${visual.label}：跨页图注已匹配至第 ${visual.captionPageIdx + 1} 页` });
+    } else if (visual?.repairDecision === "auto" && visual.display.mode === "fragment-set") {
+      status.addClass("has-warning");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "triangle-alert");
+      status.createSpan({
+        text: `${visual.label}：已识别疑似碎图，但缺少包内 PDF，当前保留 MinerU 原始图块`
+      });
+    } else if (visual?.repairDecision === "auto") {
+      (0, import_obsidian10.setIcon)(status.createSpan(), "scan-line");
+      status.createSpan({
+        text: `${visual.label}：完整图已在显示层重建 · 置信度 ${Math.round(visual.confidence * 100)}%`
+      });
+    } else {
+      (0, import_obsidian10.setIcon)(status.createSpan(), "shield-check");
+      status.createSpan({ text: "原始 MinerU 产物保持不变；当前仅调整阅读显示。" });
+    }
+  }
+  observeReadingAnchors(article, scroller) {
+    this.readingObserver?.disconnect();
+    const anchors = [...article.querySelectorAll("[data-visual-id]")];
+    if (!anchors.length || typeof IntersectionObserver !== "function") return;
+    this.readingObserver = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      const visualId = visible?.target?.dataset.visualId;
+      if (!visualId || visualId === this.readerState.markdownAnchor) return;
+      this.readerState.markdownAnchor = visualId;
+      if (this.readerState.followReading) void this.selectVisual(visualId, false);
+      this.requestStateSave();
+    }, {
+      root: scroller,
+      rootMargin: "-18% 0px -52% 0px",
+      threshold: [0, 0.1, 0.5, 1]
+    });
+    anchors.forEach((anchor) => this.readingObserver?.observe(anchor));
+  }
+  restoreMarkdownPosition(article) {
+    const anchorId = this.readerState.markdownAnchor || this.readerState.currentVisualId;
+    if (!anchorId) return;
+    const anchor = article.querySelector(`[data-visual-id="${CSS.escape(anchorId)}"]`);
+    anchor?.scrollIntoView({ block: "center" });
+  }
+  currentVisual() {
+    return this.readerPackage?.visuals.find((visual) => visual.id === this.readerState.currentVisualId) || null;
+  }
+  visualForBlock(blockId) {
+    return this.readerPackage?.visuals.find((visual) => visual.memberBlockIds.includes(blockId)) || null;
+  }
+  async selectVisual(visualId, scrollMarkdown) {
+    const visual = this.readerPackage?.visuals.find((candidate) => candidate.id === visualId);
+    if (!visual) return;
+    this.readerState.currentVisualId = visual.id;
+    if (scrollMarkdown) this.scrollToVisualAnchor(visual.id);
+    if (this.readerState.followReading && this.readerState.mode === "pdf") {
+      this.readerState.pdfPage = visual.pageIdx + 1;
+    }
+    await this.renderReference();
+    this.requestStateSave();
+  }
+  async selectVisualAt(index) {
+    const visual = this.readerPackage?.visuals[index];
+    if (visual) await this.selectVisual(visual.id, false);
+  }
+  scrollToVisualAnchor(visualId) {
+    const anchor = this.markdownScroller?.querySelector(
+      `[data-visual-id="${CSS.escape(visualId)}"]`
+    );
+    anchor?.scrollIntoView({ behavior: "smooth", block: "center" });
+    this.readerState.markdownAnchor = visualId;
+    this.requestStateSave();
+  }
+  async syncReferenceToCurrentVisual() {
+    const visual = this.currentVisual();
+    if (visual && this.readerState.mode === "pdf") this.readerState.pdfPage = visual.pageIdx + 1;
+    await this.renderReference();
+  }
+  async changePdfPage(delta) {
+    this.readerState.pdfPage = Math.max(
+      1,
+      Math.min(this.pdfRenderer.numPages, this.readerState.pdfPage + delta)
+    );
+    await this.renderReference();
+    this.requestStateSave();
+  }
+  async changePdfZoom(factor) {
+    this.readerState.pdfZoom = Math.max(0.4, Math.min(4, this.readerState.pdfZoom * factor));
+    await this.renderReference();
+    this.requestStateSave();
+  }
+  async openArticleMarkdown() {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return;
+    const file = this.app.vault.getAbstractFileByPath(readerPackage.articlePath);
+    if (!(file instanceof import_obsidian10.TFile)) return;
+    await this.app.workspace.getLeaf("tab").openFile(file);
+  }
+  async openAsset(assetPath) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage || !assetPath) return;
+    const file = this.app.vault.getAbstractFileByPath(
+      resolvePackageAssetPath(readerPackage.packagePath, assetPath)
+    );
+    if (!(file instanceof import_obsidian10.TFile)) {
+      new import_obsidian10.Notice("未找到原始图片资源");
+      return;
+    }
+    await this.app.workspace.getLeaf("tab").openFile(file);
+  }
+  resourceUrl(assetPath) {
+    const readerPackage = this.readerPackage;
+    if (!readerPackage) return "";
+    const file = this.app.vault.getAbstractFileByPath(
+      resolvePackageAssetPath(readerPackage.packagePath, assetPath)
+    );
+    return file instanceof import_obsidian10.TFile ? this.app.vault.getResourcePath(file) : "";
+  }
+  clearWorkspaceLifecycle() {
+    this.referenceGeneration += 1;
+    this.pdfRenderer.cancelPageRender();
+    this.pdfRenderer.cancelCropRender();
+    this.referenceAbortController?.abort();
+    this.referenceAbortController = null;
+    this.workspaceAbortController?.abort();
+    this.workspaceAbortController = null;
+    this.markdownComponent?.unload();
+    this.markdownComponent = null;
+    this.readingObserver?.disconnect();
+    this.readingObserver = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.markdownScroller = null;
+    this.referenceHost = null;
+    this.workspaceEl = null;
+  }
+  onWorkspaceEvent(element, type, listener) {
+    const signal = this.workspaceAbortController?.signal;
+    if (!signal) return;
+    element.addEventListener(type, listener, { signal });
+  }
+  onReferenceEvent(element, type, listener) {
+    const signal = this.referenceAbortController?.signal;
+    if (!signal) return;
+    element.addEventListener(type, listener, { signal });
+  }
+  requestStateSave() {
+    void this.app.workspace.requestSaveLayout();
+  }
+};
+
 // src/query/normalization.ts
 var import_node_path2 = __toESM(require("node:path"));
-function asRecord5(value) {
+function asRecord7(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeVaultImageAttachment(value) {
-  const source = asRecord5(value);
+  const source = asRecord7(value);
   const attachmentPath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   const extension = import_node_path2.default.posix.extname(attachmentPath).toLowerCase();
   const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
@@ -5560,7 +8689,7 @@ function normalizeQueryVaultSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord5(value);
+    const source = asRecord7(value);
     let sourcePath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^knowledge-base\//i, "").replace(/^\/+/, "");
     if (!sourcePath || seen.has(sourcePath.toLowerCase())) continue;
     seen.add(sourcePath.toLowerCase());
@@ -5577,7 +8706,7 @@ function normalizeQueryWebSources(values) {
   const seen = /* @__PURE__ */ new Set();
   const normalized = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const source = asRecord5(value);
+    const source = asRecord7(value);
     let parsed;
     try {
       parsed = new URL(String(source.url || "").trim());
@@ -5622,7 +8751,7 @@ function extractModelProvidedWebSources(text) {
   return normalizeQueryWebSources(matches);
 }
 function normalizeQueryRetrievalPath(value) {
-  const source = asRecord5(value);
+  const source = asRecord7(value);
   return {
     stage: String(source.stage || "").slice(0, 200),
     inspectedVaultPaths: (Array.isArray(source.inspected_vault_paths) ? source.inspected_vault_paths : Array.isArray(source.inspectedVaultPaths) ? source.inspectedVaultPaths : []).map((item) => String(item || "").trim().replace(/\\/g, "/").slice(0, 1e3)).filter(Boolean).slice(0, 30),
@@ -5631,7 +8760,7 @@ function normalizeQueryRetrievalPath(value) {
   };
 }
 function normalizeQueryCitationValidation(value) {
-  const source = asRecord5(value);
+  const source = asRecord7(value);
   const allowedStatuses = /* @__PURE__ */ new Set([
     "verified",
     "structured",
@@ -5681,9 +8810,9 @@ function normalizeQueryCitationValidation(value) {
 }
 
 // src/modals/vault-image-picker.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 var path5 = __toESM(require("node:path"));
-var VaultImagePickerModal = class extends import_obsidian8.Modal {
+var VaultImagePickerModal = class extends import_obsidian11.Modal {
   constructor(app, plugin, onChoose, selectedImages = []) {
     super(app);
     this.plugin = plugin;
@@ -5780,7 +8909,7 @@ var VaultImagePickerModal = class extends import_obsidian8.Modal {
           cls: "query-wiki-image-picker-reference-row"
         });
         const icon = row.createSpan({ cls: "query-wiki-image-picker-reference-icon" });
-        (0, import_obsidian8.setIcon)(icon, "file-text");
+        (0, import_obsidian11.setIcon)(icon, "file-text");
         const note = row.createDiv({ cls: "query-wiki-image-picker-reference-note" });
         note.createEl("strong", { text: reference.title });
         note.createEl("span", { text: reference.path });
@@ -5839,7 +8968,7 @@ var VaultImagePickerModal = class extends import_obsidian8.Modal {
         const reference = text.createDiv({ cls: "query-wiki-image-picker-item-reference" });
         if (references.length) {
           const referenceIcon = reference.createSpan();
-          (0, import_obsidian8.setIcon)(referenceIcon, "file-text");
+          (0, import_obsidian11.setIcon)(referenceIcon, "file-text");
           reference.createEl("span", {
             text: references.length === 1 ? `引用：${references[0].title}` : `被 ${references.length} 篇笔记引用：${references[0].title} 等`
           });
@@ -5872,8 +9001,8 @@ var VaultImagePickerModal = class extends import_obsidian8.Modal {
 };
 
 // src/views/query-wiki.ts
-var import_obsidian9 = require("obsidian");
-var QueryWikiView = class extends import_obsidian9.ItemView {
+var import_obsidian12 = require("obsidian");
+var QueryWikiView = class extends import_obsidian12.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -6141,7 +9270,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
   renderEmptyState(parent) {
     const empty = parent.createDiv({ cls: "query-wiki-empty" });
     const icon = empty.createDiv({ cls: "query-wiki-empty-icon" });
-    (0, import_obsidian9.setIcon)(icon, "search");
+    (0, import_obsidian12.setIcon)(icon, "search");
     empty.createEl("h2", { text: "从当前知识库开始查询" });
     empty.createEl("p", {
       text: "当前会话暂无查询记录。"
@@ -6155,7 +9284,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const heading = article.createDiv({ cls: "query-wiki-message-heading" });
     const identity = heading.createDiv({ cls: "query-wiki-message-identity" });
     const icon = identity.createSpan({ cls: "query-wiki-message-icon" });
-    (0, import_obsidian9.setIcon)(icon, message.role === "user" ? "user" : "library-big");
+    (0, import_obsidian12.setIcon)(icon, message.role === "user" ? "user" : "library-big");
     identity.createSpan({ text: message.role === "user" ? "你" : "检索助手" });
     if (message.role === "assistant" && message.retrievalMode) {
       identity.createSpan({
@@ -6195,19 +9324,19 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
           "aria-label": "复制本条内容"
         }
       });
-      (0, import_obsidian9.setIcon)(copyButton, "copy");
+      (0, import_obsidian12.setIcon)(copyButton, "copy");
       copyButton.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(String(message.content || ""));
-          (0, import_obsidian9.setIcon)(copyButton, "check");
+          (0, import_obsidian12.setIcon)(copyButton, "check");
           copyButton.title = "已复制";
           window.setTimeout(() => {
             if (!copyButton.isConnected) return;
-            (0, import_obsidian9.setIcon)(copyButton, "copy");
+            (0, import_obsidian12.setIcon)(copyButton, "copy");
             copyButton.title = "复制本条内容";
           }, 1400);
         } catch (error) {
-          new import_obsidian9.Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
+          new import_obsidian12.Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
         }
       });
     }
@@ -6236,7 +9365,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       });
     } else if (message.content) {
       const markdown = body.createDiv({ cls: "query-wiki-markdown markdown-rendered" });
-      await import_obsidian9.MarkdownRenderer.render(this.app, message.content, markdown, "", this);
+      await import_obsidian12.MarkdownRenderer.render(this.app, message.content, markdown, "", this);
     }
     if (message.vaultSources && message.vaultSources.length || message.webSources && message.webSources.length || message.citationValidation?.warnings?.length) {
       this.renderSourcePanel(article, message);
@@ -6252,7 +9381,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     for (const image of images) {
       const file = this.app.vault.getAbstractFileByPath(image.path);
       const figure = gallery.createEl("figure", { cls: "query-wiki-message-image" });
-      if (file instanceof import_obsidian9.TFile) {
+      if (file instanceof import_obsidian12.TFile) {
         figure.createEl("img", {
           attr: {
             src: this.app.vault.getResourcePath(file),
@@ -6272,7 +9401,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     const details = parent.createEl("details", { cls: "query-wiki-trace" });
     const summary = details.createEl("summary");
     const summaryIcon = summary.createSpan({ cls: "query-wiki-trace-icon" });
-    (0, import_obsidian9.setIcon)(summaryIcon, "git-fork");
+    (0, import_obsidian12.setIcon)(summaryIcon, "git-fork");
     summary.createSpan({
       text: fallback.used ? `本轮检索 · ${trace.retrieval_label || "索引回退"}` : `本轮检索 · ${trace.retrieval_label || "图扩展"} · ${seeds.length} 个种子 / ${graph.length} 个关联页`
     });
@@ -6348,7 +9477,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     details.open = webSources.length > 0;
     const summary = details.createEl("summary");
     const summaryIcon = summary.createSpan({ cls: "query-wiki-sources-icon" });
-    (0, import_obsidian9.setIcon)(summaryIcon, webSources.length ? "globe-2" : "library-big");
+    (0, import_obsidian12.setIcon)(summaryIcon, webSources.length ? "globe-2" : "library-big");
     const summaryParts = [];
     if (vaultSources.length) summaryParts.push(`${vaultSources.length} 个知识库页面`);
     if (webSources.length) summaryParts.push(`${webSources.length} 个联网来源`);
@@ -6380,7 +9509,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
           attr: { type: "button", title: source.path }
         });
         const icon = button.createSpan({ cls: "query-wiki-source-icon" });
-        (0, import_obsidian9.setIcon)(icon, "file-text");
+        (0, import_obsidian12.setIcon)(icon, "file-text");
         const text = button.createSpan({ cls: "query-wiki-source-text" });
         text.createEl("strong", { text: source.title || source.path });
         text.createEl("span", { text: source.path });
@@ -6439,7 +9568,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     if (validation.warnings.length) {
       const warning = content.createDiv({ cls: "query-wiki-source-warnings" });
       const icon = warning.createSpan({ cls: "query-wiki-source-warning-icon" });
-      (0, import_obsidian9.setIcon)(icon, "triangle-alert");
+      (0, import_obsidian12.setIcon)(icon, "triangle-alert");
       const list = warning.createEl("ul");
       validation.warnings.forEach((item) => list.createEl("li", { text: item }));
     }
@@ -6486,7 +9615,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       this.pendingImages.forEach((image, index) => {
         const preview = previews.createDiv({ cls: "query-wiki-pending-image" });
         const file = this.app.vault.getAbstractFileByPath(image.path);
-        if (file instanceof import_obsidian9.TFile) {
+        if (file instanceof import_obsidian12.TFile) {
           preview.createEl("img", {
             attr: {
               src: this.app.vault.getResourcePath(file),
@@ -6547,7 +9676,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       cls: "query-wiki-send mod-cta",
       attr: { type: "button", "aria-label": "发送问题" }
     });
-    (0, import_obsidian9.setIcon)(send, "arrow-up");
+    (0, import_obsidian12.setIcon)(send, "arrow-up");
     send.createSpan({ text: "发送" });
     send.disabled = Boolean(this.activeRunId) || !input.value.trim();
     const submit = () => {
@@ -6591,7 +9720,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         }
       });
       const icon = button.createSpan({ cls: "query-wiki-mode-icon" });
-      (0, import_obsidian9.setIcon)(icon, iconName);
+      (0, import_obsidian12.setIcon)(icon, iconName);
       button.createSpan({ text: label });
       button.disabled = Boolean(this.activeRunId);
       button.addEventListener("click", async () => {
@@ -6601,7 +9730,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
         if (value === "web" && !isCliBackendId(activeBackendId)) {
           if (this.pendingImages.length) this.pendingImages = [];
           await this.plugin.setActiveQueryBackend("codex-cli");
-          new import_obsidian9.Notice(
+          new import_obsidian12.Notice(
             "Direct API 仅用于知识库内检索；联网搜索已切换到 Codex CLI"
           );
         }
@@ -6658,7 +9787,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     details.open = true;
     const summary = details.createEl("summary");
     const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
-    (0, import_obsidian9.setIcon)(icon, "sliders-horizontal");
+    (0, import_obsidian12.setIcon)(icon, "sliders-horizontal");
     const summaryText = summary.createSpan({
       text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : backendId === "claude-code" ? `Agent · Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}` : backendId === "opencode" ? `Agent · OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}` : `Agent · Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
     });
@@ -6872,7 +10001,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       const selectedSupportsImages = backend.value === "claude-code" || profileSupportsQueryImage(selectedProfile);
       if (this.pendingImages.length && !selectedSupportsImages) {
         this.pendingImages = [];
-        new import_obsidian9.Notice("所选后端未启用视觉输入，已移除待发送图片");
+        new import_obsidian12.Notice("所选后端未启用视觉输入，已移除待发送图片");
       }
       await this.plugin.setActiveQueryBackend(backend.value);
       await this.render();
@@ -6916,27 +10045,27 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       cls: "query-wiki-icon-button",
       attr: { type: "button", title: label, "aria-label": label }
     });
-    (0, import_obsidian9.setIcon)(button, icon);
+    (0, import_obsidian12.setIcon)(button, icon);
     return button;
   }
   async submitQuestion(question) {
     if (!question || this.activeRunId || this.plugin.isActionRunning("vault-retrieval")) return;
     const action = ACTION_BY_ID.get("vault-retrieval");
     if (!action) {
-      new import_obsidian9.Notice("知识库检索操作未注册");
+      new import_obsidian12.Notice("知识库检索操作未注册");
       return;
     }
     const session = this.session;
     const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
     const directProfile = isCliBackendId(backendId) ? null : this.plugin.getProviderProfile(backendId);
     if (!isCliBackendId(backendId) && !directProfile) {
-      new import_obsidian9.Notice("所选 Direct API 配置不可用，请重新选择执行后端");
+      new import_obsidian12.Notice("所选 Direct API 配置不可用，请重新选择执行后端");
       return;
     }
     const selectedImages = normalizeVaultImageAttachments(this.pendingImages);
     const backendSupportsImages = backendId === "claude-code" || profileSupportsQueryImage(directProfile);
     if (selectedImages.length && !backendSupportsImages) {
-      new import_obsidian9.Notice("当前执行后端未启用视觉输入，无法发送图片");
+      new import_obsidian12.Notice("当前执行后端未启用视觉输入，无法发送图片");
       return;
     }
     let linkedImageResult = {
@@ -6949,7 +10078,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
       try {
         linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
       } catch (error) {
-        new import_obsidian9.Notice(
+        new import_obsidian12.Notice(
           `未能解析链接笔记中的图片，将继续使用手动附件：${error instanceof Error ? error.message : String(error)}`,
           8e3
         );
@@ -6961,7 +10090,7 @@ var QueryWikiView = class extends import_obsidian9.ItemView {
     ]);
     if (linkedImageResult.discoveredCount > 0) {
       const addedCount = attachments.filter((attachment) => attachment.sourceNotePath).length;
-      new import_obsidian9.Notice(
+      new import_obsidian12.Notice(
         linkedImageResult.discoveredCount > addedCount ? `从链接笔记发现 ${linkedImageResult.discoveredCount} 张图片，本轮按限制附加 ${addedCount} 张` : `已从链接笔记附加 ${addedCount} 张图片`
       );
     }
@@ -7094,7 +10223,7 @@ ${result.stderr.trim()}` : ""
         output,
         error
       });
-      new import_obsidian9.Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
+      new import_obsidian12.Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const interrupted = this.stopRequested || /cancelled|canceled|已停止|正在停止/i.test(message);
@@ -7111,7 +10240,7 @@ ${result.stderr.trim()}` : ""
           error: message
         });
       }
-      new import_obsidian9.Notice(interrupted ? "知识库查询已停止" : `知识库查询失败：${message}`);
+      new import_obsidian12.Notice(interrupted ? "知识库查询已停止" : `知识库查询失败：${message}`);
     } finally {
       this.activeRunId = "";
       this.activeMessageId = "";
@@ -7196,7 +10325,7 @@ ${result.stderr.trim()}` : ""
     const message = this.session.messages.find((item) => item.id === this.activeMessageId);
     this.stopRequested = message?.queryBackendId && !isCliBackendId(message.queryBackendId) ? this.plugin.stopDirectVaultQuery(this.activeRunId) : this.plugin.stopVaultAction(this.activeRunId);
     if (!this.stopRequested) {
-      new import_obsidian9.Notice("当前查询进程已经结束");
+      new import_obsidian12.Notice("当前查询进程已经结束");
       return;
     }
     this.updateProgressText("正在停止任务");
@@ -7210,7 +10339,7 @@ ${result.stderr.trim()}` : ""
   openSynthesisHandoff() {
     const action = ACTION_BY_ID.get("synthesis");
     if (!action) {
-      new import_obsidian9.Notice("综合分析操作未注册");
+      new import_obsidian12.Notice("综合分析操作未注册");
       return;
     }
     const session = this.session;
@@ -7237,7 +10366,7 @@ ${message.content}`).join("\n\n");
   }
   async executeSynthesisHandoff(action, input, overrides) {
     if (this.plugin.isActionRunning(action.id)) {
-      new import_obsidian9.Notice("综合分析正在运行");
+      new import_obsidian12.Notice("综合分析正在运行");
       return;
     }
     const backendId = overrides.backend === "claude-code" ? "claude-code" : overrides.backend === "opencode" ? "opencode" : "codex-cli";
@@ -7263,7 +10392,7 @@ ${result.stderr.trim()}` : ""
         output,
         error: status === "failed" ? `进程退出码：${result.exitCode}` : ""
       });
-      new import_obsidian9.Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
+      new import_obsidian12.Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       completedRun = await this.plugin.finishTaskRun(run.id, {
@@ -7272,7 +10401,7 @@ ${result.stderr.trim()}` : ""
         output: "",
         error: message
       });
-      new import_obsidian9.Notice(`整理为笔记失败：${message}`);
+      new import_obsidian12.Notice(`整理为笔记失败：${message}`);
     }
     if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
   }
@@ -7297,14 +10426,14 @@ ${result.stderr.trim()}` : ""
 };
 
 // src/annotations/annotation-popover.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 function displayError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 function sectionLabel(value) {
   return value.trim() || "当前段落";
 }
-var AnnotationPopover = class extends import_obsidian10.Component {
+var AnnotationPopover = class extends import_obsidian13.Component {
   constructor(options) {
     super();
     this.element = null;
@@ -7399,7 +10528,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
       attr: { type: "button" }
     });
     const manualIcon = manual.createSpan({ cls: "agent-annotation-choice-icon" });
-    (0, import_obsidian10.setIcon)(manualIcon, "square-pen");
+    (0, import_obsidian13.setIcon)(manualIcon, "square-pen");
     const manualText = manual.createDiv();
     manualText.createEl("strong", { text: "手动批注" });
     manualText.createSpan({ text: "记录自己的理解、疑问或提醒" });
@@ -7408,7 +10537,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
       attr: { type: "button" }
     });
     const aiIcon = ai.createSpan({ cls: "agent-annotation-choice-icon" });
-    (0, import_obsidian10.setIcon)(aiIcon, "sparkles");
+    (0, import_obsidian13.setIcon)(aiIcon, "sparkles");
     const aiText = ai.createDiv();
     aiText.createEl("strong", { text: "AI 解释" });
     aiText.createSpan({ text: "结合当前段落和文章语境生成初步解释" });
@@ -7441,7 +10570,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
     const submit = async () => {
       const manualText = textarea.value.trim();
       if (!manualText) {
-        new import_obsidian10.Notice("请输入批注内容");
+        new import_obsidian13.Notice("请输入批注内容");
         textarea.focus();
         return;
       }
@@ -7620,10 +10749,10 @@ var AnnotationPopover = class extends import_obsidian10.Component {
           aiProvider: this.record?.aiProvider,
           aiModel: this.record?.aiModel
         });
-        new import_obsidian10.Notice("批注已保存");
+        new import_obsidian13.Notice("批注已保存");
         this.renderExisting();
       } catch (error) {
-        new import_obsidian10.Notice(`保存失败：${displayError(error)}`);
+        new import_obsidian13.Notice(`保存失败：${displayError(error)}`);
         save.disabled = false;
       }
     };
@@ -7658,7 +10787,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
       button.setText("已生成");
     } catch (error) {
       this.cancelGeneration = null;
-      new import_obsidian10.Notice(`重新解释失败：${displayError(error)}`);
+      new import_obsidian13.Notice(`重新解释失败：${displayError(error)}`);
       button.setText("重新解释");
     } finally {
       button.disabled = false;
@@ -7670,11 +10799,11 @@ var AnnotationPopover = class extends import_obsidian10.Component {
     try {
       const record = await this.service.createAnnotation(this.selection, draft);
       this.record = record;
-      new import_obsidian10.Notice("批注已保留");
+      new import_obsidian13.Notice("批注已保留");
       if (closeAfterSave) this.close();
       return record;
     } catch (error) {
-      new import_obsidian10.Notice(`保存批注失败：${displayError(error)}`);
+      new import_obsidian13.Notice(`保存批注失败：${displayError(error)}`);
       button.disabled = false;
       return null;
     }
@@ -7712,7 +10841,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
         "aria-label": "关闭"
       }
     });
-    (0, import_obsidian10.setIcon)(close, "x");
+    (0, import_obsidian13.setIcon)(close, "x");
     close.addEventListener("click", () => this.requestClose());
     header.addEventListener("pointerdown", (event) => this.startDragging(event));
   }
@@ -7730,7 +10859,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
   }
   renderMarkdown(parent, markdown) {
     const sourcePath = this.record?.sourcePath || this.selection?.sourcePath || "";
-    void import_obsidian10.MarkdownRenderer.render(
+    void import_obsidian13.MarkdownRenderer.render(
       this.app,
       markdown,
       parent,
@@ -7837,7 +10966,7 @@ var AnnotationPopover = class extends import_obsidian10.Component {
 };
 
 // src/annotations/annotation-service.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var ANNOTATION_FOLDER = "wiki/annotations";
 var BLOCK_START = "<!-- agent-dashboard:annotation-start ";
 var BLOCK_END = "<!-- agent-dashboard:annotation-end ";
@@ -8008,7 +11137,7 @@ var AnnotationService = class {
     const sectionElement = element.closest("[data-agent-annotation-source]");
     const sourcePath = String(sectionElement?.dataset.agentAnnotationSource || "");
     const file = this.app.vault.getAbstractFileByPath(sourcePath);
-    if (!(file instanceof import_obsidian11.TFile) || file.extension !== "md") {
+    if (!(file instanceof import_obsidian14.TFile) || file.extension !== "md") {
       throw new Error("无法确定选区对应的 Markdown 文件");
     }
     const content = await this.app.vault.read(file);
@@ -8070,7 +11199,7 @@ var AnnotationService = class {
   }
   async createAnnotation(selection, draft) {
     const sourceFile = this.app.vault.getAbstractFileByPath(selection.sourcePath);
-    if (!(sourceFile instanceof import_obsidian11.TFile)) throw new Error("原始 Markdown 文件不存在");
+    if (!(sourceFile instanceof import_obsidian14.TFile)) throw new Error("原始 Markdown 文件不存在");
     await this.ensureFolder(ANNOTATION_FOLDER);
     const annotationPath = await this.resolveAnnotationPath(sourceFile);
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -8134,11 +11263,11 @@ var AnnotationService = class {
     return updated;
   }
   async loadAnnotation(annotationPath, annotationId) {
-    const normalizedPath = (0, import_obsidian11.normalizePath)(
+    const normalizedPath = (0, import_obsidian14.normalizePath)(
       annotationPath.endsWith(".md") ? annotationPath : `${annotationPath}.md`
     );
     const file = this.app.vault.getAbstractFileByPath(normalizedPath);
-    if (!(file instanceof import_obsidian11.TFile)) return null;
+    if (!(file instanceof import_obsidian14.TFile)) return null;
     const content = await this.app.vault.read(file);
     const block = this.findRecordBlock(content, annotationId);
     if (!block) return null;
@@ -8247,7 +11376,7 @@ ${user}`,
   async getRecordExplanationContext(record) {
     const file = this.app.vault.getAbstractFileByPath(record.sourcePath);
     let context = record.selectedText;
-    if (file instanceof import_obsidian11.TFile) {
+    if (file instanceof import_obsidian14.TFile) {
       const content = await this.app.vault.read(file);
       const offsets = countOccurrences(content, record.selectedText);
       const offset = offsets[0] ?? -1;
@@ -8272,13 +11401,13 @@ ${user}`,
   async openArchiveTarget(record, target) {
     const normalized = normalizeArchiveTarget(target);
     if (!normalized) {
-      new import_obsidian11.Notice("该批注尚未关联正式知识节点");
+      new import_obsidian14.Notice("该批注尚未关联正式知识节点");
       return;
     }
     await this.app.workspace.openLinkText(normalized, record.sourcePath, true);
   }
   async ensureFolder(folderPath) {
-    const parts = (0, import_obsidian11.normalizePath)(folderPath).split("/");
+    const parts = (0, import_obsidian14.normalizePath)(folderPath).split("/");
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
@@ -8289,15 +11418,15 @@ ${user}`,
   }
   async resolveAnnotationPath(sourceFile) {
     const safeBase = sourceFile.basename.replace(/[\\/:*?"<>|#[\]^]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 90) || "note";
-    const candidate = (0, import_obsidian11.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}.md`);
+    const candidate = (0, import_obsidian14.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}.md`);
     const existing = this.app.vault.getAbstractFileByPath(candidate);
-    if (!(existing instanceof import_obsidian11.TFile)) return candidate;
+    if (!(existing instanceof import_obsidian14.TFile)) return candidate;
     const content = await this.app.vault.read(existing);
     if (content.includes(`source: ${yamlString(sourceFile.path.replace(/\.md$/i, ""))}`)) {
       return candidate;
     }
     const suffix = this.hashPath(sourceFile.path);
-    return (0, import_obsidian11.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}-${suffix}.md`);
+    return (0, import_obsidian14.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}-${suffix}.md`);
   }
   createAnnotationId() {
     const random = typeof crypto.randomUUID === "function" ? crypto.randomUUID().split("-").join("").slice(0, 10) : Math.random().toString(36).slice(2, 12);
@@ -8428,7 +11557,7 @@ ${user}`,
   }
   async writeRecord(record) {
     const file = this.app.vault.getAbstractFileByPath(record.annotationPath);
-    if (!(file instanceof import_obsidian11.TFile)) {
+    if (!(file instanceof import_obsidian14.TFile)) {
       await this.app.vault.create(record.annotationPath, this.renderNewDocument(record));
       return;
     }
@@ -9547,17 +12676,17 @@ var DirectQueryService = class {
 };
 
 // src/plugin.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 var fs4 = __toESM(require("node:fs"));
 var path7 = __toESM(require("node:path"));
-function asRecord6(value) {
+function asRecord8(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeQueryMessageStatus(value) {
   const status = String(value || "");
   return status === "pending" || status === "stopping" || status === "done" || status === "failed" || status === "interrupted" ? status : "done";
 }
-var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
+var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -9617,8 +12746,17 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
     this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
     this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
+    this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file?.extension === "md") this.lastContextFile = file;
+    }));
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (!this.isMineruArticleFile(file)) return;
+      menu.addItem((item) => {
+        item.setTitle("在 MinerU 阅读器中打开").setIcon("book-open-text").onClick(() => {
+          void this.activateMineruReaderView(file.path);
+        });
+      });
     }));
     this.registerMarkdownPostProcessor((element, context) => {
       this.annotationService?.decorateMarkdownSection(element, context);
@@ -9658,6 +12796,16 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
       }
     });
     this.addCommand({
+      id: "open-mineru-reader",
+      name: "打开 MinerU 文献阅读器",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile() || this.lastContextFile;
+        if (!this.isMineruArticleFile(file)) return false;
+        if (!checking) void this.activateMineruReaderView(file.path);
+        return true;
+      }
+    });
+    this.addCommand({
       id: "annotate-selected-text",
       name: "批注所选文字",
       hotkeys: [{ modifiers: ["Shift"], key: "S" }],
@@ -9686,7 +12834,7 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
         selection
       });
     } catch (error) {
-      new import_obsidian12.Notice(error instanceof Error ? error.message : String(error));
+      new import_obsidian15.Notice(error instanceof Error ? error.message : String(error));
     }
   }
   openAnnotationPopover(options) {
@@ -9722,19 +12870,19 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
     event.stopPropagation();
     const record = await this.annotationService.loadAnnotation(match[1], match[2]);
     if (!record) {
-      new import_obsidian12.Notice("未找到对应的批注记录");
+      new import_obsidian15.Notice("未找到对应的批注记录");
       return;
     }
     if (event.ctrlKey || event.metaKey) {
       if (!record.archiveTargets.length) {
-        new import_obsidian12.Notice("该批注尚未关联正式知识节点");
+        new import_obsidian15.Notice("该批注尚未关联正式知识节点");
         return;
       }
       if (record.archiveTargets.length === 1) {
         await this.annotationService.openArchiveTarget(record, record.archiveTargets[0]);
         return;
       }
-      const menu = new import_obsidian12.Menu();
+      const menu = new import_obsidian15.Menu();
       record.archiveTargets.forEach((archiveTarget) => {
         menu.addItem((item) => {
           item.setTitle(archiveTarget.split("/").pop() || archiveTarget).setIcon("file-text").onClick(() => {
@@ -9758,7 +12906,7 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
     if (!this.annotationService) return;
     const action = ACTION_BY_ID.get("synthesis");
     if (!action) {
-      new import_obsidian12.Notice("综合分析操作未注册");
+      new import_obsidian15.Notice("综合分析操作未注册");
       return;
     }
     if (this.isActionRunning(action.id)) {
@@ -9766,7 +12914,7 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
         archiveStatus: "failed",
         archiveError: "综合分析正在运行，请稍后重试"
       });
-      new import_obsidian12.Notice("综合分析正在运行，批注已保留但尚未归档");
+      new import_obsidian15.Notice("综合分析正在运行，批注已保留但尚未归档");
       return;
     }
     const executionConfig = this.resolveActionExecutionConfig(action);
@@ -9780,7 +12928,7 @@ var AgentDashboardPlugin = class extends import_obsidian12.Plugin {
       archiveRunId: run.id,
       archiveError: ""
     });
-    new import_obsidian12.Notice("批注已保留，正在交给综合分析归档");
+    new import_obsidian15.Notice("批注已保留，正在交给综合分析归档");
     const request = [
       "处理一条由 Agent Dashboard 批注功能提交的正式知识归档请求。",
       `批注文档：${record.annotationPath}#^${record.id}`,
@@ -9830,7 +12978,7 @@ ${result.stderr.trim()}` : ""
         archiveTargets,
         archiveError: ""
       });
-      new import_obsidian12.Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
+      new import_obsidian15.Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const task = this.getTaskRun(run.id);
@@ -9846,7 +12994,7 @@ ${result.stderr.trim()}` : ""
         archiveStatus: "failed",
         archiveError: message.slice(0, 500)
       });
-      new import_obsidian12.Notice(`批注已保留，但归档失败：${message}`);
+      new import_obsidian15.Notice(`批注已保留，但归档失败：${message}`);
     }
   }
   parseAnnotationArchiveTargets(output) {
@@ -9890,7 +13038,7 @@ ${result.stderr.trim()}` : ""
     return `data:${mime};base64,${fs4.readFileSync(candidate).toString("base64")}`;
   }
   async savePracticeNote(payload) {
-    const folder = (0, import_obsidian12.normalizePath)("wiki/code/practice");
+    const folder = (0, import_obsidian15.normalizePath)("wiki/code/practice");
     await this.ensureVaultFolder(folder);
     const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
     if (!cells.length) throw new Error("没有可保存的练习单元格");
@@ -9899,9 +13047,9 @@ ${result.stderr.trim()}` : ""
     const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
     const fallback = `practice-${date.split("-").join("")}-${lastResult?.run_id.slice(-6) || Date.now()}`;
-    let notePath = (0, import_obsidian12.normalizePath)(`${folder}/${slugBase || fallback}.md`);
+    let notePath = (0, import_obsidian15.normalizePath)(`${folder}/${slugBase || fallback}.md`);
     if (this.app.vault.getAbstractFileByPath(notePath)) {
-      notePath = (0, import_obsidian12.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
+      notePath = (0, import_obsidian15.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
     }
     if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
     const languageLabel = payload.language === "r" ? "R" : "Python";
@@ -9982,7 +13130,7 @@ ${result.stderr.trim()}` : ""
   }
   async ensureVaultFolder(folderPath) {
     let current = "";
-    for (const segment of (0, import_obsidian12.normalizePath)(folderPath).split("/")) {
+    for (const segment of (0, import_obsidian15.normalizePath)(folderPath).split("/")) {
       current = current ? `${current}/${segment}` : segment;
       if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
     }
@@ -10363,10 +13511,10 @@ ${result.stderr.trim()}` : ""
     };
   }
   normalizeQuerySession(session) {
-    const source = asRecord6(session);
+    const source = asRecord8(session);
     const fallback = this.makeQuerySession();
     const messages = Array.isArray(source.messages) ? source.messages.slice(-60).map((value) => {
-      const message = asRecord6(value);
+      const message = asRecord8(value);
       return {
         id: String(message.id || this.createQueryMessageId()),
         role: message.role === "user" ? "user" : "assistant",
@@ -10521,7 +13669,7 @@ ${result.stderr.trim()}` : ""
   }
   inferProjectRoot() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian12.FileSystemAdapter)) return "";
+    if (!(adapter instanceof import_obsidian15.FileSystemAdapter)) return "";
     const vaultRoot = adapter.getBasePath();
     const parent = path7.dirname(vaultRoot);
     if (fs4.existsSync(path7.join(parent, "AGENTS.md"))) return parent;
@@ -10777,21 +13925,21 @@ ${result.stderr.trim()}` : ""
       link = decodeURIComponent(link);
     } catch {
     }
-    link = (0, import_obsidian12.normalizePath)(link.replace(/^knowledge-base\//i, ""));
+    link = (0, import_obsidian15.normalizePath)(link.replace(/^knowledge-base\//i, ""));
     if (!link) return null;
     const metadataCache = this.app?.metadataCache;
     if (typeof metadataCache?.getFirstLinkpathDest === "function") {
       const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
-      if (resolved instanceof import_obsidian12.TFile) return resolved;
+      if (resolved instanceof import_obsidian15.TFile) return resolved;
     }
     const direct = this.app.vault.getAbstractFileByPath(link);
-    if (direct instanceof import_obsidian12.TFile) return direct;
+    if (direct instanceof import_obsidian15.TFile) return direct;
     if (sourcePath) {
-      const relative2 = (0, import_obsidian12.normalizePath)(
+      const relative2 = (0, import_obsidian15.normalizePath)(
         path7.posix.normalize(path7.posix.join(path7.posix.dirname(sourcePath), link))
       );
       const relativeFile = this.app.vault.getAbstractFileByPath(relative2);
-      if (relativeFile instanceof import_obsidian12.TFile) return relativeFile;
+      if (relativeFile instanceof import_obsidian15.TFile) return relativeFile;
     }
     return null;
   }
@@ -10804,7 +13952,7 @@ ${result.stderr.trim()}` : ""
       candidate = decodeURIComponent(candidate);
     } catch {
     }
-    candidate = (0, import_obsidian12.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
+    candidate = (0, import_obsidian15.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
     const attempts = [candidate];
     if (!candidate.toLowerCase().endsWith(".md")) attempts.push(`${candidate}.md`);
     for (const attempt of attempts) {
@@ -10883,7 +14031,7 @@ ${result.stderr.trim()}` : ""
     const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
     let totalBytes = existing.reduce((sum, attachment) => {
       const file = this.app.vault.getAbstractFileByPath(attachment.path);
-      return sum + Number(file instanceof import_obsidian12.TFile ? file.stat.size : attachment.size || 0);
+      return sum + Number(file instanceof import_obsidian15.TFile ? file.stat.size : attachment.size || 0);
     }, 0);
     const attachments = [];
     let discoveredCount = 0;
@@ -10917,7 +14065,7 @@ ${result.stderr.trim()}` : ""
     };
   }
   buildVaultImageReferenceIndex(imageFiles = []) {
-    const normalizeVaultPath = (value) => (0, import_obsidian12.normalizePath)(
+    const normalizeVaultPath = (value) => (0, import_obsidian15.normalizePath)(
       String(value || "").trim().replace(/\\/g, "/").replace(/^\/+/, "")
     );
     const imagePaths = new Set(
@@ -10935,9 +14083,9 @@ ${result.stderr.trim()}` : ""
       const notePath = normalizeVaultPath(notePathValue);
       if (!imagePaths.has(imagePath) || !notePath.toLowerCase().endsWith(".md")) return;
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-      const frontmatter = noteFile instanceof import_obsidian12.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
+      const frontmatter = noteFile instanceof import_obsidian15.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
       const title = String(
-        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian12.TFile ? noteFile.basename : "") || path7.posix.basename(notePath, ".md")
+        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian15.TFile ? noteFile.basename : "") || path7.posix.basename(notePath, ".md")
       ).trim();
       const count = Math.max(1, Number(countValue) || 1);
       const references = referenceMaps.get(imagePath);
@@ -11118,6 +14266,45 @@ ${result.stderr.trim()}` : ""
       leaf.view.setInitialQuestion(initialQuestion);
     }
     await this.app.workspace.revealLeaf(leaf);
+  }
+  isMineruArticleFile(file) {
+    return file instanceof import_obsidian15.TFile && file.extension === "md" && /^papers\/[^/]+\/article\.md$/i.test((0, import_obsidian15.normalizePath)(file.path));
+  }
+  async activateMineruReaderView(articlePath = "") {
+    const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
+    const resolvedPath = (0, import_obsidian15.normalizePath)(
+      articlePath || (this.isMineruArticleFile(contextFile) ? contextFile.path : "")
+    );
+    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+    if (!this.isMineruArticleFile(file)) {
+      new import_obsidian15.Notice("请先选择 papers/<citekey>/article.md");
+      return;
+    }
+    const existing = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE)[0];
+    const leaf = existing || this.app.workspace.getLeaf("tab");
+    if (!existing) {
+      await leaf.setViewState({
+        type: MINERU_READER_VIEW_TYPE,
+        active: true,
+        state: { articlePath: file.path }
+      });
+    } else if (leaf.view instanceof MineruReaderView) {
+      await leaf.view.setArticlePath(file.path);
+    }
+    await this.app.workspace.revealLeaf(leaf);
+  }
+  getMineruArticlePath(run) {
+    if (run.actionId !== "paper-ingest") return "";
+    const normalized = `${run.output}
+${run.summary}`.replace(/\\\\|\\/g, "/");
+    const direct = /(?:^|[\s"'])(?:knowledge-base\/)?(papers\/[A-Za-z0-9._-]+\/article\.md)(?=$|[\s"'}\]])/im.exec(normalized)?.[1];
+    if (direct && this.isMineruArticleFile(this.app.vault.getAbstractFileByPath((0, import_obsidian15.normalizePath)(direct)))) {
+      return (0, import_obsidian15.normalizePath)(direct);
+    }
+    const packageMatch = /(?:^|\/)(?:knowledge-base\/)?papers\/([A-Za-z0-9._-]+)(?=$|[\s"'}\]])/im.exec(normalized);
+    if (!packageMatch) return "";
+    const candidate = (0, import_obsidian15.normalizePath)(`papers/${packageMatch[1]}/article.md`);
+    return this.isMineruArticleFile(this.app.vault.getAbstractFileByPath(candidate)) ? candidate : "";
   }
 };
 ;

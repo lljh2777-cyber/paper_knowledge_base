@@ -1,6 +1,6 @@
 {
   "name": "agent-dashboard",
-  "version": "0.24.0",
+  "version": "0.25.8",
   "private": true,
   "description": "Obsidian Research Vault dashboard plugin",
   "scripts": {

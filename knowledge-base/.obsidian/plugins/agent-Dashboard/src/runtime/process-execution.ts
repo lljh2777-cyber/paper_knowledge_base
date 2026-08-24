@@ -290,7 +290,7 @@ export class ProcessExecutionService {
 					clientInfo: {
 						name: "agent-dashboard",
 						title: "Agent Dashboard",
-						version: "0.24.0",
+						version: "0.25.8",
 					},
 					capabilities: {
 						experimentalApi: false,

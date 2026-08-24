@@ -35,6 +35,7 @@ import { ProcessExecutionService } from "./runtime/process-execution";
 import { AgentDashboardSettingTab } from "./settings/settings-tab";
 import { CodePracticeView } from "./views/code-practice";
 import { DashboardView } from "./views/dashboard";
+import { MineruReaderView } from "./views/mineru-reader";
 import { QueryWikiView } from "./views/query-wiki";
 import { AnnotationPopover } from "./annotations/annotation-popover";
 import { AnnotationService } from "./annotations/annotation-service";
@@ -44,6 +45,7 @@ import {
 	MAX_QUERY_IMAGE_ATTACHMENTS,
 	MAX_QUERY_IMAGE_TOTAL_BYTES,
 	MAX_VAULT_IMAGE_BYTES,
+	MINERU_READER_VIEW_TYPE,
 	MODEL_OPTIONS,
 	QUERY_WIKI_VIEW_TYPE,
 	REASONING_OPTIONS,
@@ -227,8 +229,20 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
 		this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
 		this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
+		this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
 		this.registerEvent(this.app.workspace.on("file-open", (file) => {
 			if (file?.extension === "md") this.lastContextFile = file;
+		}));
+		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+			if (!this.isMineruArticleFile(file)) return;
+			menu.addItem((item) => {
+				item
+					.setTitle("在 MinerU 阅读器中打开")
+					.setIcon("book-open-text")
+					.onClick(() => {
+						void this.activateMineruReaderView(file.path);
+					});
+			});
 		}));
 		this.registerMarkdownPostProcessor((element, context) => {
 			this.annotationService?.decorateMarkdownSection(element, context);
@@ -267,6 +281,16 @@ export default class AgentDashboardPlugin extends Plugin {
 			name: "打开知识库对话",
 			callback: () => {
 				this.activateQueryWikiView();
+			},
+		});
+		this.addCommand({
+			id: "open-mineru-reader",
+			name: "打开 MinerU 文献阅读器",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile() || this.lastContextFile;
+				if (!this.isMineruArticleFile(file)) return false;
+				if (!checking) void this.activateMineruReaderView(file.path);
+				return true;
 			},
 		});
 		this.addCommand({
@@ -2133,5 +2157,48 @@ export default class AgentDashboardPlugin extends Plugin {
 			leaf.view.setInitialQuestion(initialQuestion);
 		}
 		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	isMineruArticleFile(file: unknown): file is TFile {
+		return file instanceof TFile
+			&& file.extension === "md"
+			&& /^papers\/[^/]+\/article\.md$/i.test(normalizePath(file.path));
+	}
+
+	async activateMineruReaderView(articlePath = ""): Promise<void> {
+		const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
+		const resolvedPath = normalizePath(
+			articlePath || (this.isMineruArticleFile(contextFile) ? contextFile.path : ""),
+		);
+		const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+		if (!this.isMineruArticleFile(file)) {
+			new Notice("请先选择 papers/<citekey>/article.md");
+			return;
+		}
+		const existing = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE)[0];
+		const leaf = existing || this.app.workspace.getLeaf("tab");
+		if (!existing) {
+			await leaf.setViewState({
+				type: MINERU_READER_VIEW_TYPE,
+				active: true,
+				state: { articlePath: file.path },
+			});
+		} else if (leaf.view instanceof MineruReaderView) {
+			await leaf.view.setArticlePath(file.path);
+		}
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	getMineruArticlePath(run: TaskRun): string {
+		if (run.actionId !== "paper-ingest") return "";
+		const normalized = `${run.output}\n${run.summary}`.replace(/\\\\|\\/g, "/");
+		const direct = /(?:^|[\s"'])(?:knowledge-base\/)?(papers\/[A-Za-z0-9._-]+\/article\.md)(?=$|[\s"'}\]])/im.exec(normalized)?.[1];
+		if (direct && this.isMineruArticleFile(this.app.vault.getAbstractFileByPath(normalizePath(direct)))) {
+			return normalizePath(direct);
+		}
+		const packageMatch = /(?:^|\/)(?:knowledge-base\/)?papers\/([A-Za-z0-9._-]+)(?=$|[\s"'}\]])/im.exec(normalized);
+		if (!packageMatch) return "";
+		const candidate = normalizePath(`papers/${packageMatch[1]}/article.md`);
+		return this.isMineruArticleFile(this.app.vault.getAbstractFileByPath(candidate)) ? candidate : "";
 	}
 };

@@ -290,8 +290,8 @@ export class ActionInputModal extends Modal {
 			const includeSourcePdf = this.createCheckboxOption(
 				mineruPanel,
 				"在原文包中附带 PDF",
-				"将原 PDF 复制到 _extraction/source.pdf；默认只记录来源路径和 SHA-256。",
-				false,
+				"将原 PDF 复制到 _extraction/source.pdf，用于双栏阅读、版面框定位和完整图重建。",
+				true,
 			);
 			const ocr = this.createCheckboxOption(
 				mineruPanel,

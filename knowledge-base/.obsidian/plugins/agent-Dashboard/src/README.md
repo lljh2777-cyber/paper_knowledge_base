@@ -20,6 +20,8 @@ src/providers/shared.ts      Provider URL, payload, model-list, and error helper
 src/query/direct-query-service.ts
                              Direct API retrieval cascade, prompt, streaming, and result orchestration
 src/query/normalization.ts   Persisted query attachment, source, path, and citation contracts
+src/mineru/                 MinerU package normalization, validated loading, visual-repair contracts,
+                            Markdown anchors, and PDF.js rendering
 src/runtime/settings.ts      Executable discovery and persisted setting defaults
 src/runtime/lifecycle-state.ts
                              Active process, provider, and query-run state
@@ -30,7 +32,7 @@ src/services/dashboard-data.ts
                              Incremental vault scan and Dashboard metric/gap derivation
 src/settings/settings-tab.ts Obsidian settings UI
 src/types/contracts.ts       Shared PluginHost, task, query-session, and provider contracts
-src/views/                   Code practice, conversational query, and Dashboard ItemViews
+src/views/                   Dashboard, query, code-practice, and MinerU dual-pane reader ItemViews
 ```
 
 All source modules, including `src/plugin.ts`, use strict TypeScript. The plugin
@@ -42,6 +44,83 @@ Reading-view annotations are stored as ordinary Markdown under
 `wiki/annotations/`. Source text links to a stable annotation block ID, while
 the plugin intercepts normal, Ctrl/Cmd, and Shift clicks for the popover,
 archived knowledge targets, and the underlying annotation document.
+
+Validated MinerU packages can be opened in a dedicated main-area reader. Its
+left pane renders `article.md`; the right pane switches between the original
+PDF and a figure/caption rail. Reading position, page selection, zoom, layout
+boxes, and figure anchors synchronize without modifying the generated article.
+When `_extraction/visual-repair.json` identifies a high-confidence fragmented
+figure, the reader displays either the enclosing MinerU asset or a PDF crop;
+the original assets remain the safe fallback. A PDF.js loading failure is also
+isolated to the reference pane: Markdown and packaged image assets remain
+readable, and the compatibility notice records the degraded mode. The same derived contract can
+link an explicit “see next page” placeholder to a uniquely matching formal
+figure caption at the top of the immediately following page. Formal anchors
+support `Fig.`/`Figure`, `Extended Data`, `Supplementary`, and `Supporting`
+prefixes, integer or decimal identifiers, and either an explicit separator or
+direct title text. A candidate whose title begins with a descriptive reference
+verb such as `shows`, `illustrates`, or `provides`, or whose title is too short,
+is treated as body prose. Matching stops at ordinary prose, titles, visuals, or
+a different figure key. Incomplete MinerU
+caption extraction is surfaced as partial instead of being reconstructed from
+unrelated body prose. A short top-of-page title is ignored as a running header
+only when another page contains an explicit `header`/`page_header` twin with
+identical text and near-identical coordinates; this lets old validated packages
+recover a missing cross-page link without treating ordinary headings as noise.
+The rendered Markdown hides such a reclassified header only when exactly one
+matching standalone ATX heading is bounded by two source-ordered visual anchors.
+Each anchor must resolve to a Markdown image occurrence or a unique standalone
+HTML table range; duplicates or missing bounds preserve every occurrence.
+
+Caption arrays remain atomic in the derived viewer index. The reader classifies
+formal captions, next-page placeholders, strict panel labels, and candidate
+continuations separately. Display suppression binds every same-page MinerU
+caption atom to its exact Markdown image occurrence and removes the complete
+ordered run only when one unique split matches standalone lines immediately
+before and/or after that image, allowing at most two intervening blank lines.
+A uniquely adjacent standalone formal caption such as `Extended Data Fig. 1 |`
+can also bind to a same-page visual. The reader first chooses the nearest formal
+caption after each visual in MinerU reading order, then verifies spatial
+adjacency and unique ownership. Nearby crop components that share that same
+next-caption boundary may be joined even when panel labels are absent; components
+across different caption intervals remain separate. A non-terminal first column is suppressed
+only together with one unique, spatially aligned lowercase/panel continuation
+that closes the caption, so a split caption cannot leave an orphaned second
+column. When that caption is the sole anchor for a
+panel-labelled, narrowly separated horizontal component, the reader joins the
+validated PDF crops into one full-width figure before rendering. Two components
+with independent captions or equally plausible ownership remain separate. This
+covers a second MinerU failure mode as well: if an auto-reconstructed crop contains
+at least 97% of a smaller auto crop, is at least 1.35 times its area, remains
+adjacent in source order, and both groups expose exactly one compatible formal
+figure key, the smaller p/q/r-style duplicate is folded into the enclosing crop.
+Its members, Markdown occurrences, and caption anchors move to the enclosing
+visual so the full figure keeps the specific same-page or cross-page caption.
+Partial overlap, missing figure identity, or conflicting keys fail closed. This
+covers panel labels, figure-internal headings, formal
+captions, and split caption continuations without global text replacement. A
+panel-style continuation from the same caption array may follow a formally
+terminated first sentence; an unterminated caption may still use one uniquely
+bounded cross-fragment continuation. Any non-blank gap, reorder, duplicate-side match, or
+body-prose collision fails closed. Cross-page caption text is suppressed only
+through validated, exact Markdown source ranges bounded by monotonically mapped
+image occurrences. A table-shaped figure with no Markdown image occurrence may
+use its unique standalone HTML `<table>` range instead; the table and its
+uniquely adjacent formal caption are replaced atomically after internal images
+have still contributed to occurrence numbering. Duplicate or edited tables,
+captions, or intervening prose preserve the complete Markdown block.
+The full target page must validate, and the caption must
+also bind to either a contiguous target-page block chain or the source image's
+verified placeholder occurrence; a matching string elsewhere in the article
+is never sufficient. The generated `article.md` and MinerU JSON
+remain unchanged.
+
+New intake packages also contain `_extraction/visual-candidates.json`. This
+bounded, hash-bound contract exposes only deterministic `review`, `partial`, or
+`ambiguous` candidates for an optional AI adjudicator. Model output is limited
+to an existing candidate ID plus `accept`, `reject`, or `abstain`; coordinates,
+paths, and source prose are rejected. Candidate generation and validation do
+not call an external model, and AI review remains an explicit opt-in layer.
 
 Build constraints:
 

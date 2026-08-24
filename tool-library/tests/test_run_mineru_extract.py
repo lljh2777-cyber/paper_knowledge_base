@@ -23,6 +23,48 @@ SPEC.loader.exec_module(run_mineru_extract)
 
 
 class MineruExtractionTests(unittest.TestCase):
+    def test_find_mineru_json_output_prefers_content_list_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "document_middle.json").write_text("{}", encoding="utf-8")
+            expected = root / "document_content_list_v2.json"
+            expected.write_text("[]", encoding="utf-8")
+
+            self.assertEqual(run_mineru_extract.find_mineru_json_output(root), expected)
+
+    def test_validate_package_accepts_page_nested_v2_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = Path(temp_dir)
+            (package / "images").mkdir()
+            (package / "images" / "figure.jpg").write_bytes(b"image")
+            (package / "article.md").write_text(
+                "# Example\n\n" + "Body text. " * 12 + "\n\n![](images/figure.jpg)\n",
+                encoding="utf-8",
+            )
+            (package / "mineru-result.json").write_text(
+                json.dumps(
+                    [
+                        [
+                            {
+                                "type": "image",
+                                "bbox": [100, 100, 900, 800],
+                                "content": {
+                                    "image_source": {"path": "images/figure.jpg"}
+                                },
+                            }
+                        ]
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            validation = run_mineru_extract.validate_package(package)
+
+            self.assertEqual(validation["status"], "passed")
+            self.assertEqual(validation["page_count"], 1)
+            self.assertEqual(validation["json_element_count"], 1)
+            self.assertEqual(validation["json_asset_count"], 1)
+
     def test_normalize_pages_uses_one_based_ranges(self) -> None:
         self.assertEqual(run_mineru_extract.normalize_pages("1-3, 5"), "1-3,5")
         self.assertEqual(run_mineru_extract.normalize_pages(""), "")
@@ -118,7 +160,45 @@ class MineruExtractionTests(unittest.TestCase):
         self.assertEqual(manifest["extractor"], "mineru-open-api")
         self.assertEqual(manifest["processing_depth"], "conversion-only")
         self.assertTrue(manifest["privacy"]["remote_processing"])
+        self.assertEqual(manifest["derived_contracts"], [])
         self.assertTrue(source_copied)
+
+    def test_build_viewer_contracts_degrades_when_bbox_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = Path(temp_dir)
+            (package / "article.md").write_text(
+                "# Example\n\n" + "Body " * 30 + "\n![](images/figure.jpg)\n",
+                encoding="utf-8",
+            )
+            images = package / "images"
+            images.mkdir()
+            (images / "figure.jpg").write_bytes(b"figure")
+            (package / "mineru-result.json").write_text(
+                json.dumps(
+                    [
+                        {"type": "text", "page_idx": 0, "text": "Example"},
+                        {
+                            "type": "image",
+                            "page_idx": 0,
+                            "img_path": "images/figure.jpg",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            viewer_index, visual_repair, visual_candidates = (
+                run_mineru_extract.build_viewer_contracts(
+                    package,
+                    False,
+                )
+            )
+
+        self.assertEqual(viewer_index["status"], "unavailable")
+        self.assertEqual(visual_repair["status"], "unavailable")
+        self.assertEqual(visual_repair["groups"], [])
+        self.assertEqual(visual_candidates["status"], "empty")
+        self.assertEqual(visual_candidates["candidates"], [])
 
     def test_main_stages_validates_and_publishes_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -192,6 +272,62 @@ class MineruExtractionTests(unittest.TestCase):
             self.assertTrue((package / "mineru-result.json").is_file())
             self.assertTrue((package / "_extraction" / "manifest.json").is_file())
             self.assertTrue((package / "_extraction" / "validation.json").is_file())
+            self.assertTrue((package / "_extraction" / "viewer-index.json").is_file())
+            self.assertTrue((package / "_extraction" / "visual-repair.json").is_file())
+            self.assertTrue((package / "_extraction" / "visual-candidates.json").is_file())
+            manifest = json.loads(
+                (package / "_extraction" / "manifest.json").read_text(encoding="utf-8")
+            )
+            validation = json.loads(
+                (package / "_extraction" / "validation.json").read_text(encoding="utf-8")
+            )
+            viewer_index = json.loads(
+                (package / "_extraction" / "viewer-index.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            visual_repair = json.loads(
+                (package / "_extraction" / "visual-repair.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            visual_candidates = json.loads(
+                (package / "_extraction" / "visual-candidates.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [record["path"] for record in manifest["derived_contracts"]],
+                [
+                    "_extraction/viewer-index.json",
+                    "_extraction/visual-candidates.json",
+                    "_extraction/visual-repair.json",
+                ],
+            )
+            for record in manifest["derived_contracts"]:
+                contract_path = package / record["path"]
+                self.assertEqual(record["size"], contract_path.stat().st_size)
+                self.assertEqual(
+                    record["sha256"], run_mineru_extract.sha256_file(contract_path)
+                )
+            self.assertTrue(validation["checks"]["viewer_index_contract_valid"])
+            self.assertTrue(validation["checks"]["visual_repair_contract_valid"])
+            self.assertTrue(validation["checks"]["visual_candidates_contract_valid"])
+            self.assertEqual(validation["viewer_index_status"], "unavailable")
+            self.assertEqual(validation["visual_candidates_status"], "empty")
+            self.assertEqual(run_mineru_extract.validate_viewer_index(viewer_index), [])
+            self.assertEqual(
+                run_mineru_extract.validate_visual_repair(
+                    visual_repair, viewer_index
+                ),
+                [],
+            )
+            self.assertEqual(
+                run_mineru_extract.validate_visual_candidates(
+                    visual_candidates, viewer_index, visual_repair
+                ),
+                [],
+            )
             with mock.patch.object(sys, "argv", argv):
                 with self.assertRaisesRegex(FileExistsError, "will not be overwritten"):
                     run_mineru_extract.main()

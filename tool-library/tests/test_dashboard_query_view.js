@@ -95,7 +95,13 @@ for (const strictSource of [
 	"settings/settings-tab.ts",
 	"views/code-practice.ts",
 	"views/dashboard.ts",
+	"views/mineru-reader.ts",
 	"views/query-wiki.ts",
+	"mineru/normalization.ts",
+	"mineru/package-loader.ts",
+	"mineru/pdf-renderer.ts",
+	"mineru/reader-markdown.ts",
+	"mineru/types.ts",
 	"types/contracts.ts",
 ]) {
 	assert.ok(fs.existsSync(path.join(pluginSourceRoot, strictSource)));
