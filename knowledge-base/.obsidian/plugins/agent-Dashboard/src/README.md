@@ -47,8 +47,10 @@ archived knowledge targets, and the underlying annotation document.
 
 Validated MinerU packages can be opened in a dedicated main-area reader. Its
 left pane renders `article.md`; the right pane switches between the original
-PDF and a figure/caption rail. Reading position, page selection, zoom, layout
-boxes, and figure anchors synchronize without modifying the generated article.
+PDF and a figure/caption rail. The PDF pane uses a continuous, lazily rendered
+page stream: scrolling updates the retained page-number control, while page
+selection, zoom, layout boxes, and figure anchors remain synchronized without
+modifying the generated article.
 When `_extraction/visual-repair.json` identifies a high-confidence fragmented
 figure, the reader displays either the enclosing MinerU asset or a PDF crop;
 the original assets remain the safe fallback. A PDF.js loading failure is also

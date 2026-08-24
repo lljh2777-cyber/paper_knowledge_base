@@ -44,6 +44,12 @@ function boundedNumber(value: unknown, fallback: number, min: number, max: numbe
 	return Number.isFinite(numeric) ? Math.max(min, Math.min(max, numeric)) : fallback;
 }
 
+function isAbortError(error: unknown): boolean {
+	return error instanceof DOMException
+		? error.name === "AbortError"
+		: /abort|cancel|superseded/i.test(error instanceof Error ? error.message : String(error));
+}
+
 function normalizeState(value: unknown): MineruReaderViewState {
 	const record = value !== null && typeof value === "object"
 		? value as Record<string, unknown>
@@ -499,7 +505,7 @@ export class MineruReaderView extends ItemView {
 				this.pdfRenderer.numPages,
 			));
 			this.readerState.pdfPage = page;
-			void this.renderReference();
+			this.scrollPdfToPage(page, "smooth");
 			this.requestStateSave();
 		});
 		toolbar.createSpan({ cls: "agent-dashboard-mineru-page-count", text: `/ ${this.pdfRenderer.numPages}` });
@@ -537,26 +543,124 @@ export class MineruReaderView extends ItemView {
 			this.requestStateSave();
 		});
 		const scroll = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-scroll" });
-		const pageWrapper = scroll.createDiv({ cls: "agent-dashboard-mineru-pdf-page" });
-		const canvas = pageWrapper.createEl("canvas", { attr: { "aria-label": `PDF 第 ${this.readerState.pdfPage} 页` } });
 		const availableWidth = Math.max(260, scroll.clientWidth - 34);
-		const size = await this.pdfRenderer.renderPage(
-			this.readerState.pdfPage,
-			canvas,
-			availableWidth,
-			this.readerState.pdfZoom,
-		);
-		if (generation !== this.referenceGeneration) return;
-		pageWrapper.style.width = `${Math.floor(size.width)}px`;
-		pageWrapper.style.height = `${Math.floor(size.height)}px`;
-		if (this.readerState.showLayoutBoxes) this.renderPdfOverlays(pageWrapper);
+		const estimatedWidth = Math.floor(availableWidth * this.readerState.pdfZoom);
+		const pageWrappers: HTMLElement[] = [];
+		for (let pageNumber = 1; pageNumber <= this.pdfRenderer.numPages; pageNumber += 1) {
+			const pageWrapper = scroll.createDiv({
+				cls: "agent-dashboard-mineru-pdf-page is-loading",
+				attr: {
+					"data-page-number": String(pageNumber),
+					"aria-label": `PDF 第 ${pageNumber} 页`,
+				},
+			});
+			pageWrapper.dataset.renderState = "idle";
+			pageWrapper.style.width = `${estimatedWidth}px`;
+			pageWrapper.createDiv({
+				cls: "agent-dashboard-mineru-pdf-page-placeholder",
+				text: `正在载入第 ${pageNumber} 页…`,
+			});
+			const canvas = pageWrapper.createEl("canvas", { attr: { "aria-label": `PDF 第 ${pageNumber} 页内容` } });
+			canvas.hidden = true;
+			pageWrappers.push(pageWrapper);
+		}
+
+		let renderQueue = Promise.resolve();
+		const queuePageRender = (pageWrapper: HTMLElement): void => {
+			if (pageWrapper.dataset.renderState !== "idle") return;
+			pageWrapper.dataset.renderState = "queued";
+			renderQueue = renderQueue.then(async () => {
+				if (generation !== this.referenceGeneration || !pageWrapper.isConnected) return;
+				const pageNumber = Number(pageWrapper.dataset.pageNumber || 1);
+				const canvas = pageWrapper.querySelector<HTMLCanvasElement>("canvas");
+				if (!canvas) return;
+				pageWrapper.dataset.renderState = "rendering";
+				try {
+					const size = await this.pdfRenderer.renderPage(
+						pageNumber,
+						canvas,
+						availableWidth,
+						this.readerState.pdfZoom,
+					);
+					if (generation !== this.referenceGeneration || !pageWrapper.isConnected) return;
+					pageWrapper.style.width = `${Math.floor(size.width)}px`;
+					pageWrapper.style.height = `${Math.floor(size.height)}px`;
+					pageWrapper.querySelector(".agent-dashboard-mineru-pdf-page-placeholder")?.remove();
+					canvas.hidden = false;
+					pageWrapper.removeClass("is-loading", "is-error");
+					pageWrapper.addClass("is-rendered");
+					pageWrapper.dataset.renderState = "rendered";
+					if (this.readerState.showLayoutBoxes) this.renderPdfOverlays(pageWrapper, pageNumber);
+				} catch (error) {
+					if (generation !== this.referenceGeneration || !pageWrapper.isConnected) return;
+					if (isAbortError(error)) {
+						pageWrapper.dataset.renderState = "idle";
+						return;
+					}
+					pageWrapper.dataset.renderState = "error";
+					pageWrapper.removeClass("is-loading");
+					pageWrapper.addClass("is-error");
+					const placeholder = pageWrapper.querySelector<HTMLElement>(
+						".agent-dashboard-mineru-pdf-page-placeholder",
+					);
+					if (placeholder) placeholder.setText(`第 ${pageNumber} 页加载失败`);
+				}
+			}).catch(() => undefined);
+		};
+
+		const renderObserver = typeof IntersectionObserver !== "undefined"
+			? new IntersectionObserver((entries) => {
+				entries.forEach((entry) => {
+					if (entry.isIntersecting) queuePageRender(entry.target as HTMLElement);
+				});
+			}, { root: scroll, rootMargin: "1400px 0px", threshold: 0.01 })
+			: null;
+		if (renderObserver) {
+			pageWrappers.forEach((pageWrapper) => renderObserver.observe(pageWrapper));
+		} else {
+			pageWrappers.forEach(queuePageRender);
+		}
+		this.referenceAbortController?.signal.addEventListener("abort", () => renderObserver?.disconnect(), { once: true });
+
+		let scrollFrame = 0;
+		const updateVisiblePage = (): void => {
+			scrollFrame = 0;
+			if (generation !== this.referenceGeneration) return;
+			const probe = scroll.scrollTop + Math.min(scroll.clientHeight * 0.35, 260);
+			let currentPage = 1;
+			for (const pageWrapper of pageWrappers) {
+				if (pageWrapper.offsetTop > probe) break;
+				currentPage = Number(pageWrapper.dataset.pageNumber || currentPage);
+			}
+			if (currentPage === this.readerState.pdfPage) return;
+			this.readerState.pdfPage = currentPage;
+			pageInput.value = String(currentPage);
+			previous.disabled = currentPage <= 1;
+			next.disabled = currentPage >= this.pdfRenderer.numPages;
+			this.requestStateSave();
+		};
+		this.onReferenceEvent(scroll, "scroll", () => {
+			if (scrollFrame) return;
+			scrollFrame = window.requestAnimationFrame(updateVisiblePage);
+		});
+		this.referenceAbortController?.signal.addEventListener("abort", () => {
+			if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+		}, { once: true });
+
+		const initialPage = pageWrappers[this.readerState.pdfPage - 1];
+		if (initialPage) {
+			scroll.scrollTop = Math.max(0, initialPage.offsetTop - 12);
+			queuePageRender(initialPage);
+			if (this.readerState.pdfPage > 1) queuePageRender(pageWrappers[this.readerState.pdfPage - 2]);
+			if (this.readerState.pdfPage < pageWrappers.length) queuePageRender(pageWrappers[this.readerState.pdfPage]);
+		}
 		this.renderReferenceStatus(parent);
 	}
 
-	private renderPdfOverlays(parent: HTMLElement): void {
+	private renderPdfOverlays(parent: HTMLElement, pageNumber: number): void {
 		const readerPackage = this.readerPackage;
 		if (!readerPackage) return;
-		const pageIdx = this.readerState.pdfPage - 1;
+		const pageIdx = pageNumber - 1;
 		const blocks = readerPackage.viewerIndex.pages.find((page) => page.page_idx === pageIdx)?.blocks || [];
 		const overlay = parent.createDiv({ cls: "agent-dashboard-mineru-pdf-overlay" });
 		for (const block of blocks) {
@@ -816,8 +920,15 @@ export class MineruReaderView extends ItemView {
 			1,
 			Math.min(this.pdfRenderer.numPages, this.readerState.pdfPage + delta),
 		);
-		await this.renderReference();
+		this.scrollPdfToPage(this.readerState.pdfPage, "smooth");
 		this.requestStateSave();
+	}
+
+	private scrollPdfToPage(pageNumber: number, behavior: ScrollBehavior): void {
+		const scroll = this.referenceHost?.querySelector<HTMLElement>(".agent-dashboard-mineru-pdf-scroll");
+		const page = scroll?.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`);
+		if (!scroll || !page) return;
+		scroll.scrollTo({ top: Math.max(0, page.offsetTop - 12), behavior });
 	}
 
 	private async changePdfZoom(factor: number): Promise<void> {

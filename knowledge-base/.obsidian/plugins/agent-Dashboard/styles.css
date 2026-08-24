@@ -5403,18 +5403,47 @@ body.agent-dashboard-mineru-resizing {
 }
 
 .agent-dashboard-mineru-pdf-scroll {
+	flex: 1 1 auto;
 	min-width: 0;
 	min-height: 0;
 	padding: 18px;
 	overflow: auto;
 	background: var(--background-secondary);
+	scrollbar-gutter: stable;
 }
 
 .agent-dashboard-mineru-pdf-page {
 	position: relative;
-	margin: 0 auto;
+	flex: 0 0 auto;
+	margin: 0 auto 18px;
 	background: var(--agent-dashboard-mineru-page);
 	box-shadow: 0 2px 9px rgb(0 0 0 / 9%);
+}
+
+.agent-dashboard-mineru-pdf-page:last-child {
+	margin-bottom: 0;
+}
+
+.agent-dashboard-mineru-pdf-page.is-loading,
+.agent-dashboard-mineru-pdf-page.is-error {
+	aspect-ratio: 0.7071;
+}
+
+.agent-dashboard-mineru-pdf-page.is-error {
+	border: 1px solid var(--background-modifier-error);
+}
+
+.agent-dashboard-mineru-pdf-page-placeholder {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	color: var(--text-faint);
+	font-size: 12px;
+}
+
+.agent-dashboard-mineru-pdf-page.is-error .agent-dashboard-mineru-pdf-page-placeholder {
+	color: var(--text-error);
 }
 
 .agent-dashboard-mineru-pdf-page canvas {
