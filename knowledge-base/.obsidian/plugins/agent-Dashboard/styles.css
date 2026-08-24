@@ -4989,11 +4989,22 @@
 .agent-dashboard-mineru-reader-shell {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
-	grid-template-rows: minmax(0, 1fr);
+	grid-template-rows: auto minmax(0, 1fr);
 	width: 100%;
 	height: 100%;
 	min-width: 0;
 	min-height: 0;
+}
+
+.agent-dashboard-mineru-document-header {
+	position: relative;
+	z-index: 4;
+	display: flex;
+	align-items: center;
+	min-width: 0;
+	padding: 8px 14px 9px;
+	border-bottom: 1px solid var(--agent-dashboard-mineru-border-strong);
+	background: var(--background-primary);
 }
 
 .agent-dashboard-mineru-document-identity,
@@ -5012,32 +5023,44 @@
 	flex: 1 1 auto;
 	min-width: 0;
 	gap: 9px;
-	overflow: hidden;
+	align-items: flex-start;
+}
+
+.agent-dashboard-mineru-document-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
+	margin-top: 2px;
+	color: var(--text-muted);
+}
+
+.agent-dashboard-mineru-document-icon svg {
+	width: 16px;
+	height: 16px;
 }
 
 .agent-dashboard-mineru-title-block {
+	flex: 1 1 auto;
 	min-width: 0;
 }
 
 .agent-dashboard-mineru-title-block h1 {
 	margin: 0;
-	overflow: hidden;
 	font-family: var(--font-interface);
 	font-size: 14px;
 	font-weight: 650;
-	line-height: 1.3;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+	white-space: normal;
 }
 
 .agent-dashboard-mineru-title-block p {
-	margin: 1px 0 0;
-	overflow: hidden;
+	margin: 0 0 2px;
 	color: var(--text-muted);
 	font-family: var(--font-monospace);
 	font-size: 10px;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	line-height: 1.3;
+	overflow-wrap: anywhere;
+	white-space: normal;
 }
 
 .agent-dashboard-mineru-top-controls {
@@ -5050,7 +5073,7 @@
 .agent-dashboard-mineru-reference-tab,
 .agent-dashboard-mineru-toggle,
 .agent-dashboard-mineru-visual-actions button,
-.agent-dashboard-mineru-thumbnail {
+button.agent-dashboard-mineru-thumbnail {
 	border: 1px solid transparent;
 	border-radius: 5px;
 	background: transparent;
@@ -5636,23 +5659,42 @@ body.agent-dashboard-mineru-resizing {
 	position: relative;
 	display: grid;
 	grid-template-rows: 72px auto;
+	align-content: start;
 	gap: 5px;
+	height: auto;
+	min-height: 104px;
 	min-width: 0;
 	padding: 5px;
+	overflow: hidden;
 	border-color: var(--agent-dashboard-mineru-border);
 	text-align: left;
 }
 
-.agent-dashboard-mineru-thumbnail img,
-.agent-dashboard-mineru-thumbnail > div {
+.agent-dashboard-mineru-thumbnail-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	width: 100%;
 	height: 72px;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
 	border-radius: 3px;
 	background: var(--background-secondary);
+}
+
+.agent-dashboard-mineru-thumbnail-preview img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
 	object-fit: contain;
 }
 
-.agent-dashboard-mineru-thumbnail > span {
+.agent-dashboard-mineru-thumbnail-label {
+	display: block;
+	min-width: 0;
 	overflow: hidden;
 	font-size: 10px;
 	text-overflow: ellipsis;
@@ -5787,11 +5829,6 @@ body.agent-dashboard-mineru-resizing {
 }
 
 @container (max-width: 920px) {
-	.agent-dashboard-mineru-topbar {
-		gap: 8px;
-	}
-
-	.agent-dashboard-mineru-title-block p,
 	.agent-dashboard-mineru-pane-heading span {
 		display: none;
 	}

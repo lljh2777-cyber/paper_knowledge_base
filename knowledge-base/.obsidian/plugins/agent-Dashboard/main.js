@@ -8432,6 +8432,7 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("agent-dashboard-mineru-reader-view");
     const shell = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-shell" });
+    this.renderDocumentIdentity(shell, readerPackage);
     const workspace = shell.createDiv({ cls: "agent-dashboard-mineru-workspace" });
     workspace.style.setProperty(
       "--agent-dashboard-mineru-markdown-width",
@@ -8449,6 +8450,23 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
     this.resizeObserver?.disconnect();
     this.resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => this.onResize()) : null;
     this.resizeObserver?.observe(referencePane);
+  }
+  renderDocumentIdentity(parent, readerPackage) {
+    const header = parent.createEl("header", {
+      cls: "agent-dashboard-mineru-document-header",
+      attr: { "aria-label": "当前文献" }
+    });
+    const identity = header.createDiv({ cls: "agent-dashboard-mineru-document-identity" });
+    (0, import_obsidian10.setIcon)(identity.createSpan({ cls: "agent-dashboard-mineru-document-icon" }), "book-open-text");
+    const titleBlock = identity.createDiv({ cls: "agent-dashboard-mineru-title-block" });
+    titleBlock.createEl("p", {
+      text: readerPackage.articlePath,
+      attr: { title: readerPackage.articlePath }
+    });
+    titleBlock.createEl("h1", {
+      text: readerPackage.title,
+      attr: { title: readerPackage.title }
+    });
   }
   async renderMarkdownPane(parent) {
     const readerPackage = this.readerPackage;
@@ -9186,13 +9204,14 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
       });
       button.type = "button";
       const previewPath = visual.display.mode === "asset" ? visual.display.assetPath : visual.memberAssetPaths[0];
+      const preview = button.createSpan({ cls: "agent-dashboard-mineru-thumbnail-preview" });
       if (previewPath) {
-        const image = button.createEl("img", { attr: { alt: "", loading: "lazy" } });
+        const image = preview.createEl("img", { attr: { alt: "", loading: "lazy" } });
         image.src = this.resourceUrl(previewPath);
       } else {
-        (0, import_obsidian10.setIcon)(button.createDiv(), "image");
+        (0, import_obsidian10.setIcon)(preview, "image");
       }
-      button.createSpan({ text: visual.label });
+      button.createSpan({ cls: "agent-dashboard-mineru-thumbnail-label", text: visual.label });
       if (visual.repairDecision === "auto") button.createSpan({ cls: "agent-dashboard-mineru-rebuilt-mark", text: "重建" });
       this.onReferenceEvent(button, "click", () => void this.selectVisual(visual.id, false));
     });
@@ -13537,6 +13556,7 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
     this.annotationPopover = null;
     this.cliModelDiscoveryCache = /* @__PURE__ */ new Map();
     this.cliModelDiscoveryInFlight = /* @__PURE__ */ new Map();
+    this.mineruReaderActivationQueue = Promise.resolve();
   }
   get providerRuntimeState() {
     return this.lifecycleState.providerRuntimeState;
@@ -13571,6 +13591,7 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
     this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
     this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
     this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
+    this.app.workspace.onLayoutReady(() => this.consolidateMineruReaderLeaves());
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file?.extension === "md") this.lastContextFile = file;
     }));
@@ -15099,12 +15120,19 @@ ${result.stderr.trim()}` : ""
     const resolvedPath = (0, import_obsidian15.normalizePath)(
       articlePath || (this.isMineruArticleFile(contextFile) ? contextFile.path : "")
     );
+    const activation = this.mineruReaderActivationQueue.then(
+      () => this.activateMineruReaderViewOnce(resolvedPath)
+    );
+    this.mineruReaderActivationQueue = activation.catch(() => void 0);
+    await activation;
+  }
+  async activateMineruReaderViewOnce(resolvedPath) {
     const file = this.app.vault.getAbstractFileByPath(resolvedPath);
     if (!this.isMineruArticleFile(file)) {
       new import_obsidian15.Notice("请先选择 papers/<citekey>/article.md");
       return;
     }
-    const existing = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE)[0];
+    const existing = this.consolidateMineruReaderLeaves();
     const leaf = existing || this.app.workspace.getLeaf("tab");
     if (!existing) {
       await leaf.setViewState({
@@ -15114,8 +15142,23 @@ ${result.stderr.trim()}` : ""
       });
     } else if (leaf.view instanceof MineruReaderView) {
       await leaf.view.setArticlePath(file.path);
+    } else {
+      await leaf.setViewState({
+        type: MINERU_READER_VIEW_TYPE,
+        active: true,
+        state: { articlePath: file.path }
+      });
     }
     await this.app.workspace.revealLeaf(leaf);
+  }
+  consolidateMineruReaderLeaves() {
+    const leaves = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE);
+    const activeLeaf = this.app.workspace.getActiveViewOfType(MineruReaderView)?.leaf;
+    const primary = activeLeaf && leaves.includes(activeLeaf) ? activeLeaf : leaves[0];
+    leaves.forEach((leaf) => {
+      if (leaf !== primary) leaf.detach();
+    });
+    return primary;
   }
   getMineruArticlePath(run) {
     if (run.actionId !== "paper-ingest") return "";

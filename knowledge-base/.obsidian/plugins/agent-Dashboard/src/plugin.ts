@@ -5,6 +5,7 @@ import {
 	Plugin,
 	TFile,
 	normalizePath,
+	type WorkspaceLeaf,
 } from "obsidian";
 
 import * as fs from "node:fs";
@@ -192,6 +193,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		CliBackendId,
 		Promise<CliModelDiscoveryResult>
 	>();
+	private mineruReaderActivationQueue: Promise<void> = Promise.resolve();
 
 	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
 		return this.lifecycleState.providerRuntimeState;
@@ -230,6 +232,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
 		this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
 		this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
+		this.app.workspace.onLayoutReady(() => this.consolidateMineruReaderLeaves());
 		this.registerEvent(this.app.workspace.on("file-open", (file) => {
 			if (file?.extension === "md") this.lastContextFile = file;
 		}));
@@ -2170,12 +2173,20 @@ export default class AgentDashboardPlugin extends Plugin {
 		const resolvedPath = normalizePath(
 			articlePath || (this.isMineruArticleFile(contextFile) ? contextFile.path : ""),
 		);
+		const activation = this.mineruReaderActivationQueue.then(
+			() => this.activateMineruReaderViewOnce(resolvedPath),
+		);
+		this.mineruReaderActivationQueue = activation.catch(() => undefined);
+		await activation;
+	}
+
+	private async activateMineruReaderViewOnce(resolvedPath: string): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(resolvedPath);
 		if (!this.isMineruArticleFile(file)) {
 			new Notice("请先选择 papers/<citekey>/article.md");
 			return;
 		}
-		const existing = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE)[0];
+		const existing = this.consolidateMineruReaderLeaves();
 		const leaf = existing || this.app.workspace.getLeaf("tab");
 		if (!existing) {
 			await leaf.setViewState({
@@ -2185,8 +2196,24 @@ export default class AgentDashboardPlugin extends Plugin {
 			});
 		} else if (leaf.view instanceof MineruReaderView) {
 			await leaf.view.setArticlePath(file.path);
+		} else {
+			await leaf.setViewState({
+				type: MINERU_READER_VIEW_TYPE,
+				active: true,
+				state: { articlePath: file.path },
+			});
 		}
 		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	private consolidateMineruReaderLeaves(): WorkspaceLeaf | undefined {
+		const leaves = this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE);
+		const activeLeaf = this.app.workspace.getActiveViewOfType(MineruReaderView)?.leaf;
+		const primary = activeLeaf && leaves.includes(activeLeaf) ? activeLeaf : leaves[0];
+		leaves.forEach((leaf) => {
+			if (leaf !== primary) leaf.detach();
+		});
+		return primary;
 	}
 
 	getMineruArticlePath(run: TaskRun): string {

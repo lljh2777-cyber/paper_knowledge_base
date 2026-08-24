@@ -47,7 +47,12 @@ archived knowledge targets, and the underlying annotation document.
 
 Validated MinerU packages can be opened in a dedicated main-area reader. Its
 left pane renders `article.md`; the right pane switches between the original
-PDF and a figure/caption rail. The PDF pane uses a continuous, lazily rendered
+PDF and a figure/caption rail. Reader activation is serialized and reuses one
+main-area leaf; stale duplicate reader leaves are detached before the selected
+article is loaded. A compact identity row shows the vault-relative `article.md`
+path and the complete article title. Figure-rail thumbnails use a fixed preview
+viewport so wide, tall, and reconstructed assets remain inside their buttons.
+The PDF pane uses a continuous, lazily rendered
 page stream: scrolling updates the retained page-number control, while page
 selection, zoom, layout boxes, and figure anchors remain synchronized without
 modifying the generated article. Follow-reading is mode-specific: the PDF mode

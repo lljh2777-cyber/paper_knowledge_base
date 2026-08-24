@@ -309,6 +309,7 @@ export class MineruReaderView extends ItemView {
 		this.contentEl.empty();
 		this.contentEl.addClass("agent-dashboard-mineru-reader-view");
 		const shell = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-shell" });
+		this.renderDocumentIdentity(shell, readerPackage);
 		const workspace = shell.createDiv({ cls: "agent-dashboard-mineru-workspace" });
 		workspace.style.setProperty(
 			"--agent-dashboard-mineru-markdown-width",
@@ -328,6 +329,24 @@ export class MineruReaderView extends ItemView {
 			? new ResizeObserver(() => this.onResize())
 			: null;
 		this.resizeObserver?.observe(referencePane);
+	}
+
+	private renderDocumentIdentity(parent: HTMLElement, readerPackage: MineruReaderPackage): void {
+		const header = parent.createEl("header", {
+			cls: "agent-dashboard-mineru-document-header",
+			attr: { "aria-label": "当前文献" },
+		});
+		const identity = header.createDiv({ cls: "agent-dashboard-mineru-document-identity" });
+		setIcon(identity.createSpan({ cls: "agent-dashboard-mineru-document-icon" }), "book-open-text");
+		const titleBlock = identity.createDiv({ cls: "agent-dashboard-mineru-title-block" });
+		titleBlock.createEl("p", {
+			text: readerPackage.articlePath,
+			attr: { title: readerPackage.articlePath },
+		});
+		titleBlock.createEl("h1", {
+			text: readerPackage.title,
+			attr: { title: readerPackage.title },
+		});
 	}
 
 	private async renderMarkdownPane(parent: HTMLElement): Promise<void> {
@@ -1152,13 +1171,14 @@ export class MineruReaderView extends ItemView {
 			const previewPath = visual.display.mode === "asset"
 				? visual.display.assetPath
 				: visual.memberAssetPaths[0];
+			const preview = button.createSpan({ cls: "agent-dashboard-mineru-thumbnail-preview" });
 			if (previewPath) {
-				const image = button.createEl("img", { attr: { alt: "", loading: "lazy" } });
+				const image = preview.createEl("img", { attr: { alt: "", loading: "lazy" } });
 				image.src = this.resourceUrl(previewPath);
 			} else {
-				setIcon(button.createDiv(), "image");
+				setIcon(preview, "image");
 			}
-			button.createSpan({ text: visual.label });
+			button.createSpan({ cls: "agent-dashboard-mineru-thumbnail-label", text: visual.label });
 			if (visual.repairDecision === "auto") button.createSpan({ cls: "agent-dashboard-mineru-rebuilt-mark", text: "重建" });
 			this.onReferenceEvent(button, "click", () => void this.selectVisual(visual.id, false));
 		});
