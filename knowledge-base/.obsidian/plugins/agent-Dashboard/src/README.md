@@ -136,6 +136,28 @@ verified placeholder occurrence; a matching string elsewhere in the article
 is never sufficient. The generated `article.md` and MinerU JSON
 remain unchanged.
 
+For a stricter cross-column failure mode, the reader can recover text from the
+packaged PDF text layer without rewriting MinerU output. Recovery is attempted
+only when an explicit next-page placeholder resolves to a formal caption,
+exactly one empty MinerU text block occupies the aligned companion
+column, and the PDF region continues the anchor's panel sequence (for example,
+`j` followed by `k`, `l`). If MinerU appended that recovered text to the end of
+an ordinary Markdown paragraph, only the uniquely matched suffix is projected
+out; the paragraph prefix remains visible. The same bounded recovery also covers
+same-page two-column captions whose formal left column is attached to the final
+figure asset while the right column is empty in MinerU and has been merged into
+the preceding PDF page's body block. That variant requires one incomplete formal
+caption, one uniquely adjacent empty column, and a PDF continuation whose panel
+sequence follows the formal anchor; Markdown matching is limited to the caption
+page and its immediately preceding page. `Fig. 2k`/table references, missing
+panel continuity, multiple matches, or unavailable PDF text all fail closed.
+For captions already split across members of one repaired visual group, an
+unterminated formal part may also absorb one later terminal part when its panel
+markers continue strictly in sequence (for example, `a`, `b` followed by `c`,
+`d`, `e`). This structural path covers continuations that begin with an
+uppercase acronym such as `MGC-positive` without treating arbitrary uppercase
+body prose as a caption.
+
 New intake packages also contain `_extraction/visual-candidates.json`. This
 bounded, hash-bound contract exposes only deterministic `review`, `partial`, or
 `ambiguous` candidates for an optional AI adjudicator. Model output is limited

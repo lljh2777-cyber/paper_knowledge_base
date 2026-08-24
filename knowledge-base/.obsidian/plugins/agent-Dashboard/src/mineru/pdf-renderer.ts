@@ -6,6 +6,7 @@ import type { NormalizedBbox } from "./types";
 interface PdfViewport {
 	width: number;
 	height: number;
+	convertToViewportPoint?(x: number, y: number): [number, number];
 }
 
 interface PdfRenderTask {
@@ -15,6 +16,15 @@ interface PdfRenderTask {
 
 interface PdfPageProxy {
 	getViewport(options: { scale: number }): PdfViewport;
+	getTextContent(): Promise<{
+		items: Array<{
+			str?: string;
+			transform?: number[];
+			width?: number;
+			height?: number;
+			hasEOL?: boolean;
+		}>;
+	}>;
 	render(options: {
 		canvasContext: CanvasRenderingContext2D;
 		viewport: PdfViewport;
@@ -130,6 +140,82 @@ export class MineruPdfRenderer {
 			throw new DOMException("PDF page render superseded", "AbortError");
 		}
 		return { width: viewport.width, height: viewport.height };
+	}
+
+	/**
+	 * Read only the PDF text intersecting one normalized MinerU box. PDF.js text
+	 * transforms use PDF page coordinates, including crop-box offsets and page
+	 * rotation, so always pass them through the viewport before comparing them
+	 * with MinerU's top-left normalized coordinates.
+	 */
+	async extractTextInBbox(pageNumber: number, bbox: NormalizedBbox): Promise<string> {
+		const document = this.document;
+		if (!document) return "";
+		const documentGeneration = this.generation;
+		const page = await document.getPage(Math.max(1, Math.min(document.numPages, pageNumber)));
+		if (documentGeneration !== this.generation || document !== this.document) return "";
+		const viewport = page.getViewport({ scale: 1 });
+		const content = await page.getTextContent();
+		if (documentGeneration !== this.generation || document !== this.document) return "";
+		const target = {
+			left: viewport.width * bbox[0] / 1000,
+			top: viewport.height * bbox[1] / 1000,
+			right: viewport.width * bbox[2] / 1000,
+			bottom: viewport.height * bbox[3] / 1000,
+		};
+		const tolerance = Math.max(3, Math.min(viewport.width, viewport.height) * 0.008);
+		const selected = content.items.flatMap((item, order) => {
+			const text = String(item.str || "").trim();
+			const transform = item.transform;
+			if (!text || !transform || transform.length < 6) return [];
+			const x = Number(transform[4]);
+			const baselineY = Number(transform[5]);
+			const itemWidth = Math.max(0, Number(item.width || 0));
+			const itemHeight = Math.max(1, Number(item.height || Math.abs(transform[3]) || 1));
+			if (![x, baselineY, itemWidth, itemHeight].every(Number.isFinite)) return [];
+			const convert = viewport.convertToViewportPoint?.bind(viewport);
+			const start = convert ? convert(x, baselineY) : [x, viewport.height - baselineY] as [number, number];
+			const end = convert
+				? convert(x + itemWidth, baselineY)
+				: [x + itemWidth, viewport.height - baselineY] as [number, number];
+			const left = Math.min(start[0], end[0]);
+			const right = Math.max(start[0], end[0]);
+			const baselineTop = Math.min(start[1], end[1]);
+			const top = baselineTop - itemHeight;
+			const bottom = baselineTop + Math.max(1, itemHeight * 0.2);
+			if (
+				right < target.left - tolerance
+				|| left > target.right + tolerance
+				|| bottom < target.top - tolerance
+				|| top > target.bottom + tolerance
+			) return [];
+			return [{
+				text,
+				x: left,
+				y: baselineTop,
+				height: itemHeight,
+				order,
+			}];
+		});
+		if (!selected.length) return "";
+		selected.sort((left, right) => left.y - right.y || left.x - right.x || left.order - right.order);
+		const lines: Array<{ y: number; height: number; items: typeof selected }> = [];
+		for (const item of selected) {
+			const line = lines[lines.length - 1];
+			if (!line || Math.abs(line.y - item.y) > Math.max(line.height, item.height) * 0.65) {
+				lines.push({ y: item.y, height: item.height, items: [item] });
+				continue;
+			}
+			line.items.push(item);
+			line.y = (line.y * (line.items.length - 1) + item.y) / line.items.length;
+			line.height = Math.max(line.height, item.height);
+		}
+		return lines
+			.flatMap((line) => line.items.sort((left, right) => left.x - right.x || left.order - right.order))
+			.map((item) => item.text)
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.trim();
 	}
 
 	async renderCrop(

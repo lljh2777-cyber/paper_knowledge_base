@@ -15,7 +15,9 @@ import { bboxToPercent } from "../mineru/normalization";
 import { MineruPackageLoader, resolvePackageAssetPath } from "../mineru/package-loader";
 import { MineruPdfRenderer } from "../mineru/pdf-renderer";
 import {
+	applyPdfCaptionContinuationRecovery,
 	alignedReaderScrollTop,
+	pdfCaptionContinuationRegions,
 	prepareReaderMarkdown,
 	readerElementOffset,
 	readerPageBoundaryIndex,
@@ -204,6 +206,36 @@ export class MineruReaderView extends ItemView {
 			if (loaded.pdfPath) {
 				try {
 					await this.pdfRenderer.load(this.app, loaded.pdfPath);
+					try {
+						const continuationRegions = pdfCaptionContinuationRegions(
+							loaded.visuals,
+							loaded.viewerIndex,
+						);
+						const recovered = await Promise.all(continuationRegions.map(async (region) => ({
+							...region,
+							text: await this.pdfRenderer.extractTextInBbox(region.pageNumber, region.bbox),
+						})));
+						const recoveredCount = applyPdfCaptionContinuationRecovery(
+							loaded.articleMarkdown,
+							loaded.visuals,
+							loaded.viewerIndex,
+							recovered,
+						);
+						if (recoveredCount > 0) {
+							loaded.issues.push(`已从原 PDF 文本层恢复 ${recoveredCount} 处跨栏续图注`);
+						} else if (continuationRegions.length > 0) {
+							const nonEmptyCount = recovered.filter((candidate) => candidate.text.trim()).length;
+							loaded.issues.push(
+								nonEmptyCount > 0
+									? "检测到跨栏续图注，但 PDF 文本无法唯一映射到 Markdown，已保留原文"
+									: "检测到跨栏续图注，但对应 PDF 区域没有可用文本层，已保留原文",
+							);
+						}
+					} catch (recoveryError) {
+						loaded.issues.push(
+							`跨栏续图注恢复已跳过：${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+						);
+					}
 				} catch (error) {
 					loaded.issues.push(
 						`包内 PDF 无法加载，已保留 Markdown 与原始图片阅读：${error instanceof Error ? error.message : String(error)}`,

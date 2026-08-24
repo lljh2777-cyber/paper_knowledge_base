@@ -707,6 +707,314 @@ assert.equal(markdown.captionLinkMatchesBlocks(
 	crossPageIndex.pages[0].blocks[0],
 	[continuationAnchor, unterminatedContinuation],
 ), true);
+
+const mergedCrossPageAnchor = "Fig. 2 | A long caption sentence. j, ROC curve showing";
+const mergedBodyPrefix = "The body experiment correctly assigned ";
+const recoveredCaptionTail = "prioritization of HMDB 5.0 metabolites by sampling frequency. k, Enrichment among frequent molecules. l, Proportion in HMDB.";
+const mergedCaptionMarkdown = [
+	"![](images/fig2-merged.jpg)",
+	"",
+	mergedCrossPageAnchor,
+	"",
+	"Ordinary body with a Fig. 2k reference that must stay visible.",
+	"",
+	`${mergedBodyPrefix}${recoveredCaptionTail}`,
+	"",
+	"![](images/following-merged.jpg)",
+	"",
+].join("\n");
+const mergedCaptionIndex = normalization.buildRuntimeViewerIndex(
+	[
+		{
+			type: "image",
+			page_idx: 3,
+			bbox: [60, 60, 947, 772],
+			img_path: "images/fig2-merged.jpg",
+			image_caption: ["Fig. 2 | See next page for caption"],
+		},
+		{ type: "text", page_idx: 4, bbox: [60, 59, 497, 250], text: mergedCrossPageAnchor },
+		{
+			type: "text",
+			page_idx: 4,
+			bbox: [60, 275, 497, 358],
+			text: "Ordinary body with a Fig. 2k reference that must stay visible.",
+		},
+		{
+			type: "text",
+			page_idx: 4,
+			bbox: [60, 874, 497, 943],
+			text: `${mergedBodyPrefix}${recoveredCaptionTail}`,
+		},
+		{ type: "text", page_idx: 4, bbox: [507, 59, 944, 237], text: "" },
+		{
+			type: "image",
+			page_idx: 5,
+			bbox: [60, 60, 940, 700],
+			img_path: "images/following-merged.jpg",
+		},
+	],
+	mergedCaptionMarkdown,
+);
+const mergedCaptionBlocks = mergedCaptionIndex.pages.flatMap((page) => page.blocks);
+const mergedCaptionSource = mergedCaptionBlocks[0];
+const mergedCaptionRepair = {
+	schema_version: 1,
+	algorithm_version: "visual-repair-v1.6",
+	status: "partial",
+	groups: [],
+	caption_links: [{
+		visual_block_id: mergedCaptionSource.id,
+		caption_block_ids: [mergedCaptionBlocks[1].id],
+		source_page_idx: 3,
+		target_page_idx: 4,
+		figure_key: "figure:2",
+		relation: "next_page_figure_caption",
+		status: "partial",
+	}],
+	issues: [],
+};
+const mergedCaptionDetails = markdown.resolveVisualCaptionDetails(
+	[mergedCaptionSource],
+	mergedCaptionBlocks,
+	mergedCaptionRepair,
+	3,
+);
+const mergedCaptionVisuals = [{
+	id: "merged-cross-page-caption",
+	pageIdx: 3,
+	label: "Fig. 2",
+	...mergedCaptionDetails,
+	memberBlockIds: [mergedCaptionSource.id],
+	memberAssetPaths: ["images/fig2-merged.jpg"],
+	memberMarkdownImageIds: ["md-img-0000"],
+	anchorAssetPath: "images/fig2-merged.jpg",
+	display: { mode: "asset", assetPath: "images/fig2-merged.jpg" },
+	repairDecision: "keep-original",
+	confidence: 1,
+}];
+const mergedRegions = markdown.pdfCaptionContinuationRegions(
+	mergedCaptionVisuals,
+	mergedCaptionIndex,
+);
+assert.deepEqual(mergedRegions, [{
+	visualId: "merged-cross-page-caption",
+	sourceBlockId: mergedCaptionBlocks[4].id,
+	pageNumber: 5,
+	bbox: [507, 59, 944, 237],
+}]);
+const terminalMergedVisuals = structuredClone(mergedCaptionVisuals);
+terminalMergedVisuals[0].captionStatus = "complete";
+assert.equal(markdown.pdfCaptionContinuationRegions(
+	terminalMergedVisuals,
+	mergedCaptionIndex,
+).length, 1);
+assert.equal(markdown.applyPdfCaptionContinuationRecovery(
+	mergedCaptionMarkdown,
+	mergedCaptionVisuals,
+	mergedCaptionIndex,
+	[{ ...mergedRegions[0], text: recoveredCaptionTail }],
+), 1);
+assert.equal(mergedCaptionVisuals[0].captionStatus, "complete");
+assert.ok(mergedCaptionVisuals[0].caption.endsWith(recoveredCaptionTail));
+const recoveredCaptionPrepared = markdown.prepareReaderMarkdown(
+	mergedCaptionMarkdown,
+	mergedCaptionVisuals,
+	mergedCaptionIndex,
+);
+assert.ok(recoveredCaptionPrepared.includes(mergedBodyPrefix.trim()));
+assert.ok(recoveredCaptionPrepared.includes("Fig. 2k reference that must stay visible"));
+assert.ok(!recoveredCaptionPrepared.includes(recoveredCaptionTail));
+const noPanelRecoveryVisuals = structuredClone(mergedCaptionVisuals);
+noPanelRecoveryVisuals[0].captionInlineProjections = [];
+noPanelRecoveryVisuals[0].captionStatus = "partial";
+assert.equal(markdown.applyPdfCaptionContinuationRecovery(
+	mergedCaptionMarkdown,
+	noPanelRecoveryVisuals,
+	mergedCaptionIndex,
+	[{ ...mergedRegions[0], text: "ordinary lowercase body prose with Table 2 and Fig. 2k references." }],
+), 0);
+
+const qiangPackageRoot = path.join(projectRoot, "knowledge-base/papers/qiang_language_2026");
+const qiangArticle = fs.readFileSync(path.join(qiangPackageRoot, "article.md"), "utf8");
+const qiangPayload = JSON.parse(fs.readFileSync(path.join(qiangPackageRoot, "mineru-result.json"), "utf8"));
+const qiangRepair = JSON.parse(fs.readFileSync(
+	path.join(qiangPackageRoot, "_extraction/visual-repair.json"),
+	"utf8",
+));
+const qiangIndex = normalization.buildRuntimeViewerIndex(qiangPayload, qiangArticle);
+const qiangBlocks = qiangIndex.pages.flatMap((page) => page.blocks);
+const qiangSource = qiangBlocks.find((block) => block.id === "p0003-s000058");
+assert.ok(qiangSource);
+const qiangDetails = markdown.resolveVisualCaptionDetails(
+	[qiangSource],
+	qiangBlocks,
+	qiangRepair,
+	3,
+);
+const qiangVisuals = [{
+	id: "qiang-fig-2",
+	pageIdx: 3,
+	label: "Fig. 2",
+	...qiangDetails,
+	memberBlockIds: [qiangSource.id],
+	memberAssetPaths: [qiangSource.asset_path],
+	memberMarkdownImageIds: [...qiangSource.markdown_image_ids],
+	anchorAssetPath: qiangSource.asset_path,
+	display: { mode: "asset", assetPath: qiangSource.asset_path },
+	repairDecision: "keep-original",
+	confidence: 1,
+}];
+const qiangRegions = markdown.pdfCaptionContinuationRegions(qiangVisuals, qiangIndex);
+assert.equal(qiangRegions.length, 1);
+assert.equal(qiangRegions[0].sourceBlockId, "p0004-s000075");
+const qiangMergedLine = qiangArticle.split(/\r?\n/).find((line) =>
+	line.includes("prioritization of HMDB 5.0 metabolites on the basis"),
+);
+assert.ok(qiangMergedLine);
+const qiangTailStart = qiangMergedLine.indexOf("prioritization of HMDB 5.0 metabolites on the basis");
+const qiangTail = qiangMergedLine.slice(qiangTailStart);
+assert.equal(markdown.applyPdfCaptionContinuationRecovery(
+	qiangArticle,
+	qiangVisuals,
+	qiangIndex,
+	[{ ...qiangRegions[0], text: qiangTail }],
+), 1);
+const qiangPrepared = markdown.prepareReaderMarkdown(qiangArticle, qiangVisuals, qiangIndex);
+assert.ok(qiangPrepared.includes("To test this possibility, we applied CFM-ID"));
+assert.ok(!qiangPrepared.includes("prioritization of HMDB 5.0 metabolites on the basis"));
+assert.ok(qiangVisuals[0].caption.includes("k, Enrichment of HMDB 5.0 metabolites"));
+const qiangPdfJsVisuals = structuredClone([{
+	id: "qiang-fig-2-pdfjs",
+	pageIdx: 3,
+	label: "Fig. 2",
+	...qiangDetails,
+	memberBlockIds: [qiangSource.id],
+	memberAssetPaths: [qiangSource.asset_path],
+	memberMarkdownImageIds: [...qiangSource.markdown_image_ids],
+	anchorAssetPath: qiangSource.asset_path,
+	display: { mode: "asset", assetPath: qiangSource.asset_path },
+	repairDecision: "keep-original",
+	confidence: 1,
+}]);
+const qiangPdfJsRegion = markdown.pdfCaptionContinuationRegions(qiangPdfJsVisuals, qiangIndex)[0];
+const qiangPdfJsText = qiangTail
+	.replace("sampling frequencies", "sampling fre-\nquencies")
+	.replace("two-sided χ<sup>2</sup>", "two-sided χ 2")
+	.replace(/\u00a0/g, " ");
+assert.equal(markdown.applyPdfCaptionContinuationRecovery(
+	qiangArticle,
+	qiangPdfJsVisuals,
+	qiangIndex,
+	[{ ...qiangPdfJsRegion, text: qiangPdfJsText }],
+), 1);
+const qiangPdfJsPrepared = markdown.prepareReaderMarkdown(qiangArticle, qiangPdfJsVisuals, qiangIndex);
+assert.ok(qiangPdfJsPrepared.includes("To test this possibility, we applied CFM-ID"));
+assert.ok(!qiangPdfJsPrepared.includes("prioritization of HMDB 5.0 metabolites on the basis"));
+assert.ok(qiangPdfJsVisuals[0].caption.includes("two-sided χ<sup>2</sup>"));
+
+const blampeyPackageRoot = path.join(projectRoot, "knowledge-base/papers/blampey_novae_2025");
+const blampeyArticle = fs.readFileSync(path.join(blampeyPackageRoot, "article.md"), "utf8");
+const blampeyPayload = JSON.parse(fs.readFileSync(
+	path.join(blampeyPackageRoot, "mineru-result.json"),
+	"utf8",
+));
+const blampeyRepair = JSON.parse(fs.readFileSync(
+	path.join(blampeyPackageRoot, "_extraction/visual-repair.json"),
+	"utf8",
+));
+const blampeyIndex = normalization.buildRuntimeViewerIndex(blampeyPayload, blampeyArticle);
+const blampeyBlocks = blampeyIndex.pages.flatMap((page) => page.blocks);
+const blampeyGroup = blampeyRepair.groups.find((group) => group.id === "vr-p0004-g0000");
+assert.ok(blampeyGroup);
+const blampeyMembers = blampeyGroup.member_block_ids.map((id) =>
+	blampeyBlocks.find((block) => block.id === id),
+).filter(Boolean);
+assert.equal(blampeyMembers.length, blampeyGroup.member_block_ids.length);
+const blampeyDetails = markdown.resolveVisualCaptionDetails(
+	blampeyMembers,
+	blampeyBlocks,
+	blampeyRepair,
+	4,
+);
+const blampeyVisuals = [{
+	id: blampeyGroup.id,
+	pageIdx: 4,
+	label: "Fig. 3",
+	...blampeyDetails,
+	memberBlockIds: [...blampeyGroup.member_block_ids],
+	memberAssetPaths: [...blampeyGroup.member_asset_paths],
+	memberMarkdownImageIds: [...blampeyGroup.member_markdown_image_ids],
+	anchorAssetPath: blampeyGroup.replacement.asset_path,
+	display: { mode: "asset", assetPath: blampeyGroup.replacement.asset_path },
+	repairDecision: blampeyGroup.decision,
+	confidence: blampeyGroup.confidence,
+}];
+const blampeyRegions = markdown.pdfCaptionContinuationRegions(blampeyVisuals, blampeyIndex);
+assert.equal(blampeyRegions.length, 1);
+assert.equal(blampeyRegions[0].sourceBlockId, "p0004-s000066");
+assert.equal(blampeyRegions[0].pageNumber, 5);
+const blampeyMergedLine = blampeyArticle.split(/\r?\n/).find((line) =>
+	line.startsWith("After running inference"),
+);
+assert.ok(blampeyMergedLine);
+const blampeyTailStart = blampeyMergedLine.indexOf("dataset (MERSCOPE and Xenium slides");
+assert.ok(blampeyTailStart > 0);
+const blampeyTail = blampeyMergedLine.slice(blampeyTailStart);
+assert.equal(markdown.applyPdfCaptionContinuationRecovery(
+	blampeyArticle,
+	blampeyVisuals,
+	blampeyIndex,
+	[{ ...blampeyRegions[0], text: blampeyTail }],
+), 1);
+const blampeyPrepared = markdown.prepareReaderMarkdown(
+	blampeyArticle,
+	blampeyVisuals,
+	blampeyIndex,
+);
+assert.ok(blampeyPrepared.includes("After running inference"));
+assert.ok(blampeyPrepared.includes("it is common to try multiple resolutions of spatial domains, hence"));
+assert.ok(!blampeyPrepared.includes("dataset (MERSCOPE and Xenium slides, see more details"));
+assert.ok(blampeyPrepared.includes("requiring clustering to be run multiple times"));
+assert.ok(blampeyVisuals[0].caption.includes("f, ARI comparison on the synthetic dataset"));
+assert.equal(blampeyVisuals[0].captionParts[0].startsWith("Fig. 3 |"), true);
+
+const blampeyFig5Group = blampeyRepair.groups.find((group) => group.id === "vr-p0007-g0000");
+assert.ok(blampeyFig5Group);
+const blampeyFig5Members = blampeyFig5Group.member_block_ids.map((id) =>
+	blampeyBlocks.find((block) => block.id === id),
+).filter(Boolean);
+assert.equal(blampeyFig5Members.length, blampeyFig5Group.member_block_ids.length);
+const blampeyFig5Details = markdown.resolveVisualCaptionDetails(
+	blampeyFig5Members,
+	blampeyBlocks,
+	blampeyRepair,
+	7,
+);
+assert.ok(blampeyFig5Details.caption.startsWith("Fig. 5 | Novae spatial domains"));
+assert.ok(blampeyFig5Details.caption.includes("MGC-positive cases (bottom)."));
+assert.ok(blampeyFig5Details.caption.includes("c, Heatmap of cell-type distributions across domains."));
+assert.ok(blampeyFig5Details.caption.endsWith(
+	"e, FIDE score for CONCH, Novae, and Novae + CONCH on the human lung slide.",
+));
+const blampeyFig5Prepared = markdown.prepareReaderMarkdown(
+	blampeyArticle,
+	[{
+		id: blampeyFig5Group.id,
+		pageIdx: 7,
+		label: "Fig. 5",
+		...blampeyFig5Details,
+		memberBlockIds: [...blampeyFig5Group.member_block_ids],
+		memberAssetPaths: [...blampeyFig5Group.member_asset_paths],
+		memberMarkdownImageIds: [...blampeyFig5Group.member_markdown_image_ids],
+		anchorAssetPath: blampeyFig5Group.replacement.asset_path,
+		display: { mode: "asset", assetPath: blampeyFig5Group.replacement.asset_path },
+		repairDecision: blampeyFig5Group.decision,
+		confidence: blampeyFig5Group.confidence,
+	}],
+	blampeyIndex,
+);
+assert.ok(!blampeyFig5Prepared.includes("MGC-positive cases (bottom). Box plots indicate mean"));
+assert.ok(blampeyFig5Prepared.includes("the fused Novae\u2009+\u2009CONCH model achieves"));
 const duplicateFormalAnchor = {
 	...safeContinuation,
 	text: {
@@ -2282,6 +2590,8 @@ assert.match(view, /renderRetried/);
 assert.match(view, /paintPdfImageCompatibilityLayer/);
 assert.match(view, /imageFallback/);
 assert.match(view, /block\.source_type !== "image"/);
+assert.match(pdfRenderer, /convertToViewportPoint/);
+assert.doesNotMatch(pdfRenderer, /Array\.isArray\(transform\)/);
 assert.match(view, /reader\.readAsDataURL/);
 assert.match(view, /await compatibilityImage\.decode\(\)/);
 assert.match(view, /agent-dashboard-mineru-pdf-image-layer/);

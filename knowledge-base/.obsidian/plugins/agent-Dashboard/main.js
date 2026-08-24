@@ -6018,6 +6018,35 @@ function firstAlphaIsLowercase2(value) {
 function startsWithPanelLabel(value) {
   return /^\s*[a-z](?:\s*[-–—]\s*[a-z])?[\s,.;:)]/i.test(value);
 }
+function captionPanelMarkers(value) {
+  const markers = [];
+  const pattern = /(?:^|[.!?。！？;]\s+)(?:\(([a-z])\)|([a-z])(?:\s*[-–—]\s*([a-z]))?\s*[,;:])/gi;
+  let match;
+  while ((match = pattern.exec(value)) !== null) {
+    const start = String(match[1] || match[2] || "").toLowerCase();
+    const end = String(match[3] || start).toLowerCase();
+    if (start) markers.push({ start, end });
+  }
+  return markers;
+}
+function hasSequentialCaptionPanels(anchorText, continuationText) {
+  const anchorMarkers = captionPanelMarkers(anchorText);
+  const continuationMarkers = captionPanelMarkers(continuationText);
+  if (!anchorMarkers.length || continuationMarkers.length < 2) return false;
+  const lastAnchor = anchorMarkers[anchorMarkers.length - 1].end.charCodeAt(0);
+  const firstContinuation = continuationMarkers[0].start.charCodeAt(0);
+  if (lastAnchor < 97 || lastAnchor > 122 || firstContinuation !== lastAnchor + 1) return false;
+  let previous = continuationMarkers[0];
+  for (const marker of continuationMarkers.slice(1)) {
+    const current = marker.start.charCodeAt(0);
+    const previousStart = previous.start.charCodeAt(0);
+    const previousEnd = previous.end.charCodeAt(0);
+    const expandsPreviousRange = previousEnd > previousStart && current === previousStart;
+    if (!expandsPreviousRange && current !== previousEnd + 1) return false;
+    previous = marker;
+  }
+  return true;
+}
 function endsWithTerminalPunctuation2(value) {
   let normalized = value.trim();
   while (/<\/[^>]+>\s*$/.test(normalized)) {
@@ -6463,7 +6492,10 @@ function samePageCaptionDetails(blocks, allBlocks, pageIdx) {
   }
   if (formalEntries.length !== 1) return emptyResult;
   const formal = formalEntries[0];
-  const isSafeContinuation = (entry) => entry.order > formal.order && entry.kind === "caption-continuation" && entry.text.length >= 24 && !figureKeyFromText(entry.text) && endsWithTerminalPunctuation2(entry.text);
+  const isSafeContinuation = (entry) => {
+    const structurallySequential = entry.kind === "other" && !endsWithTerminalPunctuation2(formal.text) && hasSequentialCaptionPanels(formal.text, entry.text);
+    return entry.order > formal.order && (entry.kind === "caption-continuation" || structurallySequential) && entry.text.length >= 24 && !figureKeyFromText(entry.text) && endsWithTerminalPunctuation2(entry.text);
+  };
   const sameBlockLater = entries.filter((entry) => entry.block.id === formal.block.id && entry.order > formal.order);
   const sameBlockChain = [];
   for (const entry of sameBlockLater) {
@@ -6689,7 +6721,25 @@ function verifiedBoundedHeadingRanges(markdown, visuals, occurrences) {
   }
   return ranges;
 }
-function suppressProjectedReaderText(markdown, visuals) {
+function verifiedInlineCaptionRanges(markdown, visuals, viewerIndex) {
+  if (!viewerIndex) return [];
+  const blockById = new Map(
+    viewerIndex.pages.flatMap((page) => page.blocks).map((block) => [block.id, block])
+  );
+  const ranges = [];
+  for (const visual of visuals) {
+    for (const projection of visual.captionInlineProjections || []) {
+      const block = blockById.get(projection.sourceBlockId);
+      const blockRange = block?.markdown_text_range;
+      if (!block || block.role !== "text" || !blockRange || blockRange.offset_unit !== "utf16-code-unit" || !Number.isInteger(projection.start) || !Number.isInteger(projection.end) || projection.start < blockRange.start || projection.end > blockRange.end || projection.end <= projection.start) continue;
+      const exact = markdown.slice(projection.start, projection.end);
+      if (!projection.text || exact !== projection.text || markdown.indexOf(projection.text) !== projection.start || markdown.indexOf(projection.text, projection.start + projection.text.length) >= 0 || !hasSequentialCaptionPanels(visual.captionParts[0] || visual.caption, exact)) continue;
+      ranges.push({ start: projection.start, end: projection.end });
+    }
+  }
+  return ranges;
+}
+function suppressProjectedReaderText(markdown, visuals, viewerIndex) {
   const occurrences = markdownImageOccurrences(markdown);
   const ranges = /* @__PURE__ */ new Map();
   const captionTexts = /* @__PURE__ */ new Map();
@@ -6738,6 +6788,9 @@ function suppressProjectedReaderText(markdown, visuals) {
     ranges.set(`${range.start}:${range.end}`, range);
   }
   for (const range of verifiedBoundedHeadingRanges(markdown, visuals, occurrences)) {
+    ranges.set(`${range.start}:${range.end}`, range);
+  }
+  for (const range of verifiedInlineCaptionRanges(markdown, visuals, viewerIndex)) {
     ranges.set(`${range.start}:${range.end}`, range);
   }
   return [...ranges.values()].sort((left, right) => right.start - left.start).reduce(
@@ -6921,6 +6974,152 @@ function inferRuntimeNextPageCaptionLink(blocks, allBlocks, pageIdx) {
   const candidates = blocks.flatMap((block) => inferredLinksForSource(block, allBlocks, pageIdx));
   return candidates.length === 1 ? candidates[0] : null;
 }
+function pdfCaptionContinuationRegions(visuals, viewerIndex) {
+  const allBlocks = viewerIndex.pages.flatMap((page) => page.blocks);
+  const blockById = new Map(allBlocks.map((block) => [block.id, block]));
+  const candidates = [];
+  for (const visual of visuals) {
+    if (visual.captionStatus && visual.captionPageIdx !== void 0 && visual.captionSourceBlockIds.length === 1) {
+      const anchor = blockById.get(visual.captionSourceBlockIds[0]);
+      const anchorText = blockText(anchor);
+      const anchorKey = formalFigureCaptionKeyFromText(anchorText);
+      if (!anchor || !anchor.bbox_norm || !anchorKey || !captionPanelMarkers(anchorText).length) continue;
+      const explicitSources = visual.memberBlockIds.map((id) => blockById.get(id)).filter((block) => Boolean(
+        block?.caption?.next_page_marker === true && block.caption.next_page_figure_keys?.length === 1 && block.caption.next_page_figure_keys[0] === anchorKey
+      ));
+      if (explicitSources.length !== 1) continue;
+      const page2 = viewerIndex.pages.find((candidate) => candidate.page_idx === visual.captionPageIdx);
+      if (!page2) continue;
+      const emptyAligned = page2.blocks.filter((block) => block.id !== anchor.id && block.role === "text" && Boolean(block.bbox_norm) && !blockText(block) && Number(block.text?.char_count || 0) === 0 && sameTopCaptionBand(anchor, block));
+      if (emptyAligned.length !== 1 || !emptyAligned[0].bbox_norm) continue;
+      candidates.push({
+        visualId: visual.id,
+        sourceBlockId: emptyAligned[0].id,
+        pageNumber: visual.captionPageIdx + 1,
+        bbox: [...emptyAligned[0].bbox_norm]
+      });
+      continue;
+    }
+    if (visual.captionSourceBlockIds.length || visual.captionPageIdx !== void 0) continue;
+    const members = visual.memberBlockIds.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+    const entries = captionPartEntries(members);
+    const formalEntries = entries.filter((entry) => entry.kind === "formal-caption");
+    if (formalEntries.length !== 1) continue;
+    const formal = formalEntries[0];
+    if (!formal.block.bbox_norm || endsWithTerminalPunctuation2(formal.text) || !captionPanelMarkers(formal.text).length || entries.some((entry) => entry.order > formal.order && entry.kind === "caption-continuation")) continue;
+    const page = viewerIndex.pages.find((candidate) => candidate.page_idx === visual.pageIdx);
+    if (!page) continue;
+    const emptyAdjacent = page.blocks.filter((block) => block.id !== formal.block.id && block.role === "text" && Boolean(block.bbox_norm) && !blockText(block) && Number(block.text?.char_count || 0) === 0 && captionAdjacencyScore(block.bbox_norm, formal.block.bbox_norm) !== null);
+    if (emptyAdjacent.length !== 1 || !emptyAdjacent[0].bbox_norm) continue;
+    candidates.push({
+      visualId: visual.id,
+      sourceBlockId: emptyAdjacent[0].id,
+      pageNumber: visual.pageIdx + 1,
+      bbox: [...emptyAdjacent[0].bbox_norm]
+    });
+  }
+  const claimedSources = /* @__PURE__ */ new Map();
+  for (const candidate of candidates) {
+    claimedSources.set(candidate.sourceBlockId, (claimedSources.get(candidate.sourceBlockId) || 0) + 1);
+  }
+  return candidates.filter((candidate) => claimedSources.get(candidate.sourceBlockId) === 1);
+}
+function captionRecoveryAnchorText(visual, blockById) {
+  if (visual.captionSourceBlockIds.length === 1) {
+    const linked = blockText(blockById.get(visual.captionSourceBlockIds[0]));
+    if (linked) return linked;
+  }
+  const members = visual.memberBlockIds.map((id) => blockById.get(id)).filter((block) => Boolean(block));
+  const formal = captionPartEntries(members).filter((entry) => entry.kind === "formal-caption");
+  return formal.length === 1 ? formal[0].text : "";
+}
+function captionWordTokens(value) {
+  const tokens = [];
+  const pattern = /[\p{L}\p{N}]+/gu;
+  let match;
+  while ((match = pattern.exec(value)) !== null) {
+    tokens.push({
+      value: match[0].toLocaleLowerCase(),
+      start: match.index,
+      end: match.index + match[0].length
+    });
+  }
+  return tokens;
+}
+function tokenPrefixStart(content, recoveredText) {
+  const recovered = captionWordTokens(recoveredText);
+  const candidate = captionWordTokens(content);
+  const prefixLength = Math.min(14, recovered.length);
+  if (prefixLength < 7 || candidate.length < prefixLength) return -1;
+  const prefix = recovered.slice(0, prefixLength).map((token) => token.value);
+  const starts = [];
+  for (let index = 0; index + prefix.length <= candidate.length; index += 1) {
+    if (prefix.every((value, offset) => candidate[index + offset].value === value)) {
+      starts.push(candidate[index].start);
+    }
+  }
+  return starts.length === 1 ? starts[0] : -1;
+}
+function inlineProjectionForRecoveredCaption(markdown, targetBlocks, anchorText, recoveredText) {
+  const recovered = recoveredText.replace(/([\p{L}\p{N}])[-\u00ad]\s+([\p{L}\p{N}])/gu, "$1$2").replace(/\s+/g, " ").trim();
+  if (recovered.length < 32 || figureKeyFromText(recovered) || !hasSequentialCaptionPanels(anchorText, recovered)) return null;
+  const matches = [];
+  for (const block of targetBlocks) {
+    const range = block.markdown_text_range;
+    if (block.role !== "text" || !range || range.offset_unit !== "utf16-code-unit" || range.start < 0 || range.end <= range.start || range.end > markdown.length) continue;
+    const source = markdown.slice(range.start, range.end);
+    const content = source.endsWith("\n") ? source.slice(0, -1).replace(/\r$/, "") : source;
+    const localStart = tokenPrefixStart(content, recovered);
+    const localEnd = content.trimEnd().length;
+    if (localStart < 0 || localEnd <= localStart) continue;
+    const text = content.slice(localStart, localEnd);
+    if (!hasSequentialCaptionPanels(anchorText, text)) continue;
+    matches.push({
+      sourceBlockId: block.id,
+      start: range.start + localStart,
+      end: range.start + localEnd,
+      text
+    });
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+function applyPdfCaptionContinuationRecovery(markdown, visuals, viewerIndex, recoveredRegions) {
+  const requests = new Map(
+    pdfCaptionContinuationRegions(visuals, viewerIndex).map((region) => [`${region.visualId}\0${region.sourceBlockId}`, region])
+  );
+  const claimedRanges = /* @__PURE__ */ new Set();
+  const blockById = new Map(
+    viewerIndex.pages.flatMap((page) => page.blocks).map((block) => [block.id, block])
+  );
+  let recoveredCount = 0;
+  for (const recovered of recoveredRegions) {
+    const request = requests.get(`${recovered.visualId}\0${recovered.sourceBlockId}`);
+    const visual = visuals.find((candidate) => candidate.id === recovered.visualId);
+    if (!request || !visual || request.pageNumber !== recovered.pageNumber) continue;
+    const page = viewerIndex.pages.find((candidate) => candidate.page_idx + 1 === recovered.pageNumber);
+    const anchorText = captionRecoveryAnchorText(visual, blockById);
+    if (!page || !anchorText) continue;
+    const candidateBlocks = viewerIndex.pages.filter((candidate) => candidate.page_idx === page.page_idx || candidate.page_idx === page.page_idx - 1).flatMap((candidate) => candidate.blocks);
+    const projection = inlineProjectionForRecoveredCaption(
+      markdown,
+      candidateBlocks,
+      anchorText,
+      recovered.text
+    );
+    if (!projection || claimedRanges.has(`${projection.start}:${projection.end}`)) continue;
+    claimedRanges.add(`${projection.start}:${projection.end}`);
+    const continuation = projection.text.replace(/\s+/g, " ").trim();
+    visual.caption = `${visual.caption.trim()} ${continuation}`.replace(/\s+/g, " ").trim();
+    visual.captionParts = [.../* @__PURE__ */ new Set([
+      ...visual.captionParts.length ? visual.captionParts : [anchorText],
+      continuation
+    ])];
+    visual.captionInlineProjections = [...visual.captionInlineProjections || [], projection];
+    visual.captionStatus = endsWithTerminalPunctuation2(continuation) ? "complete" : "partial";
+    recoveredCount += 1;
+  }
+  return recoveredCount;
+}
 function prepareReaderMarkdown(markdown, visuals, viewerIndex) {
   const atomicCaptures = visuals.flatMap((visual) => {
     const projection = visual.atomicBlockProjection;
@@ -6955,7 +7154,7 @@ function prepareReaderMarkdown(markdown, visuals, viewerIndex) {
       assetCandidates.set(assetPath, candidates);
     });
   });
-  let prepared = suppressProjectedReaderText(markdown, visuals);
+  let prepared = suppressProjectedReaderText(markdown, visuals, viewerIndex);
   const protectedTableRanges = atomicCaptures.flatMap((capture) => {
     const start = prepared.indexOf(capture.tableText);
     if (start < 0 || prepared.indexOf(capture.tableText, start + capture.tableText.length) >= 0) return [];
@@ -7044,6 +7243,7 @@ function resolveVisualCaptionDetails(blocks, allBlocks, repair, pageIdx) {
       ...samePageCaption,
       captionSourceBlockIds: [],
       captionSourceProjections: [],
+      captionInlineProjections: [],
       captionSourceImageBounds: void 0,
       panelLabelProjections,
       boundedHeadingProjections: samePageHeadingProjections,
@@ -7058,6 +7258,7 @@ function resolveVisualCaptionDetails(blocks, allBlocks, repair, pageIdx) {
       ...samePageCaption,
       captionSourceBlockIds: [],
       captionSourceProjections: [],
+      captionInlineProjections: [],
       captionSourceImageBounds: void 0,
       panelLabelProjections,
       boundedHeadingProjections: samePageHeadingProjections,
@@ -7095,6 +7296,7 @@ function resolveVisualCaptionDetails(blocks, allBlocks, repair, pageIdx) {
     captionParts: [.../* @__PURE__ */ new Set([...sourceParts, ...placeholderCaptions])],
     captionSourceBlockIds: [...link.caption_block_ids],
     captionSourceProjections,
+    captionInlineProjections: [],
     captionSourceImageBounds: captionSourceImageBounds || void 0,
     captionPageIdx: link.target_page_idx,
     captionStatus: link.status,
@@ -7839,6 +8041,69 @@ var MineruPdfRenderer = class {
     }
     return { width: viewport.width, height: viewport.height };
   }
+  /**
+   * Read only the PDF text intersecting one normalized MinerU box. PDF.js text
+   * transforms use PDF page coordinates, including crop-box offsets and page
+   * rotation, so always pass them through the viewport before comparing them
+   * with MinerU's top-left normalized coordinates.
+   */
+  async extractTextInBbox(pageNumber, bbox) {
+    const document2 = this.document;
+    if (!document2) return "";
+    const documentGeneration = this.generation;
+    const page = await document2.getPage(Math.max(1, Math.min(document2.numPages, pageNumber)));
+    if (documentGeneration !== this.generation || document2 !== this.document) return "";
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    if (documentGeneration !== this.generation || document2 !== this.document) return "";
+    const target = {
+      left: viewport.width * bbox[0] / 1e3,
+      top: viewport.height * bbox[1] / 1e3,
+      right: viewport.width * bbox[2] / 1e3,
+      bottom: viewport.height * bbox[3] / 1e3
+    };
+    const tolerance = Math.max(3, Math.min(viewport.width, viewport.height) * 8e-3);
+    const selected = content.items.flatMap((item, order) => {
+      const text = String(item.str || "").trim();
+      const transform = item.transform;
+      if (!text || !transform || transform.length < 6) return [];
+      const x = Number(transform[4]);
+      const baselineY = Number(transform[5]);
+      const itemWidth = Math.max(0, Number(item.width || 0));
+      const itemHeight = Math.max(1, Number(item.height || Math.abs(transform[3]) || 1));
+      if (![x, baselineY, itemWidth, itemHeight].every(Number.isFinite)) return [];
+      const convert = viewport.convertToViewportPoint?.bind(viewport);
+      const start = convert ? convert(x, baselineY) : [x, viewport.height - baselineY];
+      const end = convert ? convert(x + itemWidth, baselineY) : [x + itemWidth, viewport.height - baselineY];
+      const left = Math.min(start[0], end[0]);
+      const right = Math.max(start[0], end[0]);
+      const baselineTop = Math.min(start[1], end[1]);
+      const top = baselineTop - itemHeight;
+      const bottom = baselineTop + Math.max(1, itemHeight * 0.2);
+      if (right < target.left - tolerance || left > target.right + tolerance || bottom < target.top - tolerance || top > target.bottom + tolerance) return [];
+      return [{
+        text,
+        x: left,
+        y: baselineTop,
+        height: itemHeight,
+        order
+      }];
+    });
+    if (!selected.length) return "";
+    selected.sort((left, right) => left.y - right.y || left.x - right.x || left.order - right.order);
+    const lines = [];
+    for (const item of selected) {
+      const line = lines[lines.length - 1];
+      if (!line || Math.abs(line.y - item.y) > Math.max(line.height, item.height) * 0.65) {
+        lines.push({ y: item.y, height: item.height, items: [item] });
+        continue;
+      }
+      line.items.push(item);
+      line.y = (line.y * (line.items.length - 1) + item.y) / line.items.length;
+      line.height = Math.max(line.height, item.height);
+    }
+    return lines.flatMap((line) => line.items.sort((left, right) => left.x - right.x || left.order - right.order)).map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+  }
   async renderCrop(pageNumber, bbox, padding, canvas, availableWidth) {
     const document2 = this.document;
     if (!document2) throw new Error("缺少 PDF，无法重建完整图");
@@ -8070,6 +8335,34 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
       if (loaded.pdfPath) {
         try {
           await this.pdfRenderer.load(this.app, loaded.pdfPath);
+          try {
+            const continuationRegions = pdfCaptionContinuationRegions(
+              loaded.visuals,
+              loaded.viewerIndex
+            );
+            const recovered = await Promise.all(continuationRegions.map(async (region) => ({
+              ...region,
+              text: await this.pdfRenderer.extractTextInBbox(region.pageNumber, region.bbox)
+            })));
+            const recoveredCount = applyPdfCaptionContinuationRecovery(
+              loaded.articleMarkdown,
+              loaded.visuals,
+              loaded.viewerIndex,
+              recovered
+            );
+            if (recoveredCount > 0) {
+              loaded.issues.push(`已从原 PDF 文本层恢复 ${recoveredCount} 处跨栏续图注`);
+            } else if (continuationRegions.length > 0) {
+              const nonEmptyCount = recovered.filter((candidate) => candidate.text.trim()).length;
+              loaded.issues.push(
+                nonEmptyCount > 0 ? "检测到跨栏续图注，但 PDF 文本无法唯一映射到 Markdown，已保留原文" : "检测到跨栏续图注，但对应 PDF 区域没有可用文本层，已保留原文"
+              );
+            }
+          } catch (recoveryError) {
+            loaded.issues.push(
+              `跨栏续图注恢复已跳过：${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`
+            );
+          }
         } catch (error) {
           loaded.issues.push(
             `包内 PDF 无法加载，已保留 Markdown 与原始图片阅读：${error instanceof Error ? error.message : String(error)}`

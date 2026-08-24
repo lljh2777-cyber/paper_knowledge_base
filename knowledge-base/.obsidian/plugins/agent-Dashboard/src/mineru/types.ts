@@ -174,6 +174,12 @@ export interface MineruReaderVisual {
 		text: string;
 		suppress?: boolean;
 	}>;
+	captionInlineProjections?: Array<{
+		sourceBlockId: string;
+		start: number;
+		end: number;
+		text: string;
+	}>;
 	captionSourceImageBounds?: {
 		beforeMarkdownImageId: string;
 		afterMarkdownImageId: string;

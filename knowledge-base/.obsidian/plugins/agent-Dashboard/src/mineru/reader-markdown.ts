@@ -39,6 +39,17 @@ interface MarkdownLineRange {
 	text: string;
 }
 
+export interface PdfCaptionContinuationRegion {
+	visualId: string;
+	sourceBlockId: string;
+	pageNumber: number;
+	bbox: NormalizedBbox;
+}
+
+export interface PdfCaptionContinuationText extends PdfCaptionContinuationRegion {
+	text: string;
+}
+
 export interface MineruReaderViewportBlock {
 	pageNumber: number;
 	top: number;
@@ -185,6 +196,42 @@ function firstAlphaIsLowercase(value: string): boolean {
 
 function startsWithPanelLabel(value: string): boolean {
 	return /^\s*[a-z](?:\s*[-–—]\s*[a-z])?[\s,.;:)]/i.test(value);
+}
+
+interface PanelMarker {
+	start: string;
+	end: string;
+}
+
+function captionPanelMarkers(value: string): PanelMarker[] {
+	const markers: PanelMarker[] = [];
+	const pattern = /(?:^|[.!?。！？;]\s+)(?:\(([a-z])\)|([a-z])(?:\s*[-–—]\s*([a-z]))?\s*[,;:])/gi;
+	let match: RegExpExecArray | null;
+	while ((match = pattern.exec(value)) !== null) {
+		const start = String(match[1] || match[2] || "").toLowerCase();
+		const end = String(match[3] || start).toLowerCase();
+		if (start) markers.push({ start, end });
+	}
+	return markers;
+}
+
+function hasSequentialCaptionPanels(anchorText: string, continuationText: string): boolean {
+	const anchorMarkers = captionPanelMarkers(anchorText);
+	const continuationMarkers = captionPanelMarkers(continuationText);
+	if (!anchorMarkers.length || continuationMarkers.length < 2) return false;
+	const lastAnchor = anchorMarkers[anchorMarkers.length - 1].end.charCodeAt(0);
+	const firstContinuation = continuationMarkers[0].start.charCodeAt(0);
+	if (lastAnchor < 97 || lastAnchor > 122 || firstContinuation !== lastAnchor + 1) return false;
+	let previous = continuationMarkers[0];
+	for (const marker of continuationMarkers.slice(1)) {
+		const current = marker.start.charCodeAt(0);
+		const previousStart = previous.start.charCodeAt(0);
+		const previousEnd = previous.end.charCodeAt(0);
+		const expandsPreviousRange = previousEnd > previousStart && current === previousStart;
+		if (!expandsPreviousRange && current !== previousEnd + 1) return false;
+		previous = marker;
+	}
+	return true;
 }
 
 function endsWithTerminalPunctuation(value: string): boolean {
@@ -848,12 +895,16 @@ function samePageCaptionDetails(
 	}
 	if (formalEntries.length !== 1) return emptyResult;
 	const formal = formalEntries[0];
-	const isSafeContinuation = (entry: CaptionPartEntry): boolean =>
-		entry.order > formal.order
-		&& entry.kind === "caption-continuation"
-		&& entry.text.length >= 24
-		&& !figureKeyFromText(entry.text)
-		&& endsWithTerminalPunctuation(entry.text);
+	const isSafeContinuation = (entry: CaptionPartEntry): boolean => {
+		const structurallySequential = entry.kind === "other"
+			&& !endsWithTerminalPunctuation(formal.text)
+			&& hasSequentialCaptionPanels(formal.text, entry.text);
+		return entry.order > formal.order
+			&& (entry.kind === "caption-continuation" || structurallySequential)
+			&& entry.text.length >= 24
+			&& !figureKeyFromText(entry.text)
+			&& endsWithTerminalPunctuation(entry.text);
+	};
 	const sameBlockLater = entries.filter((entry) =>
 		entry.block.id === formal.block.id && entry.order > formal.order);
 	const sameBlockChain: CaptionPartEntry[] = [];
@@ -1195,9 +1246,49 @@ function verifiedBoundedHeadingRanges(
 	return ranges;
 }
 
+function verifiedInlineCaptionRanges(
+	markdown: string,
+	visuals: readonly MineruReaderVisual[],
+	viewerIndex: MineruViewerIndex | undefined,
+): Array<{ start: number; end: number }> {
+	if (!viewerIndex) return [];
+	const blockById = new Map(
+		viewerIndex.pages.flatMap((page) => page.blocks).map((block) => [block.id, block]),
+	);
+	const ranges: Array<{ start: number; end: number }> = [];
+	for (const visual of visuals) {
+		for (const projection of visual.captionInlineProjections || []) {
+			const block = blockById.get(projection.sourceBlockId);
+			const blockRange = block?.markdown_text_range;
+			if (
+				!block
+				|| block.role !== "text"
+				|| !blockRange
+				|| blockRange.offset_unit !== "utf16-code-unit"
+				|| !Number.isInteger(projection.start)
+				|| !Number.isInteger(projection.end)
+				|| projection.start < blockRange.start
+				|| projection.end > blockRange.end
+				|| projection.end <= projection.start
+			) continue;
+			const exact = markdown.slice(projection.start, projection.end);
+			if (
+				!projection.text
+				|| exact !== projection.text
+				|| markdown.indexOf(projection.text) !== projection.start
+				|| markdown.indexOf(projection.text, projection.start + projection.text.length) >= 0
+				|| !hasSequentialCaptionPanels(visual.captionParts[0] || visual.caption, exact)
+			) continue;
+			ranges.push({ start: projection.start, end: projection.end });
+		}
+	}
+	return ranges;
+}
+
 function suppressProjectedReaderText(
 	markdown: string,
 	visuals: readonly MineruReaderVisual[],
+	viewerIndex?: MineruViewerIndex,
 ): string {
 	const occurrences = markdownImageOccurrences(markdown);
 	const ranges = new Map<string, { start: number; end: number }>();
@@ -1251,6 +1342,9 @@ function suppressProjectedReaderText(
 		ranges.set(`${range.start}:${range.end}`, range);
 	}
 	for (const range of verifiedBoundedHeadingRanges(markdown, visuals, occurrences)) {
+		ranges.set(`${range.start}:${range.end}`, range);
+	}
+	for (const range of verifiedInlineCaptionRanges(markdown, visuals, viewerIndex)) {
 		ranges.set(`${range.start}:${range.end}`, range);
 	}
 	return [...ranges.values()]
@@ -1539,6 +1633,260 @@ export function inferRuntimeNextPageCaptionLink(
 	return candidates.length === 1 ? candidates[0] : null;
 }
 
+/**
+ * Locate an empty MinerU text column that is spatially aligned with a
+ * next-page caption anchor. The original PDF text layer may still contain the
+ * missing words, so callers can read only these tightly bounded regions.
+ */
+export function pdfCaptionContinuationRegions(
+	visuals: readonly MineruReaderVisual[],
+	viewerIndex: MineruViewerIndex,
+): PdfCaptionContinuationRegion[] {
+	const allBlocks = viewerIndex.pages.flatMap((page) => page.blocks);
+	const blockById = new Map(allBlocks.map((block) => [block.id, block]));
+	const candidates: PdfCaptionContinuationRegion[] = [];
+	for (const visual of visuals) {
+		if (
+			visual.captionStatus
+			&& visual.captionPageIdx !== undefined
+			&& visual.captionSourceBlockIds.length === 1
+		) {
+			const anchor = blockById.get(visual.captionSourceBlockIds[0]);
+			const anchorText = blockText(anchor);
+			const anchorKey = formalFigureCaptionKeyFromText(anchorText);
+			if (
+				!anchor
+				|| !anchor.bbox_norm
+				|| !anchorKey
+				|| !captionPanelMarkers(anchorText).length
+			) continue;
+			const explicitSources = visual.memberBlockIds
+				.map((id) => blockById.get(id))
+				.filter((block): block is MineruViewerBlock => Boolean(
+					block?.caption?.next_page_marker === true
+						&& block.caption.next_page_figure_keys?.length === 1
+						&& block.caption.next_page_figure_keys[0] === anchorKey,
+				));
+			if (explicitSources.length !== 1) continue;
+			const page = viewerIndex.pages.find((candidate) => candidate.page_idx === visual.captionPageIdx);
+			if (!page) continue;
+			const emptyAligned = page.blocks.filter((block) => (
+				block.id !== anchor.id
+				&& block.role === "text"
+				&& Boolean(block.bbox_norm)
+				&& !blockText(block)
+				&& Number(block.text?.char_count || 0) === 0
+				&& sameTopCaptionBand(anchor, block)
+			));
+			if (emptyAligned.length !== 1 || !emptyAligned[0].bbox_norm) continue;
+			candidates.push({
+				visualId: visual.id,
+				sourceBlockId: emptyAligned[0].id,
+				pageNumber: visual.captionPageIdx + 1,
+				bbox: [...emptyAligned[0].bbox_norm] as NormalizedBbox,
+			});
+			continue;
+		}
+
+		// Some MinerU outputs attach only the left half of a two-column caption
+		// to the final figure asset, leave the right caption column empty, and
+		// merge that right-column text into the preceding page's body block.
+		// Recover only when one incomplete formal caption and one directly
+		// adjacent empty PDF column form a unique spatial pair.
+		if (visual.captionSourceBlockIds.length || visual.captionPageIdx !== undefined) continue;
+		const members = visual.memberBlockIds
+			.map((id) => blockById.get(id))
+			.filter((block): block is MineruViewerBlock => Boolean(block));
+		const entries = captionPartEntries(members);
+		const formalEntries = entries.filter((entry) => entry.kind === "formal-caption");
+		if (formalEntries.length !== 1) continue;
+		const formal = formalEntries[0];
+		if (
+			!formal.block.bbox_norm
+			|| endsWithTerminalPunctuation(formal.text)
+			|| !captionPanelMarkers(formal.text).length
+			|| entries.some((entry) => (
+				entry.order > formal.order && entry.kind === "caption-continuation"
+			))
+		) continue;
+		const page = viewerIndex.pages.find((candidate) => candidate.page_idx === visual.pageIdx);
+		if (!page) continue;
+		const emptyAdjacent = page.blocks.filter((block) => (
+			block.id !== formal.block.id
+			&& block.role === "text"
+			&& Boolean(block.bbox_norm)
+			&& !blockText(block)
+			&& Number(block.text?.char_count || 0) === 0
+			&& captionAdjacencyScore(block.bbox_norm!, formal.block.bbox_norm!) !== null
+		));
+		if (emptyAdjacent.length !== 1 || !emptyAdjacent[0].bbox_norm) continue;
+		candidates.push({
+			visualId: visual.id,
+			sourceBlockId: emptyAdjacent[0].id,
+			pageNumber: visual.pageIdx + 1,
+			bbox: [...emptyAdjacent[0].bbox_norm] as NormalizedBbox,
+		});
+	}
+	const claimedSources = new Map<string, number>();
+	for (const candidate of candidates) {
+		claimedSources.set(candidate.sourceBlockId, (claimedSources.get(candidate.sourceBlockId) || 0) + 1);
+	}
+	return candidates.filter((candidate) => claimedSources.get(candidate.sourceBlockId) === 1);
+}
+
+function captionRecoveryAnchorText(
+	visual: MineruReaderVisual,
+	blockById: ReadonlyMap<string, MineruViewerBlock>,
+): string {
+	if (visual.captionSourceBlockIds.length === 1) {
+		const linked = blockText(blockById.get(visual.captionSourceBlockIds[0]));
+		if (linked) return linked;
+	}
+	const members = visual.memberBlockIds
+		.map((id) => blockById.get(id))
+		.filter((block): block is MineruViewerBlock => Boolean(block));
+	const formal = captionPartEntries(members).filter((entry) => entry.kind === "formal-caption");
+	return formal.length === 1 ? formal[0].text : "";
+}
+
+interface CaptionWordToken {
+	value: string;
+	start: number;
+	end: number;
+}
+
+function captionWordTokens(value: string): CaptionWordToken[] {
+	const tokens: CaptionWordToken[] = [];
+	const pattern = /[\p{L}\p{N}]+/gu;
+	let match: RegExpExecArray | null;
+	while ((match = pattern.exec(value)) !== null) {
+		tokens.push({
+			value: match[0].toLocaleLowerCase(),
+			start: match.index,
+			end: match.index + match[0].length,
+		});
+	}
+	return tokens;
+}
+
+/**
+ * Locate a PDF caption prefix in Markdown by words rather than by a long raw
+ * substring. This tolerates PDF.js line breaks, non-breaking spaces and
+ * punctuation/soft-hyphen differences while still requiring one unique block.
+ */
+function tokenPrefixStart(content: string, recoveredText: string): number {
+	const recovered = captionWordTokens(recoveredText);
+	const candidate = captionWordTokens(content);
+	const prefixLength = Math.min(14, recovered.length);
+	if (prefixLength < 7 || candidate.length < prefixLength) return -1;
+	const prefix = recovered.slice(0, prefixLength).map((token) => token.value);
+	const starts: number[] = [];
+	for (let index = 0; index + prefix.length <= candidate.length; index += 1) {
+		if (prefix.every((value, offset) => candidate[index + offset].value === value)) {
+			starts.push(candidate[index].start);
+		}
+	}
+	return starts.length === 1 ? starts[0] : -1;
+}
+
+function inlineProjectionForRecoveredCaption(
+	markdown: string,
+	targetBlocks: readonly MineruViewerBlock[],
+	anchorText: string,
+	recoveredText: string,
+): NonNullable<MineruReaderVisual["captionInlineProjections"]>[number] | null {
+	const recovered = recoveredText
+		.replace(/([\p{L}\p{N}])[-\u00ad]\s+([\p{L}\p{N}])/gu, "$1$2")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (
+		recovered.length < 32
+		|| figureKeyFromText(recovered)
+		|| !hasSequentialCaptionPanels(anchorText, recovered)
+	) return null;
+	const matches: NonNullable<MineruReaderVisual["captionInlineProjections"]> = [];
+	for (const block of targetBlocks) {
+		const range = block.markdown_text_range;
+		if (
+			block.role !== "text"
+			|| !range
+			|| range.offset_unit !== "utf16-code-unit"
+			|| range.start < 0
+			|| range.end <= range.start
+			|| range.end > markdown.length
+		) continue;
+		const source = markdown.slice(range.start, range.end);
+		const content = source.endsWith("\n") ? source.slice(0, -1).replace(/\r$/, "") : source;
+		const localStart = tokenPrefixStart(content, recovered);
+		const localEnd = content.trimEnd().length;
+		if (localStart < 0 || localEnd <= localStart) continue;
+		const text = content.slice(localStart, localEnd);
+		if (!hasSequentialCaptionPanels(anchorText, text)) continue;
+		matches.push({
+			sourceBlockId: block.id,
+			start: range.start + localStart,
+			end: range.start + localEnd,
+			text,
+		});
+	}
+	return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Apply PDF text recovered from the exact empty caption column. Suppression is
+ * limited to a unique suffix inside one mapped Markdown block; the legitimate
+ * body prefix of a MinerU-merged paragraph is preserved.
+ */
+export function applyPdfCaptionContinuationRecovery(
+	markdown: string,
+	visuals: MineruReaderVisual[],
+	viewerIndex: MineruViewerIndex,
+	recoveredRegions: readonly PdfCaptionContinuationText[],
+): number {
+	const requests = new Map(
+		pdfCaptionContinuationRegions(visuals, viewerIndex)
+			.map((region) => [`${region.visualId}\u0000${region.sourceBlockId}`, region]),
+	);
+	const claimedRanges = new Set<string>();
+	const blockById = new Map(
+		viewerIndex.pages.flatMap((page) => page.blocks).map((block) => [block.id, block]),
+	);
+	let recoveredCount = 0;
+	for (const recovered of recoveredRegions) {
+		const request = requests.get(`${recovered.visualId}\u0000${recovered.sourceBlockId}`);
+		const visual = visuals.find((candidate) => candidate.id === recovered.visualId);
+		if (!request || !visual || request.pageNumber !== recovered.pageNumber) continue;
+		const page = viewerIndex.pages.find((candidate) => candidate.page_idx + 1 === recovered.pageNumber);
+		const anchorText = captionRecoveryAnchorText(visual, blockById);
+		if (!page || !anchorText) continue;
+		const candidateBlocks = viewerIndex.pages
+			.filter((candidate) => (
+				candidate.page_idx === page.page_idx || candidate.page_idx === page.page_idx - 1
+			))
+			.flatMap((candidate) => candidate.blocks);
+		const projection = inlineProjectionForRecoveredCaption(
+			markdown,
+			candidateBlocks,
+			anchorText,
+			recovered.text,
+		);
+		if (!projection || claimedRanges.has(`${projection.start}:${projection.end}`)) continue;
+		claimedRanges.add(`${projection.start}:${projection.end}`);
+		// Prefer the exact Markdown suffix after the PDF text has located it. The
+		// Markdown keeps equations and punctuation more faithfully than PDF.js.
+		const continuation = projection.text.replace(/\s+/g, " ").trim();
+		visual.caption = `${visual.caption.trim()} ${continuation}`.replace(/\s+/g, " ").trim();
+		visual.captionParts = [...new Set([
+			...(visual.captionParts.length ? visual.captionParts : [anchorText]),
+			continuation,
+		])];
+		visual.captionInlineProjections = [...(visual.captionInlineProjections || []), projection];
+		visual.captionStatus = endsWithTerminalPunctuation(continuation) ? "complete" : "partial";
+		recoveredCount += 1;
+	}
+	return recoveredCount;
+}
+
 export function prepareReaderMarkdown(
 	markdown: string,
 	visuals: readonly MineruReaderVisual[],
@@ -1610,7 +1958,7 @@ export function prepareReaderMarkdown(
 			assetCandidates.set(assetPath, candidates);
 		});
 	});
-	let prepared = suppressProjectedReaderText(markdown, visuals);
+	let prepared = suppressProjectedReaderText(markdown, visuals, viewerIndex);
 	const protectedTableRanges = atomicCaptures.flatMap((capture) => {
 		const start = prepared.indexOf(capture.tableText);
 		if (start < 0 || prepared.indexOf(capture.tableText, start + capture.tableText.length) >= 0) return [];
@@ -1703,7 +2051,7 @@ export function resolveVisualCaptionDetails(
 	pageIdx: number,
 ): Pick<
 	MineruReaderVisual,
-	"caption" | "captionParts" | "captionSourceBlockIds" | "captionSourceProjections" | "captionSourceImageBounds" | "captionPageIdx" | "captionStatus" | "pageRange" | "panelLabelProjections" | "samePageCaptionProjections" | "atomicBlockProjection" | "boundedHeadingProjections"
+	"caption" | "captionParts" | "captionSourceBlockIds" | "captionSourceProjections" | "captionInlineProjections" | "captionSourceImageBounds" | "captionPageIdx" | "captionStatus" | "pageRange" | "panelLabelProjections" | "samePageCaptionProjections" | "atomicBlockProjection" | "boundedHeadingProjections"
 > {
 	const memberIds = new Set(blocks.map((block) => block.id));
 	const storedLinks = (repair?.caption_links || []).filter((candidate) => memberIds.has(candidate.visual_block_id));
@@ -1724,6 +2072,7 @@ export function resolveVisualCaptionDetails(
 			...samePageCaption,
 			captionSourceBlockIds: [],
 			captionSourceProjections: [],
+			captionInlineProjections: [],
 			captionSourceImageBounds: undefined,
 			panelLabelProjections,
 			boundedHeadingProjections: samePageHeadingProjections,
@@ -1741,6 +2090,7 @@ export function resolveVisualCaptionDetails(
 			...samePageCaption,
 			captionSourceBlockIds: [],
 			captionSourceProjections: [],
+			captionInlineProjections: [],
 			captionSourceImageBounds: undefined,
 			panelLabelProjections,
 			boundedHeadingProjections: samePageHeadingProjections,
@@ -1787,6 +2137,7 @@ export function resolveVisualCaptionDetails(
 		captionParts: [...new Set([...sourceParts, ...placeholderCaptions])],
 		captionSourceBlockIds: [...link.caption_block_ids],
 		captionSourceProjections,
+		captionInlineProjections: [],
 		captionSourceImageBounds: captionSourceImageBounds || undefined,
 		captionPageIdx: link.target_page_idx,
 		captionStatus: link.status,
