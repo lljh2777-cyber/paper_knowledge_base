@@ -2608,6 +2608,8 @@ assert.match(view, /markdown_text_range/);
 assert.match(view, /syncStateForMode/);
 assert.match(view, /alignedReaderScrollTop/);
 assert.match(view, /this\.readerState\.mode !== "pdf" \|\| this\.readerState\.followPdfReading/);
+assert.match(view, /window\.getSelection\(\)/);
+assert.match(view, /!selection\.isCollapsed && selection\.toString\(\)\.trim\(\)/);
 assert.match(view, /target\.closest<HTMLElement>\("\[data-reader-page-owner\]"\)/);
 assert.match(view, /MinerU 文献阅读器/);
 assert.match(view, /agent-dashboard-mineru-document-header/);
@@ -2657,6 +2659,8 @@ assert.match(styles, /\.agent-dashboard-mineru-mode-follow/);
 assert.match(styles, /\.agent-dashboard-mineru-document-header/);
 assert.match(styles, /\.agent-dashboard-mineru-thumbnail-preview img\s*\{[\s\S]*?object-fit:\s*contain/);
 assert.match(styles, /button\.agent-dashboard-mineru-thumbnail\s*\{[\s\S]*?min-height:\s*104px;[\s\S]*?overflow:\s*hidden/);
+assert.match(styles, /\.agent-dashboard-mineru-article \*\s*\{[\s\S]*?user-select:\s*text !important;[\s\S]*?-webkit-user-select:\s*text !important/);
+assert.match(styles, /\.agent-dashboard-mineru-article ::selection/);
 assert.match(styles, /@container \(max-width: 680px\)/);
 assert.match(styles, /grid-template-columns: minmax\(0, var\(--agent-dashboard-mineru-markdown-width/);
 

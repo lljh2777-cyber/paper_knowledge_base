@@ -1,7 +1,7 @@
 {
 	"id": "agent-dashboard",
 	"name": "Agent Dashboard",
-	"version": "0.25.20",
+	"version": "0.25.21",
 	"minAppVersion": "1.8.0",
 	"description": "A local research-vault dashboard with agent workflows and trusted local Python/R practice cells.",
 	"author": "Jason",

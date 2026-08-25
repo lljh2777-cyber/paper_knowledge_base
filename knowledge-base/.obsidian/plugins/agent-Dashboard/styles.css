@@ -5214,6 +5214,8 @@ button.agent-dashboard-mineru-thumbnail {
 	min-height: 0;
 	overflow: auto;
 	scroll-behavior: smooth;
+	user-select: text !important;
+	-webkit-user-select: text !important;
 }
 
 .agent-dashboard-mineru-page-anchor {
@@ -5236,6 +5238,19 @@ button.agent-dashboard-mineru-thumbnail {
 	font-family: var(--font-text);
 	font-size: 16px;
 	line-height: 1.72;
+	cursor: text;
+	user-select: text !important;
+	-webkit-user-select: text !important;
+}
+
+.agent-dashboard-mineru-article * {
+	user-select: text !important;
+	-webkit-user-select: text !important;
+}
+
+.agent-dashboard-mineru-article ::selection {
+	background: color-mix(in srgb, var(--interactive-accent), transparent 68%);
+	color: inherit;
 }
 
 .agent-dashboard-mineru-article h1 {
@@ -5263,6 +5278,8 @@ button.agent-dashboard-mineru-thumbnail {
 	margin: 22px 0;
 	color: var(--agent-dashboard-mineru-accent);
 	cursor: pointer;
+	user-select: none !important;
+	-webkit-user-select: none !important;
 }
 
 .agent-dashboard-mineru-reading-anchor::before {

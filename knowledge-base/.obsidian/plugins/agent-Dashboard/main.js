@@ -9323,6 +9323,8 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
     });
     this.onWorkspaceEvent(article, "click", (event) => {
       if (this.readerState.mode !== "pdf" || this.readerState.followPdfReading) return;
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString().trim()) return;
       const target = event.target instanceof Element ? event.target : null;
       if (!target || target.closest("a, button, input, textarea, select, [role=button]")) return;
       const block = target.closest("[data-reader-page-owner]");
