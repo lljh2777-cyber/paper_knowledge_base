@@ -951,8 +951,8 @@ function markdownImageOccurrences(markdown: string): Map<string, MarkdownImageOc
 	IMAGE_TOKEN_RE.lastIndex = 0;
 	let match: RegExpExecArray | null;
 	while ((match = IMAGE_TOKEN_RE.exec(markdown)) !== null) {
-		const assetPath = normalizeAssetPath(match[2] || match[3] || match[4]);
-		if (!assetPath) continue;
+		const rawAssetPath = match[2] || match[3] || match[4];
+		if (!rawAssetPath) continue;
 		const id = `md-img-${String(imageOrder).padStart(4, "0")}`;
 		imageOrder += 1;
 		occurrences.set(id, { id, start: match.index, end: IMAGE_TOKEN_RE.lastIndex });
@@ -1970,14 +1970,15 @@ export function prepareReaderMarkdown(
 	prepared = prepared.replace(
 		IMAGE_TOKEN_RE,
 		(_match, _alt: string, anglePath: string, plainPath: string, htmlPath: string, offset: number) => {
-			const assetPath = normalizeAssetPath(anglePath || plainPath || htmlPath);
-			if (!assetPath) return _match;
+			const rawAssetPath = anglePath || plainPath || htmlPath;
+			if (!rawAssetPath) return _match;
 			const imageId = `md-img-${String(imageOrder).padStart(4, "0")}`;
 			imageOrder += 1;
 			if (protectedTableRanges.some((range) => offset >= range.start && offset + _match.length <= range.end)) {
 				return _match;
 			}
-			const candidates = assetCandidates.get(assetPath);
+			const assetPath = normalizeAssetPath(rawAssetPath);
+			const candidates = assetPath ? assetCandidates.get(assetPath) : undefined;
 			const visualId = imageToVisual.get(imageId)
 				|| (candidates?.size === 1 ? [...candidates][0] : undefined);
 			if (!visualId) return _match;

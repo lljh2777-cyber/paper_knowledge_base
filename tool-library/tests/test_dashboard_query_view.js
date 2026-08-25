@@ -152,7 +152,7 @@ assert.ok(
 );
 assert.ok(
 	settingsSource.includes('title: "MinerU 文献解析"')
-		&& settingsSource.includes('title: "MinerU 阅读器"')
+		&& settingsSource.includes('title: "文献阅读器"')
 		&& settingsSource.includes('title: "任务默认策略"')
 		&& settingsSource.includes('title: "数据与诊断"'),
 	"settings home should expose MinerU, reader, task defaults, and diagnostics modules",

@@ -4963,6 +4963,11 @@
 }
 
 /* MinerU paper reader */
+.agent-dashboard-reader-folders-input {
+	min-height: 76px;
+	resize: vertical;
+}
+
 .workspace-leaf-content[data-type="agent-dashboard-mineru-reader"] .view-content {
 	padding: 0;
 	overflow: hidden;

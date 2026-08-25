@@ -2559,7 +2559,8 @@ assert.match(plugin, /id:\s*"open-mineru-reader"/);
 assert.match(plugin, /"file-menu"/);
 assert.match(plugin, /getLeaf\("tab"\)/);
 assert.match(plugin, /mineruReaderActivationQueue/);
-assert.match(plugin, /onLayoutReady\(\(\) => this\.consolidateMineruReaderLeaves\(\)\)/);
+assert.match(plugin, /onLayoutReady\(\(\) => \{/);
+assert.match(plugin, /this\.consolidateMineruReaderLeaves\(\)/);
 assert.match(plugin, /getActiveViewOfType\(MineruReaderView\)/);
 assert.match(plugin, /if \(leaf !== primary\) leaf\.detach\(\)/);
 assert.match(view, /MarkdownRenderer\.render\([\s\S]*readerPackage\.articlePath,[\s\S]*this\.markdownComponent/);
@@ -2611,7 +2612,7 @@ assert.match(view, /this\.readerState\.mode !== "pdf" \|\| this\.readerState\.fo
 assert.match(view, /window\.getSelection\(\)/);
 assert.match(view, /!selection\.isCollapsed && selection\.toString\(\)\.trim\(\)/);
 assert.match(view, /target\.closest<HTMLElement>\("\[data-reader-page-owner\]"\)/);
-assert.match(view, /MinerU 文献阅读器/);
+assert.match(view, /文献阅读器/);
 assert.match(view, /agent-dashboard-mineru-document-header/);
 assert.match(view, /text:\s*readerPackage\.articlePath/);
 assert.match(view, /text:\s*readerPackage\.title/);

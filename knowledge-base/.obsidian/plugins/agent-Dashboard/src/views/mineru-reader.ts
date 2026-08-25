@@ -13,8 +13,9 @@ import {
 import { MINERU_READER_VIEW_TYPE } from "../config";
 import type { DashboardSettings } from "../runtime/settings";
 import { bboxToPercent } from "../mineru/normalization";
-import { MineruPackageLoader, resolvePackageAssetPath } from "../mineru/package-loader";
+import { resolvePackageAssetPath } from "../mineru/package-loader";
 import { MineruPdfRenderer } from "../mineru/pdf-renderer";
+import { ReaderDocumentLoader } from "../reader/document-loader";
 import {
 	applyPdfCaptionContinuationRecovery,
 	alignedReaderScrollTop,
@@ -35,6 +36,7 @@ import type {
 interface MineruReaderHost {
 	app: App;
 	settings: DashboardSettings;
+	openReaderSourceMarkdown?(articlePath: string): Promise<void>;
 }
 
 const DEFAULT_STATE: MineruReaderViewState = {
@@ -127,7 +129,7 @@ function iconButton(
 
 export class MineruReaderView extends ItemView {
 	private readonly plugin: MineruReaderHost;
-	private readonly loader: MineruPackageLoader;
+	private readonly loader: ReaderDocumentLoader;
 	private readonly pdfRenderer = new MineruPdfRenderer();
 	private readerState: MineruReaderViewState;
 	private readerPackage: MineruReaderPackage | null = null;
@@ -150,7 +152,7 @@ export class MineruReaderView extends ItemView {
 	constructor(leaf: WorkspaceLeaf, plugin: MineruReaderHost) {
 		super(leaf);
 		this.plugin = plugin;
-		this.loader = new MineruPackageLoader(plugin.app);
+		this.loader = new ReaderDocumentLoader(plugin.app);
 		this.readerState = defaultStateForSettings(plugin.settings);
 		this.pdfRenderer.setRenderQuality(plugin.settings.mineruReaderRenderQuality);
 		this.navigation = true;
@@ -161,7 +163,7 @@ export class MineruReaderView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return this.readerPackage?.title || "MinerU 文献阅读器";
+		return this.readerPackage?.title || "文献阅读器";
 	}
 
 	getIcon(): string {
@@ -230,6 +232,7 @@ export class MineruReaderView extends ItemView {
 			const loaded = await this.loader.load(this.readerState.articlePath);
 			if (!this.opened || generation !== this.loadGeneration) return;
 			this.readerPackage = loaded;
+			if (loaded.sourceKind === "markdown") this.readerState.mode = "visuals";
 			if (loaded.pdfPath) {
 				try {
 					await this.pdfRenderer.load(this.app, loaded.pdfPath);
@@ -303,7 +306,7 @@ export class MineruReaderView extends ItemView {
 		const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state" });
 		state.createDiv({ cls: "agent-dashboard-mineru-reader-spinner" });
 		state.createEl("h2", { text: "正在准备文献阅读器" });
-		state.createEl("p", { text: "正在核验 MinerU 包、构建图文索引并加载 PDF。" });
+		state.createEl("p", { text: "正在识别文档来源、构建图文索引并准备双栏视图。" });
 	}
 
 	private renderNoDocument(): void {
@@ -312,9 +315,9 @@ export class MineruReaderView extends ItemView {
 		this.contentEl.addClass("agent-dashboard-mineru-reader-view");
 		const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state" });
 		setIcon(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "book-open-text");
-		state.createEl("h2", { text: "尚未选择 MinerU 文献" });
+		state.createEl("h2", { text: "尚未选择文献" });
 		state.createEl("p", {
-			text: "请在 papers/<citekey>/article.md 上使用文件菜单，或先打开该文件再运行“打开 MinerU 文献阅读器”。",
+			text: "请在已配置目录中的 Markdown 文档上使用文件菜单，或先打开该文件再运行“打开文献阅读器”。",
 		});
 	}
 
@@ -324,7 +327,7 @@ export class MineruReaderView extends ItemView {
 		this.contentEl.addClass("agent-dashboard-mineru-reader-view");
 		const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state is-error" });
 		setIcon(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "circle-alert");
-		state.createEl("h2", { text: "无法打开 MinerU 文献包" });
+		state.createEl("h2", { text: "无法打开文献" });
 		state.createEl("p", { text: error instanceof Error ? error.message : String(error) });
 	}
 
@@ -439,6 +442,9 @@ export class MineruReaderView extends ItemView {
 				}
 			});
 		});
+		if (readerPackage.sourceKind === "markdown" && !this.readerState.markdownAnchor) {
+			this.restoreMarkdownPosition(article);
+		}
 		this.observeReadingAnchors(article, scroller);
 		window.requestAnimationFrame(() => this.restoreMarkdownPosition(article));
 	}
@@ -542,6 +548,11 @@ export class MineruReaderView extends ItemView {
 
 	private updateMarkdownPageStatus(): void {
 		if (!this.markdownPageStatus) return;
+		if (this.readerPackage?.sourceKind === "markdown") {
+			this.markdownPageStatus.setText("Markdown · 网页全文");
+			this.markdownPageStatus.setAttribute("title", "普通 Markdown 图文阅读模式");
+			return;
+		}
 		const totalPages = Math.max(
 			this.pdfRenderer.numPages,
 			...(this.readerPackage?.viewerIndex.pages.map((page) => page.page_idx + 1) || [1]),
@@ -628,7 +639,7 @@ export class MineruReaderView extends ItemView {
 		host.empty();
 		const header = host.createDiv({ cls: "agent-dashboard-mineru-reference-header" });
 		const tabs = header.createDiv({ cls: "agent-dashboard-mineru-reference-tabs", attr: { role: "tablist" } });
-		this.renderModeTab(tabs, "pdf", "原始 PDF");
+		if (readerPackage.sourceKind === "mineru") this.renderModeTab(tabs, "pdf", "原始 PDF");
 		this.renderModeTab(tabs, "visuals", "图片与图注");
 		this.renderModeFollowToggle(header);
 		const body = host.createDiv({ cls: "agent-dashboard-mineru-reference-body" });
@@ -1097,7 +1108,11 @@ export class MineruReaderView extends ItemView {
 			const state = parent.createDiv({ cls: "agent-dashboard-mineru-reference-empty" });
 			setIcon(state.createDiv(), "image-off");
 			state.createEl("strong", { text: "没有可显示的图片或表格" });
-			state.createEl("p", { text: "正文仍可正常阅读；当前 MinerU JSON 没有可解析的视觉资源。" });
+			state.createEl("p", {
+				text: readerPackage.sourceKind === "markdown"
+					? "正文仍可正常阅读；当前 Markdown 中没有识别到独立图片块。"
+					: "正文仍可正常阅读；当前 MinerU JSON 没有可解析的视觉资源。",
+			});
 			return;
 		}
 		const visual = this.currentVisual() || readerPackage.visuals[0];
@@ -1105,9 +1120,11 @@ export class MineruReaderView extends ItemView {
 		const toolbar = parent.createDiv({ cls: "agent-dashboard-mineru-visual-toolbar" });
 		const title = toolbar.createDiv();
 		title.createEl("strong", { text: visual.label });
-		const pageLabel = visual.captionPageIdx !== undefined && visual.captionPageIdx !== visual.pageIdx
-			? `图第 ${visual.pageIdx + 1} 页 · 图注第 ${visual.captionPageIdx + 1} 页`
-			: `第 ${visual.pageIdx + 1} 页`;
+		const pageLabel = readerPackage.sourceKind === "markdown"
+			? `文中第 ${index + 1} 幅`
+			: visual.captionPageIdx !== undefined && visual.captionPageIdx !== visual.pageIdx
+				? `图第 ${visual.pageIdx + 1} 页 · 图注第 ${visual.captionPageIdx + 1} 页`
+				: `第 ${visual.pageIdx + 1} 页`;
 		title.createSpan({ text: `${pageLabel} · ${index + 1} / ${readerPackage.visuals.length}` });
 		const controls = toolbar.createDiv({ cls: "agent-dashboard-mineru-visual-nav" });
 		const previous = iconButton(controls, "chevron-left", "上一幅图片");
@@ -1216,7 +1233,10 @@ export class MineruReaderView extends ItemView {
 		if (!readerPackage) return;
 		const status = parent.createDiv({ cls: "agent-dashboard-mineru-reference-status" });
 		const visual = this.currentVisual();
-		if (visual?.captionStatus === "partial" && visual.captionPageIdx !== undefined) {
+		if (readerPackage.sourceKind === "markdown") {
+			setIcon(status.createSpan(), "link");
+			status.createSpan({ text: "图片与紧邻图注来自原始 Markdown；Figure 编号仅补在阅读显示层。" });
+		} else if (visual?.captionStatus === "partial" && visual.captionPageIdx !== undefined) {
 			status.addClass("has-warning");
 			setIcon(status.createSpan(), "triangle-alert");
 			status.createSpan({
@@ -1352,6 +1372,10 @@ export class MineruReaderView extends ItemView {
 	}
 
 	private restoreMarkdownPosition(article: HTMLElement): void {
+		if (this.readerPackage?.sourceKind === "markdown" && !this.readerState.markdownAnchor) {
+			this.markdownScroller?.scrollTo({ top: 0, behavior: "auto" });
+			return;
+		}
 		if (this.readerState.mode === "pdf") {
 			const pageAnchor = article.querySelector<HTMLElement>(
 				`[data-reader-page="${this.readerState.markdownPage}"]`,
@@ -1361,7 +1385,8 @@ export class MineruReaderView extends ItemView {
 				return;
 			}
 		}
-		const anchorId = this.readerState.markdownAnchor || this.readerState.currentVisualId;
+		const anchorId = this.readerState.markdownAnchor
+			|| (this.readerPackage?.sourceKind === "mineru" ? this.readerState.currentVisualId : "");
 		if (!anchorId) return;
 		const anchor = article.querySelector<HTMLElement>(`[data-visual-id="${CSS.escape(anchorId)}"]`);
 		anchor?.scrollIntoView({ block: "center" });
@@ -1460,6 +1485,10 @@ export class MineruReaderView extends ItemView {
 	private async openArticleMarkdown(): Promise<void> {
 		const readerPackage = this.readerPackage;
 		if (!readerPackage) return;
+		if (this.plugin.openReaderSourceMarkdown) {
+			await this.plugin.openReaderSourceMarkdown(readerPackage.articlePath);
+			return;
+		}
 		const file = this.app.vault.getAbstractFileByPath(readerPackage.articlePath);
 		if (!(file instanceof TFile)) return;
 		await this.app.workspace.getLeaf("tab").openFile(file);
@@ -1468,9 +1497,15 @@ export class MineruReaderView extends ItemView {
 	private async openAsset(assetPath: string): Promise<void> {
 		const readerPackage = this.readerPackage;
 		if (!readerPackage || !assetPath) return;
-		const file = this.app.vault.getAbstractFileByPath(
-			resolvePackageAssetPath(readerPackage.packagePath, assetPath),
-		);
+		if (/^https?:\/\//i.test(assetPath)) {
+			window.open(assetPath, "_blank", "noopener,noreferrer");
+			return;
+		}
+		const file = readerPackage.sourceKind === "markdown"
+			? this.app.metadataCache.getFirstLinkpathDest(assetPath, readerPackage.articlePath)
+			: this.app.vault.getAbstractFileByPath(
+				resolvePackageAssetPath(readerPackage.packagePath, assetPath),
+			);
 		if (!(file instanceof TFile)) {
 			new Notice("未找到原始图片资源");
 			return;
@@ -1481,9 +1516,12 @@ export class MineruReaderView extends ItemView {
 	private resourceUrl(assetPath: string): string {
 		const readerPackage = this.readerPackage;
 		if (!readerPackage) return "";
-		const file = this.app.vault.getAbstractFileByPath(
-			resolvePackageAssetPath(readerPackage.packagePath, assetPath),
-		);
+		if (/^https?:\/\//i.test(assetPath)) return assetPath;
+		const file = readerPackage.sourceKind === "markdown"
+			? this.app.metadataCache.getFirstLinkpathDest(assetPath, readerPackage.articlePath)
+			: this.app.vault.getAbstractFileByPath(
+				resolvePackageAssetPath(readerPackage.packagePath, assetPath),
+			);
 		return file instanceof TFile ? this.app.vault.getResourcePath(file) : "";
 	}
 

@@ -1,5 +1,6 @@
 import {
 	FileSystemAdapter,
+	MarkdownView,
 	Menu,
 	Notice,
 	Plugin,
@@ -26,6 +27,7 @@ import {
 	inferLegacyClaudeConfigSource,
 	isManagedCodexExecutable,
 	normalizeActionExecutionDefaults,
+	normalizeReaderMarkdownFolders,
 } from "./runtime/settings";
 import type { DashboardSettings } from "./runtime/settings";
 import {
@@ -203,6 +205,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		Promise<CliModelDiscoveryResult>
 	>();
 	private mineruReaderActivationQueue: Promise<void> = Promise.resolve();
+	private readonly readerAutoOpenBypass = new Set<string>();
 	obsidianCliProbeState: ObsidianCliProbeState = { status: "idle" };
 
 	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
@@ -242,15 +245,38 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
 		this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
 		this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
-		this.app.workspace.onLayoutReady(() => this.consolidateMineruReaderLeaves());
+		this.app.workspace.onLayoutReady(() => {
+			this.consolidateMineruReaderLeaves();
+			const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (markdownView?.file && this.isConfiguredReaderMarkdownFile(markdownView.file)) {
+				void this.activateMineruReaderView(markdownView.file.path, markdownView.leaf);
+			}
+		});
 		this.registerEvent(this.app.workspace.on("file-open", (file) => {
 			if (file?.extension === "md") this.lastContextFile = file;
+			if (!this.isConfiguredReaderMarkdownFile(file)) return;
+			const normalizedPath = normalizePath(file.path);
+			if (this.readerAutoOpenBypass.delete(normalizedPath)) return;
+			window.setTimeout(() => {
+				let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView?.file?.path !== file.path) markdownView = null;
+				if (!markdownView) {
+					this.app.workspace.iterateAllLeaves((leaf) => {
+						if (
+							!markdownView
+							&& leaf.view instanceof MarkdownView
+							&& leaf.view.file?.path === file.path
+						) markdownView = leaf.view;
+					});
+				}
+				if (markdownView) void this.activateMineruReaderView(file.path, markdownView.leaf);
+			}, 50);
 		}));
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
-			if (!this.isMineruArticleFile(file)) return;
+			if (!this.isReaderDocumentFile(file)) return;
 			menu.addItem((item) => {
 				item
-					.setTitle("在 MinerU 阅读器中打开")
+					.setTitle("在文献阅读器中打开")
 					.setIcon("book-open-text")
 					.onClick(() => {
 						void this.activateMineruReaderView(file.path);
@@ -298,10 +324,10 @@ export default class AgentDashboardPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "open-mineru-reader",
-			name: "打开 MinerU 文献阅读器",
+			name: "打开文献阅读器",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile() || this.lastContextFile;
-				if (!this.isMineruArticleFile(file)) return false;
+				if (!this.isReaderDocumentFile(file)) return false;
 				if (!checking) void this.activateMineruReaderView(file.path);
 				return true;
 			},
@@ -716,6 +742,14 @@ export default class AgentDashboardPlugin extends Plugin {
 			this.settings.projectRoot = this.inferProjectRoot();
 		}
 		let changed = false;
+		const normalizedReaderFolders = normalizeReaderMarkdownFolders(
+			storedSettings.readerMarkdownFolders ?? DEFAULT_SETTINGS.readerMarkdownFolders,
+		);
+		if (
+			JSON.stringify(storedSettings.readerMarkdownFolders ?? DEFAULT_SETTINGS.readerMarkdownFolders)
+			!== JSON.stringify(normalizedReaderFolders)
+		) changed = true;
+		this.settings.readerMarkdownFolders = normalizedReaderFolders;
 		for (const run of this.taskRuns) {
 			if (!run.outputPath && String(run.output || "").length > 12000) {
 				try {
@@ -2353,22 +2387,50 @@ export default class AgentDashboardPlugin extends Plugin {
 			&& /^papers\/[^/]+\/article\.md$/i.test(normalizePath(file.path));
 	}
 
-	async activateMineruReaderView(articlePath = ""): Promise<void> {
+	isConfiguredReaderMarkdownFile(file: unknown): file is TFile {
+		if (!(file instanceof TFile) || file.extension !== "md") return false;
+		const filePath = normalizePath(file.path).toLowerCase();
+		return this.settings.readerMarkdownFolders.some((folder) => {
+			const root = normalizePath(folder).replace(/\/$/, "").toLowerCase();
+			return Boolean(root) && filePath.startsWith(`${root}/`);
+		});
+	}
+
+	isReaderDocumentFile(file: unknown): file is TFile {
+		return this.isMineruArticleFile(file) || this.isConfiguredReaderMarkdownFile(file);
+	}
+
+	async activateMineruReaderView(articlePath = "", preferredLeaf?: WorkspaceLeaf): Promise<void> {
 		const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
 		const resolvedPath = normalizePath(
-			articlePath || (this.isMineruArticleFile(contextFile) ? contextFile.path : ""),
+			articlePath || (this.isReaderDocumentFile(contextFile) ? contextFile.path : ""),
 		);
 		const activation = this.mineruReaderActivationQueue.then(
-			() => this.activateMineruReaderViewOnce(resolvedPath),
+			() => this.activateMineruReaderViewOnce(resolvedPath, preferredLeaf),
 		);
 		this.mineruReaderActivationQueue = activation.catch(() => undefined);
 		await activation;
 	}
 
-	private async activateMineruReaderViewOnce(resolvedPath: string): Promise<void> {
+	private async activateMineruReaderViewOnce(
+		resolvedPath: string,
+		preferredLeaf?: WorkspaceLeaf,
+	): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(resolvedPath);
-		if (!this.isMineruArticleFile(file)) {
-			new Notice("请先选择 papers/<citekey>/article.md");
+		if (!this.isReaderDocumentFile(file)) {
+			new Notice("请先选择已配置目录中的 Markdown 文档");
+			return;
+		}
+		if (preferredLeaf) {
+			this.app.workspace.getLeavesOfType(MINERU_READER_VIEW_TYPE).forEach((leaf) => {
+				if (leaf !== preferredLeaf) leaf.detach();
+			});
+			await preferredLeaf.setViewState({
+				type: MINERU_READER_VIEW_TYPE,
+				active: true,
+				state: { articlePath: file.path },
+			});
+			await this.app.workspace.revealLeaf(preferredLeaf);
 			return;
 		}
 		const existing = this.consolidateMineruReaderLeaves();
@@ -2389,6 +2451,18 @@ export default class AgentDashboardPlugin extends Plugin {
 			});
 		}
 		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	async openReaderSourceMarkdown(articlePath: string): Promise<void> {
+		const normalizedPath = normalizePath(articlePath);
+		const file = this.app.vault.getAbstractFileByPath(normalizedPath);
+		if (!(file instanceof TFile)) return;
+		this.readerAutoOpenBypass.add(normalizedPath);
+		try {
+			await this.app.workspace.getLeaf("tab").openFile(file);
+		} finally {
+			window.setTimeout(() => this.readerAutoOpenBypass.delete(normalizedPath), 1000);
+		}
 	}
 
 	private consolidateMineruReaderLeaves(): WorkspaceLeaf | undefined {

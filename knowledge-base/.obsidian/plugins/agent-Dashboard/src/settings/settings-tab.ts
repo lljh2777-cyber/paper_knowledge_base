@@ -38,6 +38,7 @@ import {
 	getCodexConfigSourceLabel,
 	getOpenCodeConfigSourceLabel,
 	getOpenCodeDefaultModelLabel,
+	normalizeReaderMarkdownFolders,
 	type ActionExecutionDefault,
 	type CliExecutableKind,
 } from "../runtime/settings";
@@ -174,11 +175,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createSettingsNavigationItem(navigation, {
 			page: "reader",
 			icon: "book-open-text",
-			title: "MinerU 阅读器",
-			description: "新阅读器的显示模式、跟随阅读、版面框、缩放与双栏比例。",
-			status: this.plugin.settings.mineruReaderDefaultMode === "visuals"
-				? "图片与图注"
-				: "原始 PDF",
+			title: "文献阅读器",
+			description: "默认接管目录、图文双栏、跟随阅读、版面框、缩放与栏宽。",
+			status: `${this.plugin.settings.readerMarkdownFolders.length} 个目录`,
 		});
 		this.createSettingsNavigationItem(navigation, {
 			page: "tasks",
@@ -734,10 +733,23 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 	private renderReaderSettings(containerEl: HTMLElement): void {
 		this.createSettingsPageHeader(
 			containerEl,
-			"MinerU 阅读器",
-			"设置新打开阅读器的初始状态；已经打开的阅读器保留自己的页码、缩放和双栏状态。",
+			"文献阅读器",
+			"指定默认接管的 Markdown 目录，并设置新打开阅读器的初始双栏状态。MinerU 包继续使用结构化图文与原 PDF；普通 Markdown 使用紧邻图片的图注。",
 			true,
 		);
+		new Setting(containerEl)
+			.setName("默认阅读目录")
+			.setDesc("每行一个 Vault 相对目录。打开这些目录下的 Markdown 时，当前标签页会自动切换到文献阅读器；留空可关闭自动接管。")
+			.addTextArea((textArea) => {
+				textArea.inputEl.addClass("agent-dashboard-reader-folders-input");
+				textArea
+					.setPlaceholder("papers\nClippings")
+					.setValue(this.plugin.settings.readerMarkdownFolders.join("\n"))
+					.onChange(async (value) => {
+						this.plugin.settings.readerMarkdownFolders = normalizeReaderMarkdownFolders(value);
+						await this.plugin.saveSettings();
+					});
+			});
 		new Setting(containerEl)
 			.setName("默认右栏模式")
 			.setDesc("选择打开文章时优先显示原始 PDF 或图片与图注。")

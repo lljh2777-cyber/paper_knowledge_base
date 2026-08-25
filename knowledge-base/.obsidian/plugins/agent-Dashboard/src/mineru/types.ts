@@ -224,6 +224,7 @@ export interface MineruReaderVisual {
 }
 
 export interface MineruReaderPackage {
+	sourceKind: "mineru" | "markdown";
 	packagePath: string;
 	articlePath: string;
 	title: string;

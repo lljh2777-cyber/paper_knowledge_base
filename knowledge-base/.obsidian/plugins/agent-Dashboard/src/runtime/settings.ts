@@ -129,6 +129,7 @@ const CLI_COMMAND_NAMES: Record<CliExecutableKind, string> = {
 
 export interface DashboardSettings {
 	projectRoot: string;
+	readerMarkdownFolders: string[];
 	obsidianCliExecutable: string;
 	codexExecutable: string;
 	codexConfigSource: CodexConfigSource;
@@ -185,6 +186,32 @@ export interface DashboardSettings {
 	taskHistoryLimit: number;
 	querySessionLimit: number;
 	queryMessageLimit: number;
+}
+
+export function normalizeReaderMarkdownFolders(value: unknown): string[] {
+	const values = Array.isArray(value)
+		? value
+		: String(value || "").split(/[\r\n,;]+/);
+	const seen = new Set<string>();
+	const folders: string[] = [];
+	for (const item of values) {
+		const folder = String(item || "")
+			.trim()
+			.replace(/\\/g, "/")
+			.replace(/^\/+|\/+$/g, "")
+			.replace(/\/{2,}/g, "/");
+		if (
+			!folder
+			|| folder === "."
+			|| folder.split("/").some((segment) => segment === "." || segment === "..")
+			|| /^[A-Za-z]:/.test(folder)
+		) continue;
+		const key = folder.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		folders.push(folder);
+	}
+	return folders;
 }
 
 function joinFromEnvironment(
@@ -520,6 +547,7 @@ export function isManagedCodexExecutable(executable: unknown): boolean {
 
 export const DEFAULT_SETTINGS: DashboardSettings = {
 	projectRoot: "",
+	readerMarkdownFolders: ["papers", "Clippings"],
 	obsidianCliExecutable: findPreferredObsidianCliExecutable(),
 	codexExecutable: findPreferredCodexExecutable(),
 	codexConfigSource: "official",

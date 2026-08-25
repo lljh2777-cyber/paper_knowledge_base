@@ -22,6 +22,7 @@ src/query/direct-query-service.ts
 src/query/normalization.ts   Persisted query attachment, source, path, and citation contracts
 src/mineru/                 MinerU package normalization, validated loading, visual-repair contracts,
                             Markdown anchors, and PDF.js rendering
+src/reader/                 Generic Markdown/Clipping figure-caption parsing and reader source loading
 src/runtime/settings.ts      Executable discovery and persisted setting defaults
 src/runtime/lifecycle-state.ts
                              Active process, provider, and query-run state
@@ -32,7 +33,7 @@ src/services/dashboard-data.ts
                              Incremental vault scan and Dashboard metric/gap derivation
 src/settings/settings-tab.ts Obsidian settings UI
 src/types/contracts.ts       Shared PluginHost, task, query-session, and provider contracts
-src/views/                   Dashboard, query, code-practice, and MinerU dual-pane reader ItemViews
+src/views/                   Dashboard, query, code-practice, and dual-pane document reader ItemViews
 ```
 
 All source modules, including `src/plugin.ts`, use strict TypeScript. The plugin
@@ -52,6 +53,15 @@ main-area leaf; stale duplicate reader leaves are detached before the selected
 article is loaded. A compact identity row shows the vault-relative `article.md`
 path and the complete article title. Figure-rail thumbnails use a fixed preview
 viewport so wide, tall, and reconstructed assets remain inside their buttons.
+Vault-relative folders configured under “文献阅读器” are intercepted when an
+ordinary Markdown file opens. A standalone Markdown or HTML image followed by
+one adjacent paragraph becomes a figure anchor: the left pane suppresses the
+image and caption, while the right pane keeps the original remote or Vault-local
+asset and displays the caption with a deterministic `Fig. n` label. Existing
+labels in alt text, captions, or asset URLs win; unlabeled figures receive the
+next unused display number. This adaptation never rewrites the Clipping source
+file and does not weaken validated MinerU package checks. “打开原始 Markdown”
+uses a one-shot bypass so users can still edit a configured source directly.
 The PDF pane uses a continuous, lazily rendered
 page stream: scrolling updates the retained page-number control, while page
 selection, zoom, layout boxes, and figure anchors remain synchronized without

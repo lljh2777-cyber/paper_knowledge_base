@@ -831,6 +831,7 @@ export class MineruPackageLoader {
 		if (visualRepair) issues.push(...visualRepair.issues);
 		const externalPdfRecorded = Boolean(asRecord(manifest.source).path);
 		return {
+			sourceKind: "mineru",
 			packagePath,
 			articlePath,
 			title: titleFromMarkdown(article.text, packagePath),
