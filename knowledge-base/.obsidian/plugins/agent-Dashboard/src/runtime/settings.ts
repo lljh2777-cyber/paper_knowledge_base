@@ -2,6 +2,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 
+import type {
+	ArticleWikiSource,
+	MineruModel,
+	ReasoningEffort,
+} from "../actions";
+import type { CliBackendId } from "../config";
 import type { ProviderProfile } from "../providers/profile";
 
 export type ClaudeConfigSource = "official" | "cc-switch";
@@ -20,6 +26,87 @@ export interface CliExecutableDetection {
 	source: CliExecutableDetectionSource;
 	sourceLabel: string;
 	found: boolean;
+}
+
+export type MineruServiceMode = "official" | "private";
+export type MineruReaderDefaultMode = "pdf" | "visuals";
+export type MineruReaderRenderQuality = "standard" | "high";
+
+export interface ActionExecutionDefault {
+	backend: CliBackendId;
+	model: string;
+	reasoningEffort: ReasoningEffort | "";
+	serviceTier: "default" | "fast";
+}
+
+export const CONFIGURABLE_ACTION_IDS = [
+	"paper-ingest",
+	"pdf-xray",
+	"code-analysis",
+	"vault-retrieval",
+	"synthesis",
+	"vault-lint-fix",
+] as const;
+
+export const STAGE_WRITE_BACKEND_ACTION_IDS = new Set<string>([
+	"code-analysis",
+	"synthesis",
+]);
+
+export const MINERU_LANGUAGE_IDS = [
+	"en",
+	"ch",
+	"ch_server",
+	"japan",
+	"korean",
+	"latin",
+	"arabic",
+	"cyrillic",
+	"devanagari",
+] as const;
+
+export const DEFAULT_ACTION_EXECUTION_DEFAULTS: Record<string, ActionExecutionDefault> = {
+	"paper-ingest": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+	"pdf-xray": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+	"code-analysis": { backend: "codex-cli", model: "", reasoningEffort: "medium", serviceTier: "default" },
+	"vault-retrieval": { backend: "codex-cli", model: "", reasoningEffort: "medium", serviceTier: "default" },
+	"synthesis": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+	"vault-lint-fix": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+};
+
+function normalizeActionExecutionDefault(
+	value: unknown,
+	fallback: ActionExecutionDefault,
+): ActionExecutionDefault {
+	const source = value !== null && typeof value === "object"
+		? value as Record<string, unknown>
+		: {};
+	const backend = source.backend === "claude-code" || source.backend === "opencode"
+		? source.backend
+		: "codex-cli";
+	const reasoning = String(source.reasoningEffort || "");
+	return {
+		backend,
+		model: String(source.model || "").trim().slice(0, 200),
+		reasoningEffort: ["low", "medium", "high", "xhigh"].includes(reasoning)
+			? reasoning as ReasoningEffort
+			: fallback.reasoningEffort,
+		serviceTier: source.serviceTier === "fast" ? "fast" : "default",
+	};
+}
+
+export function normalizeActionExecutionDefaults(
+	value: unknown,
+): Record<string, ActionExecutionDefault> {
+	const source = value !== null && typeof value === "object"
+		? value as Record<string, unknown>
+		: {};
+	return Object.fromEntries(CONFIGURABLE_ACTION_IDS.map((actionId) => {
+		const fallback = DEFAULT_ACTION_EXECUTION_DEFAULTS[actionId];
+		const normalized = normalizeActionExecutionDefault(source[actionId], fallback);
+		if (!STAGE_WRITE_BACKEND_ACTION_IDS.has(actionId)) normalized.backend = "codex-cli";
+		return [actionId, normalized];
+	}));
 }
 
 const MANAGED_CODEX_BIN_ROOT = process.env.LOCALAPPDATA
@@ -64,14 +151,37 @@ export interface DashboardSettings {
 	annotationWebSearchEnabled: boolean;
 	annotationWebSearchTimeoutSeconds: number;
 	mineruExecutable: string;
+	mineruServiceMode: MineruServiceMode;
 	mineruBaseUrl: string;
+	mineruDefaultModel: MineruModel;
+	mineruDefaultLanguage: string;
+	mineruDefaultOcr: boolean;
+	mineruDefaultFormula: boolean;
+	mineruDefaultTable: boolean;
+	mineruDefaultTimeoutSeconds: number;
+	mineruDefaultIncludeSourcePdf: boolean;
+	mineruDefaultArticleWikiSource: ArticleWikiSource;
+	mineruConfirmRemoteUpload: boolean;
+	mineruReaderDefaultMode: MineruReaderDefaultMode;
+	mineruReaderFollowPdfReading: boolean;
+	mineruReaderFollowVisualReading: boolean;
+	mineruReaderShowLayoutBoxes: boolean;
+	mineruReaderPdfZoom: number;
+	mineruReaderSplitRatio: number;
+	mineruReaderRenderQuality: MineruReaderRenderQuality;
 	pythonExecutable: string;
 	rscriptExecutable: string;
 	codePracticeTimeoutSeconds: number;
 	taskTimeoutMinutes: number;
+	actionExecutionDefaults: Record<string, ActionExecutionDefault>;
+	queryDefaultBackendId: string;
+	queryDefaultRetrievalMode: "vault" | "web";
 	activeProviderId: string;
 	providerProfiles: ProviderProfile[];
 	providerTimeoutSeconds: number;
+	taskHistoryLimit: number;
+	querySessionLimit: number;
+	queryMessageLimit: number;
 }
 
 function joinFromEnvironment(
@@ -406,12 +516,35 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	annotationWebSearchEnabled: false,
 	annotationWebSearchTimeoutSeconds: 30,
 	mineruExecutable: findPreferredMineruExecutable(),
+	mineruServiceMode: "official",
 	mineruBaseUrl: "",
+	mineruDefaultModel: "vlm",
+	mineruDefaultLanguage: "en",
+	mineruDefaultOcr: false,
+	mineruDefaultFormula: true,
+	mineruDefaultTable: true,
+	mineruDefaultTimeoutSeconds: 600,
+	mineruDefaultIncludeSourcePdf: true,
+	mineruDefaultArticleWikiSource: "auto",
+	mineruConfirmRemoteUpload: false,
+	mineruReaderDefaultMode: "pdf",
+	mineruReaderFollowPdfReading: true,
+	mineruReaderFollowVisualReading: true,
+	mineruReaderShowLayoutBoxes: true,
+	mineruReaderPdfZoom: 1,
+	mineruReaderSplitRatio: 0.64,
+	mineruReaderRenderQuality: "standard",
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
 	codePracticeTimeoutSeconds: 30,
 	taskTimeoutMinutes: 60,
+	actionExecutionDefaults: normalizeActionExecutionDefaults(DEFAULT_ACTION_EXECUTION_DEFAULTS),
+	queryDefaultBackendId: "codex-cli",
+	queryDefaultRetrievalMode: "web",
 	activeProviderId: "",
 	providerProfiles: [],
 	providerTimeoutSeconds: 20,
+	taskHistoryLimit: 30,
+	querySessionLimit: 8,
+	queryMessageLimit: 30,
 };

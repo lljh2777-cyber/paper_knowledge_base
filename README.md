@@ -51,7 +51,7 @@ papers / sources / methods / concepts / code / projects / synthesis
 
 ## Agent Dashboard
 
-仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.24.0`。
+仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.26.0`。
 
 操作中心提供以下入口：
 
@@ -79,7 +79,7 @@ PDF / DOI / Zotero 条目
   → 更新文献元数据、索引和处理日志
 ```
 
-两个输出彼此独立：只生成原文阅读包不会自动产生论文结论；只创建初步 Wiki 也不会被标记为全文深读。已有同名 `papers/<citekey>/` 包不会被原地覆盖，冲突会停止并交由用户确认。MinerU 处理涉及向所配置的服务上传文档，首次使用前应确认文档允许发送到该服务。
+两个输出彼此独立：`papers/` 原文阅读包与 `wiki/` 知识笔记之间不创建 Obsidian wikilink 或 Markdown 链接，需要标记来源位置时仅记录不可点击的代码路径；知识库体检也不扫描 `papers/`。只生成原文阅读包不会自动产生论文结论；只创建初步 Wiki 也不会被标记为全文深读。已有同名 `papers/<citekey>/` 包不会被原地覆盖，冲突会停止并交由用户确认。MinerU 处理涉及向所配置的服务上传文档，首次使用前应确认文档允许发送到该服务。
 
 阅读视图中的批注使用普通 Markdown wikilink 保存到 `wiki/annotations/`。左键打开批注小窗，`Ctrl+左键`打开已归档的正式知识节点，`Shift+左键`打开批注文档。插件设置中的“批注 AI”二级页面可单独选择 Codex CLI、Claude Code、OpenCode 或已验证 Direct API，并配置批注专用模型、推理强度和输出长度。普通解释可自由选择 Agent 或 Direct API；启用浅层联网后仅使用 Agent，最多围绕 2 个检索问题、采用不超过 3 个权威来源，单次总时间限制为 15–45 秒。
 
@@ -202,7 +202,7 @@ knowledge-base/
 D:\python\python.exe
 ```
 
-Python、Rscript、各 CLI 可执行文件、MinerU 私有服务地址和项目根目录都可以在 Agent Dashboard 设置中调整。MinerU CLI 可通过 `MINERU_CLI_PATH`、常见安装目录、系统 PATH/`where.exe` 或手动路径检测；Token 由 `mineru-open-api auth` 或 `MINERU_TOKEN` 管理，不写入插件配置。Codex CLI、Claude Code 和 OpenCode 使用同样的分层路径检测策略。
+Python、Rscript、各 CLI 可执行文件、MinerU 服务地址和项目根目录都可以在 Agent Dashboard 设置中调整。设置首页还提供独立的 MinerU 文献解析、MinerU 阅读器、任务默认策略和数据与诊断模块：MinerU 入库参数可保存为默认值并在单次任务中覆盖；阅读器可配置新视图的模式、跟随开关、缩放和双栏比例；常用 AI 操作可设置默认后端、模型与推理强度；历史数量、Direct API 超时和脱敏诊断也由用户管理。MinerU CLI 可通过 `MINERU_CLI_PATH`、常见安装目录、系统 PATH/`where.exe` 或手动路径检测；Token 由 `mineru-open-api auth` 或 `MINERU_TOKEN` 管理，不写入插件配置。Codex CLI、Claude Code 和 OpenCode 使用同样的分层路径检测策略。
 
 ### 2. 获取项目
 

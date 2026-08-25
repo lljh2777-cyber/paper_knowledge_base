@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 import re
 import sys
@@ -24,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge-base"
 WIKI_ROOT = KNOWLEDGE_ROOT / "wiki"
 OUTPUT_ROOT = PROJECT_ROOT / "tool-library" / "output" / "lint"
+PAPERS_LINK_PREFIXES = ("papers/", "knowledge-base/papers/")
 SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 RESERVED_NAMES = {"index.md", "log.md", "readme.md"}
 WORKFLOW_PHRASES = {
@@ -202,6 +204,41 @@ def extract_wikilinks(text: str) -> list[str]:
     return [match.strip() for match in re.findall(r"\[\[([^\]|#]+)", stripped) if match.strip()]
 
 
+def extract_markdown_links(text: str) -> list[str]:
+    stripped = baseline.strip_code_for_link_check(text)
+    return [
+        match.strip()
+        for match in re.findall(r"!?\[[^\]\n]*\]\(([^)\n]+)\)", stripped)
+        if match.strip()
+    ]
+
+
+def normalize_internal_link_target(link: str, source: str = "") -> str:
+    raw = link.replace("\\", "/").strip()
+    if raw.startswith("<") and ">" in raw:
+        raw = raw[1 : raw.index(">")]
+    else:
+        raw = raw.split(maxsplit=1)[0]
+    raw = raw.split("#", 1)[0].split("?", 1)[0].strip()
+    if not raw or re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.IGNORECASE):
+        return ""
+    raw = raw.lstrip("/")
+    if raw.startswith("knowledge-base/"):
+        normalized = raw
+    elif source and not raw.startswith(("papers/", "wiki/")):
+        normalized = posixpath.normpath(
+            posixpath.join(posixpath.dirname(source), raw)
+        )
+    else:
+        normalized = posixpath.normpath(raw)
+    return normalized.removesuffix(".md").strip("/")
+
+
+def is_papers_link_target(link: str, source: str = "") -> bool:
+    normalized = normalize_internal_link_target(link, source).casefold()
+    return normalized.startswith(PAPERS_LINK_PREFIXES)
+
+
 def build_note_maps(notes: dict[str, Note]) -> tuple[dict[str, str], dict[str, list[str]]]:
     exact: dict[str, str] = {}
     basenames: dict[str, list[str]] = defaultdict(list)
@@ -243,6 +280,17 @@ def check_graph_and_duplicates(notes: dict[str, Note], audit: Audit) -> dict[str
     edges: dict[str, set[str]] = defaultdict(set)
     for source, note in notes.items():
         for link in extract_wikilinks(note.text):
+            if is_papers_link_target(link, source):
+                if source.startswith("wiki/"):
+                    audit.add(
+                        "error",
+                        "links",
+                        "cross-root-link",
+                        source,
+                        f"Wiki note links to excluded paper package `{link}`; keep the package path as inline code instead.",
+                        True,
+                    )
+                continue
             target, ambiguous = resolve_link(link, exact, basenames)
             if ambiguous:
                 audit.add(
@@ -255,6 +303,17 @@ def check_graph_and_duplicates(notes: dict[str, Note], audit: Audit) -> dict[str
             if target and target != source:
                 incoming[target] += 1
                 edges[source].add(target)
+        if source.startswith("wiki/"):
+            for link in extract_markdown_links(note.text):
+                if is_papers_link_target(link, source):
+                    audit.add(
+                        "error",
+                        "links",
+                        "cross-root-link",
+                        source,
+                        f"Wiki note links to excluded paper package `{link}`; keep the package path as inline code instead.",
+                        True,
+                    )
 
     for basename, paths in sorted(basenames.items()):
         concept_paths = [
@@ -313,6 +372,9 @@ def check_graph_and_duplicates(notes: dict[str, Note], audit: Audit) -> dict[str
             )
     audit.stats["orphan_count"] = len(orphans)
     audit.stats["wikilink_edge_count"] = sum(len(targets) for targets in edges.values())
+    audit.stats["excluded_knowledge_roots"] = sorted(
+        baseline.EXCLUDED_KNOWLEDGE_ROOTS
+    )
     return edges
 
 

@@ -125,6 +125,10 @@ const runtimeSettingsSource = fs.readFileSync(
 for (const settingsPage of [
 	'renderSettingsHome(containerEl)',
 	'renderRuntimeSettings(containerEl)',
+	'renderMineruSettings(containerEl)',
+	'renderReaderSettings(containerEl)',
+	'renderTaskDefaultsSettings(containerEl)',
+	'renderDataSettings(containerEl)',
 	'renderCodexSettings(containerEl)',
 	'renderClaudeSettings(containerEl)',
 	'renderOpenCodeSettings(containerEl)',
@@ -139,8 +143,26 @@ for (const settingsPage of [
 assert.ok(
 	settingsSource.includes('type SettingsPage =')
 		&& settingsSource.includes('| "opencode"')
-		&& settingsSource.includes('| "direct-api"'),
+		&& settingsSource.includes('| "direct-api"')
+		&& settingsSource.includes('| "mineru"')
+		&& settingsSource.includes('| "reader"')
+		&& settingsSource.includes('| "tasks"')
+		&& settingsSource.includes('| "data"'),
 	"settings should retain a dedicated page state for each configuration module",
+);
+assert.ok(
+	settingsSource.includes('title: "MinerU 文献解析"')
+		&& settingsSource.includes('title: "MinerU 阅读器"')
+		&& settingsSource.includes('title: "任务默认策略"')
+		&& settingsSource.includes('title: "数据与诊断"'),
+	"settings home should expose MinerU, reader, task defaults, and diagnostics modules",
+);
+assert.ok(
+	runtimeSettingsSource.includes("actionExecutionDefaults")
+		&& runtimeSettingsSource.includes("queryDefaultBackendId")
+		&& runtimeSettingsSource.includes("taskHistoryLimit")
+		&& runtimeSettingsSource.includes("queryMessageLimit"),
+	"settings persistence should define task defaults and bounded history controls",
 );
 assert.ok(
 	settingsSource.includes('setIcon(chevron, "chevron-right")')
@@ -744,10 +766,42 @@ async function testClaudeCliModelDiscovery() {
 	);
 }
 
+async function testConfigurableDefaultsAndHistory() {
+	const defaultsPlugin = new AgentDashboardPlugin();
+	defaultsPlugin.settings.actionExecutionDefaults.synthesis = {
+		backend: "codex-cli",
+		model: "gpt-settings-test",
+		reasoningEffort: "low",
+		serviceTier: "default",
+	};
+	const synthesisAction = { id: "synthesis", model: "gpt-action", reasoningEffort: "high" };
+	const execution = defaultsPlugin.resolveActionExecutionConfig(synthesisAction);
+	assert.strictEqual(execution.model, "gpt-settings-test");
+	assert.strictEqual(execution.reasoningEffort, "low");
+	assert.strictEqual(execution.modelSource, "任务设置");
+
+	defaultsPlugin.settings.queryDefaultBackendId = "codex-cli";
+	defaultsPlugin.settings.queryDefaultRetrievalMode = "vault";
+	assert.strictEqual(defaultsPlugin.makeQuerySession().retrievalMode, "vault");
+
+	defaultsPlugin.taskRuns = [
+		{ id: "done", status: "done" },
+		{ id: "running", status: "running" },
+	];
+	defaultsPlugin.querySessions = [{ id: "old", messages: [{ id: "message" }] }];
+	defaultsPlugin.saveData = async () => {};
+	assert.strictEqual(await defaultsPlugin.clearCompletedTaskHistory(), 1);
+	assert.deepStrictEqual(defaultsPlugin.taskRuns.map((run) => run.id), ["running"]);
+	await defaultsPlugin.resetQueryHistory();
+	assert.strictEqual(defaultsPlugin.querySessions.length, 1);
+	assert.deepStrictEqual(defaultsPlugin.querySessions[0].messages, []);
+}
+
 Promise.all([
 	testDirectApiQuery(),
 	testSerializedSettingsSnapshots(),
 	testClaudeCliModelDiscovery(),
+	testConfigurableDefaultsAndHistory(),
 ])
 	.then(() => console.log("DASHBOARD_QUERY_VIEW_TEST_OK"))
 	.catch((error) => {

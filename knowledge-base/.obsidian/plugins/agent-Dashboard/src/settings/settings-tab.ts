@@ -8,6 +8,7 @@ import {
 	setIcon,
 } from "obsidian";
 
+import { ACTIONS, type DashboardAction } from "../actions";
 import {
 	getCliBackendLabel,
 	MAX_QUERY_IMAGE_ATTACHMENTS,
@@ -25,7 +26,11 @@ import {
 } from "../providers/profile";
 import type { ProviderModel } from "../providers/shared";
 import {
+	CONFIGURABLE_ACTION_IDS,
+	DEFAULT_ACTION_EXECUTION_DEFAULTS,
 	DEFAULT_SETTINGS,
+	MINERU_LANGUAGE_IDS,
+	STAGE_WRITE_BACKEND_ACTION_IDS,
 	describeCliExecutable,
 	detectCliExecutable,
 	getClaudeConfigSourceLabel,
@@ -33,6 +38,7 @@ import {
 	getCodexConfigSourceLabel,
 	getOpenCodeConfigSourceLabel,
 	getOpenCodeDefaultModelLabel,
+	type ActionExecutionDefault,
 	type CliExecutableKind,
 } from "../runtime/settings";
 import type {
@@ -48,14 +54,22 @@ interface SettingsPluginHost extends PluginHost {
 	checkRuntime(): { ready: boolean; message: string };
 	listProviderModels(profileId: string): Promise<ProviderModel[]>;
 	testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult>;
+	probeMineruCliConnection(): Promise<ProviderConnectionTestResult>;
 	invalidateCliModelDiscovery(backendId: CliBackendId): void;
 	getProviderErrorLabel(type: string): string;
 	supportsFast(model: string): boolean;
+	clearCompletedTaskHistory(): Promise<number>;
+	resetQueryHistory(): Promise<void>;
+	buildDiagnosticsSummary(): string;
 }
 
 type SettingsPage =
 	| "home"
 	| "runtime"
+	| "mineru"
+	| "reader"
+	| "tasks"
+	| "data"
 	| "codex"
 	| "claude"
 	| "opencode"
@@ -78,6 +92,18 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		switch (this.activePage) {
 			case "runtime":
 				this.renderRuntimeSettings(containerEl);
+				break;
+			case "mineru":
+				this.renderMineruSettings(containerEl);
+				break;
+			case "reader":
+				this.renderReaderSettings(containerEl);
+				break;
+			case "tasks":
+				this.renderTaskDefaultsSettings(containerEl);
+				break;
+			case "data":
+				this.renderDataSettings(containerEl);
 				break;
 			case "codex":
 				this.renderCodexSettings(containerEl);
@@ -110,8 +136,33 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			page: "runtime",
 			icon: "terminal",
 			title: "运行环境",
-			description: "项目目录、Codex/Claude/Python/R 可执行文件、任务超时和环境检查。",
+			description: "项目目录、Agent/Python/R 可执行文件、任务超时和环境检查。",
 			status: "本地执行",
+		});
+		this.createSettingsNavigationItem(navigation, {
+			page: "mineru",
+			icon: "file-scan",
+			title: "MinerU 文献解析",
+			description: "CLI、服务地址、认证状态提示和文献入库默认参数。",
+			status: this.plugin.settings.mineruServiceMode === "private"
+				? "私有服务"
+				: `官方服务 · ${this.plugin.settings.mineruDefaultModel.toUpperCase()}`,
+		});
+		this.createSettingsNavigationItem(navigation, {
+			page: "reader",
+			icon: "book-open-text",
+			title: "MinerU 阅读器",
+			description: "新阅读器的显示模式、跟随阅读、版面框、缩放与双栏比例。",
+			status: this.plugin.settings.mineruReaderDefaultMode === "visuals"
+				? "图片与图注"
+				: "原始 PDF",
+		});
+		this.createSettingsNavigationItem(navigation, {
+			page: "tasks",
+			icon: "sliders-horizontal",
+			title: "任务默认策略",
+			description: "按操作设置默认后端、模型、推理强度、速度和查询模式。",
+			status: `${CONFIGURABLE_ACTION_IDS.length} 项策略`,
 		});
 		const reasoningLabel = REASONING_OPTIONS.find(
 			(option) => option.id === this.plugin.settings.codexReasoningEffort,
@@ -191,6 +242,13 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					? `${profiles.length} 个配置`
 					: "未配置",
 		});
+		this.createSettingsNavigationItem(navigation, {
+			page: "data",
+			icon: "database-zap",
+			title: "数据与诊断",
+			description: "历史保留、知识库维护范围、脱敏诊断和清理操作。",
+			status: `任务 ${this.plugin.settings.taskHistoryLimit} · 对话 ${this.plugin.settings.querySessionLimit}`,
+		});
 	}
 
 	private renderRuntimeSettings(containerEl: HTMLElement): void {
@@ -245,28 +303,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				this.plugin.invalidateCliModelDiscovery("opencode");
 			},
 		});
-		this.renderCliExecutableSetting(containerEl, {
-			kind: "mineru",
-			name: "MinerU 可执行文件",
-			description: "用于文献入库的 PDF 高精度提取；插件调用 precision extract，不使用快速占位模式。",
-			placeholder: "mineru-open-api.cmd",
-			getValue: () => this.plugin.settings.mineruExecutable,
-			setValue: (value) => {
-				this.plugin.settings.mineruExecutable = value;
-			},
-		});
-		new Setting(containerEl)
-			.setName("MinerU 私有服务地址")
-			.setDesc("可选。留空使用 MinerU 官方服务；仅私有部署时填写 base URL。Token 由 mineru-open-api auth 或 MINERU_TOKEN 管理，不写入插件配置。")
-			.addText((text) =>
-				text
-					.setPlaceholder("https://mineru.example.com")
-					.setValue(this.plugin.settings.mineruBaseUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.mineruBaseUrl = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
 		new Setting(containerEl)
 			.setName("Python 可执行文件")
 			.setDesc("用于统一 runner、知识库体检和 Python 代码练习。")
@@ -390,6 +426,489 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				})
 		);
 		refreshDescription();
+	}
+
+	private renderMineruSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"MinerU 文献解析",
+			"管理 MinerU CLI、服务地址和新建文献入库任务的默认解析参数。每次入库仍可临时覆盖。",
+			true,
+		);
+		this.createProviderSectionHeader(
+			containerEl,
+			"连接与认证",
+			"插件不保存 MinerU Token；认证继续由 mineru-open-api 配置或 MINERU_TOKEN 环境变量管理。",
+		);
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "mineru",
+			name: "MinerU 可执行文件",
+			description: "用于文献入库的 precision extract；固定生成 Markdown 与 JSON。",
+			placeholder: "mineru-open-api.cmd",
+			getValue: () => this.plugin.settings.mineruExecutable,
+			setValue: (value) => {
+				this.plugin.settings.mineruExecutable = value;
+				this.plugin.providerRuntimeState.delete("mineru");
+			},
+		});
+		new Setting(containerEl)
+			.setName("服务类型")
+			.setDesc("官方服务不传入自定义 Base URL；私有部署使用下方地址。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("official", "MinerU 官方服务")
+				.addOption("private", "私有部署")
+				.setValue(this.plugin.settings.mineruServiceMode)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruServiceMode = value === "private" ? "private" : "official";
+					if (value !== "private") this.plugin.settings.mineruBaseUrl = "";
+					this.plugin.providerRuntimeState.delete("mineru");
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+		if (this.plugin.settings.mineruServiceMode === "private") {
+			new Setting(containerEl)
+				.setName("MinerU 私有服务地址")
+				.setDesc("必须使用 http:// 或 https://；保存时自动移除末尾斜杠。")
+				.addText((text) => text
+					.setPlaceholder("https://mineru.example.com")
+					.setValue(this.plugin.settings.mineruBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.mineruBaseUrl = value.trim().replace(/\/+$/g, "").slice(0, 500);
+						this.plugin.providerRuntimeState.delete("mineru");
+						await this.plugin.saveSettings();
+					}));
+		}
+		const tokenDetected = Boolean(String(process.env.MINERU_TOKEN || "").trim());
+		new Setting(containerEl)
+			.setName("认证来源")
+			.setDesc(tokenDetected
+				? "已检测到 MINERU_TOKEN 环境变量。真实 Token 不会写入插件配置或诊断信息。"
+				: "未检测到 MINERU_TOKEN；如已使用 mineru-open-api auth 登录，认证仍可能保存在 CLI 配置中。插件不会读取或复制该凭据。"
+			);
+		const mineruResult = this.plugin.providerRuntimeState.get("mineru") || null;
+		new Setting(containerEl)
+			.setName("CLI 可用性检查")
+			.setDesc("执行本地 version 检查，不上传 PDF，也不声称验证远程认证。")
+			.addButton((button) => {
+				const testing = mineruResult?.status === "testing";
+				button
+					.setButtonText(testing ? "检查中…" : "检查 CLI")
+					.setDisabled(testing)
+					.onClick(async () => {
+						this.plugin.providerRuntimeState.set("mineru", { status: "testing" });
+						this.display();
+						const result = await this.plugin.probeMineruCliConnection();
+						this.plugin.providerRuntimeState.set("mineru", { status: "done", result });
+						this.display();
+					});
+			});
+		if (mineruResult?.result) {
+			new Setting(containerEl)
+				.setName(mineruResult.result.ok ? "CLI 检查通过" : "CLI 检查失败")
+				.setDesc(mineruResult.result.message || mineruResult.result.responsePreview || "无详细信息");
+		}
+
+		this.createProviderSectionHeader(
+			containerEl,
+			"文献入库默认值",
+			"这些值只作为新任务的起点；任务弹窗中的选择优先。",
+		);
+		new Setting(containerEl)
+			.setName("解析模型")
+			.setDesc("VLM 适合复杂版面；Pipeline 更保守；Auto 由服务端选择。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("vlm", "VLM · 推荐")
+				.addOption("pipeline", "Pipeline · 保守")
+				.addOption("auto", "Auto · 服务端选择")
+				.setValue(this.plugin.settings.mineruDefaultModel)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultModel = value === "pipeline" || value === "auto"
+						? value
+						: "vlm";
+					await this.plugin.saveSettings();
+				}));
+		const languageLabels: Record<string, string> = {
+			en: "English",
+			ch: "中文 + English",
+			ch_server: "中文 / 繁体 / 日文",
+			japan: "日本語",
+			korean: "한국어",
+			latin: "Latin 语系",
+			arabic: "Arabic 语系",
+			cyrillic: "Cyrillic 语系",
+			devanagari: "Devanagari 语系",
+		};
+		new Setting(containerEl)
+			.setName("文档语言")
+			.setDesc("作为新任务默认值；英文论文建议选择 English。")
+			.addDropdown((dropdown) => {
+				MINERU_LANGUAGE_IDS.forEach((id) => dropdown.addOption(id, languageLabels[id] || id));
+				dropdown.setValue(this.plugin.settings.mineruDefaultLanguage).onChange(async (value) => {
+					this.plugin.settings.mineruDefaultLanguage = MINERU_LANGUAGE_IDS.includes(
+						value as typeof MINERU_LANGUAGE_IDS[number],
+					) ? value : "en";
+					await this.plugin.saveSettings();
+				});
+			});
+		new Setting(containerEl)
+			.setName("默认附带原 PDF")
+			.setDesc("支持双栏阅读、版面框定位和完整图重建，但会增加 Vault 占用。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruDefaultIncludeSourcePdf)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultIncludeSourcePdf = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("扫描件 OCR")
+			.setDesc("仅扫描版或无文本层 PDF 建议默认开启。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruDefaultOcr)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultOcr = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("识别公式与表格")
+			.setDesc("两个开关独立保存；默认均开启。")
+			.addToggle((toggle) => toggle
+				.setTooltip("公式识别")
+				.setValue(this.plugin.settings.mineruDefaultFormula)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultFormula = value;
+					await this.plugin.saveSettings();
+				}))
+			.addToggle((toggle) => toggle
+				.setTooltip("表格识别")
+				.setValue(this.plugin.settings.mineruDefaultTable)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultTable = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("提取超时（秒）")
+			.setDesc("范围 60–1800 秒。")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.mineruDefaultTimeoutSeconds))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isFinite(parsed)) return;
+					this.plugin.settings.mineruDefaultTimeoutSeconds = Math.max(60, Math.min(1800, parsed));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("初步文章 Wiki 来源")
+			.setDesc("Auto 优先使用本次验证通过的 article.md，否则使用原 PDF。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("auto", "Auto · 推荐")
+				.addOption("article", "验证后的 article.md")
+				.addOption("pdf", "原始 PDF")
+				.setValue(this.plugin.settings.mineruDefaultArticleWikiSource)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruDefaultArticleWikiSource = value === "article" || value === "pdf"
+						? value
+						: "auto";
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("每次确认远程上传")
+			.setDesc("开启后，文献入库弹窗必须再次确认 PDF 将发送至配置的 MinerU 服务。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruConfirmRemoteUpload)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruConfirmRemoteUpload = value;
+					await this.plugin.saveSettings();
+				}));
+	}
+
+	private renderReaderSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"MinerU 阅读器",
+			"设置新打开阅读器的初始状态；已经打开的阅读器保留自己的页码、缩放和双栏状态。",
+			true,
+		);
+		new Setting(containerEl)
+			.setName("默认右栏模式")
+			.setDesc("选择打开文章时优先显示原始 PDF 或图片与图注。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("pdf", "原始 PDF")
+				.addOption("visuals", "图片与图注")
+				.setValue(this.plugin.settings.mineruReaderDefaultMode)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderDefaultMode = value === "visuals" ? "visuals" : "pdf";
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("原始 PDF 跟随正文页")
+			.setDesc("新阅读器默认根据左侧正文最上方内容同步到对应 PDF 页。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruReaderFollowPdfReading)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderFollowPdfReading = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("图片与图注跟随正文图")
+			.setDesc("新阅读器默认根据正文图锚点切换右侧图片。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruReaderFollowVisualReading)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderFollowVisualReading = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("默认显示版面框")
+			.setDesc("在原始 PDF 上显示 MinerU 文本、图像和图注定位框。")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.mineruReaderShowLayoutBoxes)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderShowLayoutBoxes = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("默认 PDF 缩放")
+			.setDesc("40%–400%；100% 表示适合宽度基准。")
+			.addSlider((slider) => slider
+				.setLimits(0.4, 2, 0.1)
+				.setDynamicTooltip()
+				.setValue(this.plugin.settings.mineruReaderPdfZoom)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderPdfZoom = Math.max(0.4, Math.min(4, value));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("Markdown 栏宽度")
+			.setDesc("双栏中左侧 Markdown 的初始比例，范围 42%–78%。")
+			.addSlider((slider) => slider
+				.setLimits(0.42, 0.78, 0.02)
+				.setDynamicTooltip()
+				.setValue(this.plugin.settings.mineruReaderSplitRatio)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderSplitRatio = Math.max(0.42, Math.min(0.78, value));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("PDF 渲染质量")
+			.setDesc("高清模式提高 Canvas 像素密度，文字和图表更清晰，但占用更多显存。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("standard", "标准")
+				.addOption("high", "高清")
+				.setValue(this.plugin.settings.mineruReaderRenderQuality)
+				.onChange(async (value) => {
+					this.plugin.settings.mineruReaderRenderQuality = value === "high" ? "high" : "standard";
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("图像重建策略")
+			.setDesc("当前保持代码规则的保守策略：只自动采用具有版面证据且通过契约验证的重建结果。原始正则和坐标阈值不开放，避免降低泛化能力。")
+	}
+
+	private getActionDefault(actionId: string): ActionExecutionDefault {
+		return this.plugin.settings.actionExecutionDefaults[actionId]
+			|| { ...DEFAULT_ACTION_EXECUTION_DEFAULTS[actionId] };
+	}
+
+	private renderTaskDefaultsSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"任务默认策略",
+			"为常用 AI 操作设置默认值。运行弹窗中的临时选择仍具有最高优先级。",
+			true,
+		);
+		const actions = CONFIGURABLE_ACTION_IDS
+			.map((id) => ACTIONS.find((action) => action.id === id))
+			.filter((action): action is DashboardAction => Boolean(action));
+		actions.forEach((action) => {
+			const value = this.getActionDefault(action.id);
+			this.createProviderSectionHeader(
+				containerEl,
+				action.label,
+				STAGE_WRITE_BACKEND_ACTION_IDS.has(action.id)
+					? "可选择受阶段写入边界约束的 Agent；运行前仍可修改。"
+					: "该操作固定使用 Codex CLI 权限边界；可覆盖模型、推理和速度。",
+			);
+			if (STAGE_WRITE_BACKEND_ACTION_IDS.has(action.id)) {
+				new Setting(containerEl)
+					.setName("默认执行后端")
+					.setDesc("未配置的后端仍会显示，但不能在任务弹窗中启动。")
+					.addDropdown((dropdown) => dropdown
+						.addOption("codex-cli", "Codex CLI")
+						.addOption("claude-code", this.plugin.isCliBackendAvailable("claude-code") ? "Claude Code" : "Claude Code · 未配置")
+						.addOption("opencode", this.plugin.isCliBackendAvailable("opencode") ? "OpenCode" : "OpenCode · 未配置")
+						.setValue(value.backend)
+						.onChange(async (backend) => {
+							value.backend = backend === "claude-code" || backend === "opencode" ? backend : "codex-cli";
+							value.model = "";
+							value.serviceTier = "default";
+							await this.plugin.saveSettings();
+							this.display();
+						}));
+			}
+			new Setting(containerEl)
+				.setName("模型覆盖")
+				.setDesc("留空使用动作推荐模型或当前后端的全局默认模型。")
+				.addText((text) => text
+					.setPlaceholder("留空使用推荐默认")
+					.setValue(value.model)
+					.onChange(async (model) => {
+						value.model = model.trim().slice(0, 200);
+						await this.plugin.saveSettings();
+					}));
+			new Setting(containerEl)
+				.setName("默认推理强度")
+				.setDesc("任务弹窗选择优先；这里控制无临时覆盖时的默认值。")
+				.addDropdown((dropdown) => {
+					REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+					dropdown.setValue(value.reasoningEffort || action.reasoningEffort || "medium")
+						.onChange(async (reasoning) => {
+							value.reasoningEffort = reasoning as ActionExecutionDefault["reasoningEffort"];
+							await this.plugin.saveSettings();
+						});
+				});
+			if (value.backend === "codex-cli") {
+				new Setting(containerEl)
+					.setName("默认速度")
+					.setDesc("Fast 仅在当前模型支持时生效，否则自动回退标准速度。")
+					.addDropdown((dropdown) => dropdown
+						.addOption("default", "标准")
+						.addOption("fast", "Fast")
+						.setValue(value.serviceTier)
+						.onChange(async (tier) => {
+							value.serviceTier = tier === "fast" ? "fast" : "default";
+							await this.plugin.saveSettings();
+						}));
+			}
+			new Setting(containerEl)
+				.setName("恢复该操作默认值")
+				.addButton((button) => button.setButtonText("恢复").onClick(async () => {
+					this.plugin.settings.actionExecutionDefaults[action.id] = {
+						...DEFAULT_ACTION_EXECUTION_DEFAULTS[action.id],
+					};
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+		});
+
+		this.createProviderSectionHeader(
+			containerEl,
+			"查询侧边栏",
+			"只影响新建对话；已有对话继续保留自己的检索模式和后端。",
+		);
+		new Setting(containerEl)
+			.setName("新对话默认检索模式")
+			.setDesc("联网模式仅适用于 Agent；Direct API 会自动限制为知识库。")
+			.addDropdown((dropdown) => dropdown
+				.addOption("web", "联网检索")
+				.addOption("vault", "仅知识库")
+				.setValue(this.plugin.settings.queryDefaultRetrievalMode)
+				.onChange(async (mode) => {
+					this.plugin.settings.queryDefaultRetrievalMode = mode === "vault" ? "vault" : "web";
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("新对话默认后端")
+			.setDesc("可选择 Agent 或已通过连接测试的 Direct API。")
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption("codex-cli", "Agent · Codex CLI")
+					.addOption("claude-code", "Agent · Claude Code")
+					.addOption("opencode", "Agent · OpenCode");
+				this.plugin.settings.providerProfiles
+					.filter((profile) => profile.lastTest?.ok)
+					.forEach((profile) => dropdown.addOption(profile.id, `Direct API · ${profile.name}`));
+				dropdown.setValue(this.plugin.settings.queryDefaultBackendId).onChange(async (backendId) => {
+					this.plugin.settings.queryDefaultBackendId = backendId;
+					await this.plugin.saveSettings();
+				});
+			});
+	}
+
+	private renderDataSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"数据与诊断",
+			"管理本地历史保留、请求超时和脱敏诊断；不会修改论文原文包。",
+			true,
+		);
+		new Setting(containerEl)
+			.setName("Direct API 超时（秒）")
+			.setDesc("连接测试和普通请求的基础超时，范围 3–120 秒。")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.providerTimeoutSeconds))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isFinite(parsed)) return;
+					this.plugin.settings.providerTimeoutSeconds = Math.max(3, Math.min(120, parsed));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("任务历史保留数量")
+			.setDesc("范围 5–100；正在运行的任务不会被清理按钮移除。")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.taskHistoryLimit))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isFinite(parsed)) return;
+					this.plugin.settings.taskHistoryLimit = Math.max(5, Math.min(100, parsed));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("查询会话保留数量")
+			.setDesc("范围 1–30。")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.querySessionLimit))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isFinite(parsed)) return;
+					this.plugin.settings.querySessionLimit = Math.max(1, Math.min(30, parsed));
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName("每个会话保留消息数")
+			.setDesc("范围 10–100；限制本地持久化体积，不改变当前回答上下文裁剪规则。")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.queryMessageLimit))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isFinite(parsed)) return;
+					this.plugin.settings.queryMessageLimit = Math.max(10, Math.min(100, parsed));
+					await this.plugin.saveSettings();
+				}));
+
+		this.createProviderSectionHeader(
+			containerEl,
+			"知识库维护范围",
+			"核心范围由项目契约固定，避免用户设置造成原文包污染或跨目录链接冲突。",
+		);
+		new Setting(containerEl)
+			.setName("体检范围")
+			.setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");
+
+		this.createProviderSectionHeader(
+			containerEl,
+			"清理与诊断",
+			"诊断内容不包含 API Key、MinerU Token、对话正文或论文内容。",
+		);
+		new Setting(containerEl)
+			.setName("清理本地历史")
+			.setDesc("任务清理只移除已结束记录；查询清理会新建一个空白对话。")
+			.addButton((button) => button.setButtonText("清理已完成任务").onClick(async () => {
+				const count = await this.plugin.clearCompletedTaskHistory();
+				new Notice(`已清理 ${count} 条已完成任务记录。`);
+			}))
+			.addButton((button) => button.setButtonText("重置查询历史").setWarning().onClick(async () => {
+				if (!window.confirm("重置全部查询历史？此操作不会删除知识库文件。")) return;
+				await this.plugin.resetQueryHistory();
+				new Notice("查询历史已重置。");
+			}));
+		new Setting(containerEl)
+			.setName("脱敏诊断")
+			.setDesc("复制插件版本、运行环境、CLI 检测来源和功能范围，不复制密钥或正文。")
+			.addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
+				await navigator.clipboard.writeText(this.plugin.buildDiagnosticsSummary());
+				new Notice("脱敏诊断已复制到剪贴板。");
+			}));
 	}
 
 	private renderCodexSettings(containerEl: HTMLElement): void {

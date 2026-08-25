@@ -917,6 +917,81 @@ export class ProcessExecutionService {
 		});
 	}
 
+	probeMineruCli(settings: DashboardSettings): Promise<ProviderConnectionTestResult> {
+		const startedAt = Date.now();
+		const executable = String(settings.mineruExecutable || "");
+		const endpoint = settings.mineruServiceMode === "private"
+			? settings.mineruBaseUrl || "私有服务地址未配置"
+			: "MinerU 官方服务";
+		if (settings.mineruServiceMode === "private" && !settings.mineruBaseUrl) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				endpoint,
+				model: settings.mineruDefaultModel,
+				message: "已选择私有部署，但尚未填写 MinerU 私有服务地址。",
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		if (!executable || !fs.existsSync(executable)) {
+			return Promise.resolve({
+				ok: false,
+				type: "configuration",
+				endpoint,
+				model: settings.mineruDefaultModel,
+				message: `MinerU 可执行文件不存在：${executable || "未配置"}`,
+				responseTimeMs: Date.now() - startedAt,
+				testedAt: new Date().toISOString(),
+			});
+		}
+		return new Promise((resolve) => {
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			let timer = 0;
+			const invocation = prepareCliSpawn(executable, ["version"]);
+			const child = spawn(invocation.executable, invocation.args, {
+				cwd: settings.projectRoot,
+				shell: false,
+				windowsHide: true,
+			});
+			const finish = (ok: boolean, type: string, message: string): void => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				resolve({
+					ok,
+					type,
+					endpoint,
+					model: settings.mineruDefaultModel,
+					message,
+					responsePreview: ok ? stdout.trim().split(/\r?\n/)[0] || "MinerU CLI 可用" : "",
+					responseTimeMs: Date.now() - startedAt,
+					testedAt: new Date().toISOString(),
+				});
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout = appendOutput(stdout, chunk, 4000);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendOutput(stderr, chunk, 4000);
+			});
+			child.once("error", (error: Error) => finish(false, "local-service-offline", error.message));
+			child.once("close", (code) => {
+				if (code === 0) {
+					finish(true, "success", "MinerU CLI 可用；远程认证将在实际提取时验证。");
+					return;
+				}
+				finish(false, "local-service-offline", stderr.trim() || stdout.trim() || `MinerU CLI 退出码 ${code}`);
+			});
+			timer = window.setTimeout(() => {
+				if (!child.killed) child.kill();
+				finish(false, "timeout", "MinerU CLI 版本检查超过 10 秒");
+			}, 10000);
+		});
+	}
+
 	probeClaudeCode(settings: DashboardSettings): Promise<ProviderConnectionTestResult> {
 		const startedAt = Date.now();
 		const executable = String(settings.claudeExecutable || "");

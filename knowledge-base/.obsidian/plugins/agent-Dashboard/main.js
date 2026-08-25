@@ -129,7 +129,7 @@ var ACTIONS = [
     id: "vault-lint",
     label: "知识库体检",
     agent: "research-vault-lint",
-    description: "执行分层只读审计：结构、属性、链接、孤立页、证据深度、source note 正文、代码关系、索引和 OKF 状态。完成后可在结果弹窗中选择由 AI 提出方案并修复。",
+    description: "体检 wiki 与顶层知识索引：检查结构、属性、链接、孤立页、证据深度、source note 正文、代码关系、索引和 OKF 状态；排除 papers 原文包。完成后可在结果弹窗中选择由 AI 提出方案并修复。",
     placeholder: "",
     requiresInput: false,
     writes: false,
@@ -165,6 +165,57 @@ var ACTION_BY_ID = new Map(ACTIONS.map((action) => [action.id, action]));
 var fs = __toESM(require("node:fs"));
 var path = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
+var CONFIGURABLE_ACTION_IDS = [
+  "paper-ingest",
+  "pdf-xray",
+  "code-analysis",
+  "vault-retrieval",
+  "synthesis",
+  "vault-lint-fix"
+];
+var STAGE_WRITE_BACKEND_ACTION_IDS = /* @__PURE__ */ new Set([
+  "code-analysis",
+  "synthesis"
+]);
+var MINERU_LANGUAGE_IDS = [
+  "en",
+  "ch",
+  "ch_server",
+  "japan",
+  "korean",
+  "latin",
+  "arabic",
+  "cyrillic",
+  "devanagari"
+];
+var DEFAULT_ACTION_EXECUTION_DEFAULTS = {
+  "paper-ingest": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+  "pdf-xray": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+  "code-analysis": { backend: "codex-cli", model: "", reasoningEffort: "medium", serviceTier: "default" },
+  "vault-retrieval": { backend: "codex-cli", model: "", reasoningEffort: "medium", serviceTier: "default" },
+  "synthesis": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" },
+  "vault-lint-fix": { backend: "codex-cli", model: "", reasoningEffort: "high", serviceTier: "default" }
+};
+function normalizeActionExecutionDefault(value, fallback) {
+  const source = value !== null && typeof value === "object" ? value : {};
+  const backend = source.backend === "claude-code" || source.backend === "opencode" ? source.backend : "codex-cli";
+  const reasoning = String(source.reasoningEffort || "");
+  return {
+    backend,
+    model: String(source.model || "").trim().slice(0, 200),
+    reasoningEffort: ["low", "medium", "high", "xhigh"].includes(reasoning) ? reasoning : fallback.reasoningEffort,
+    serviceTier: source.serviceTier === "fast" ? "fast" : "default"
+  };
+}
+function normalizeActionExecutionDefaults(value) {
+  const source = value !== null && typeof value === "object" ? value : {};
+  return Object.fromEntries(CONFIGURABLE_ACTION_IDS.map((actionId) => {
+    const fallback = DEFAULT_ACTION_EXECUTION_DEFAULTS[actionId];
+    const normalized = normalizeActionExecutionDefault(source[actionId], fallback);
+    if (!STAGE_WRITE_BACKEND_ACTION_IDS.has(actionId)) normalized.backend = "codex-cli";
+    return [actionId, normalized];
+  }));
+}
 var MANAGED_CODEX_BIN_ROOT = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "OpenAI", "Codex", "bin") : "";
 var CLI_ENVIRONMENT_VARIABLES = {
   codex: "CODEX_CLI_PATH",
@@ -447,14 +498,37 @@ var DEFAULT_SETTINGS = {
   annotationWebSearchEnabled: false,
   annotationWebSearchTimeoutSeconds: 30,
   mineruExecutable: findPreferredMineruExecutable(),
+  mineruServiceMode: "official",
   mineruBaseUrl: "",
+  mineruDefaultModel: "vlm",
+  mineruDefaultLanguage: "en",
+  mineruDefaultOcr: false,
+  mineruDefaultFormula: true,
+  mineruDefaultTable: true,
+  mineruDefaultTimeoutSeconds: 600,
+  mineruDefaultIncludeSourcePdf: true,
+  mineruDefaultArticleWikiSource: "auto",
+  mineruConfirmRemoteUpload: false,
+  mineruReaderDefaultMode: "pdf",
+  mineruReaderFollowPdfReading: true,
+  mineruReaderFollowVisualReading: true,
+  mineruReaderShowLayoutBoxes: true,
+  mineruReaderPdfZoom: 1,
+  mineruReaderSplitRatio: 0.64,
+  mineruReaderRenderQuality: "standard",
   pythonExecutable: "D:\\python\\python.exe",
   rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
   codePracticeTimeoutSeconds: 30,
   taskTimeoutMinutes: 60,
+  actionExecutionDefaults: normalizeActionExecutionDefaults(DEFAULT_ACTION_EXECUTION_DEFAULTS),
+  queryDefaultBackendId: "codex-cli",
+  queryDefaultRetrievalMode: "web",
   activeProviderId: "",
   providerProfiles: [],
-  providerTimeoutSeconds: 20
+  providerTimeoutSeconds: 20,
+  taskHistoryLimit: 30,
+  querySessionLimit: 8,
+  queryMessageLimit: 30
 };
 
 // src/runtime/lifecycle-state.ts
@@ -695,9 +769,9 @@ function normalizeExecutionConfig(value) {
     reasoningSource: String(source.reasoningSource || "")
   };
 }
-function normalizeStoredTaskRuns(value) {
+function normalizeStoredTaskRuns(value, limit = 30) {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 30).map((item) => {
+  return value.slice(0, Math.max(5, Math.min(100, limit))).map((item) => {
     const source = asRecord2(item);
     return {
       id: String(source.id || ""),
@@ -739,16 +813,19 @@ function sanitizeSettingsForStorage(settings) {
   return sanitized;
 }
 function createPersistenceSnapshot(state) {
+  const taskHistoryLimit = Math.max(5, Math.min(100, state.settings.taskHistoryLimit || 30));
+  const querySessionLimit = Math.max(1, Math.min(30, state.settings.querySessionLimit || 8));
+  const queryMessageLimit = Math.max(10, Math.min(100, state.settings.queryMessageLimit || 30));
   return JSON.parse(JSON.stringify({
     settings: sanitizeSettingsForStorage(state.settings),
-    taskRuns: state.taskRuns.map((run) => ({
+    taskRuns: state.taskRuns.slice(0, taskHistoryLimit).map((run) => ({
       ...run,
       output: String(run.output || "").slice(0, 12e3),
       error: String(run.error || "").slice(0, 4e3)
     })),
-    querySessions: state.querySessions.map((session) => ({
+    querySessions: state.querySessions.slice(0, querySessionLimit).map((session) => ({
       ...session,
-      messages: session.messages.slice(-30).map((message) => ({
+      messages: session.messages.slice(-queryMessageLimit).map((message) => ({
         ...message,
         content: String(message.content || "").slice(0, 8e3),
         error: String(message.error || "").slice(0, 4e3)
@@ -1652,6 +1729,78 @@ Execution interrupted before the plugin restarted.`.trim();
       }, 1e4);
     });
   }
+  probeMineruCli(settings) {
+    const startedAt = Date.now();
+    const executable = String(settings.mineruExecutable || "");
+    const endpoint = settings.mineruServiceMode === "private" ? settings.mineruBaseUrl || "私有服务地址未配置" : "MinerU 官方服务";
+    if (settings.mineruServiceMode === "private" && !settings.mineruBaseUrl) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        endpoint,
+        model: settings.mineruDefaultModel,
+        message: "已选择私有部署，但尚未填写 MinerU 私有服务地址。",
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    if (!executable || !fs2.existsSync(executable)) {
+      return Promise.resolve({
+        ok: false,
+        type: "configuration",
+        endpoint,
+        model: settings.mineruDefaultModel,
+        message: `MinerU 可执行文件不存在：${executable || "未配置"}`,
+        responseTimeMs: Date.now() - startedAt,
+        testedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    return new Promise((resolve4) => {
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timer = 0;
+      const invocation = prepareCliSpawn(executable, ["version"]);
+      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+        cwd: settings.projectRoot,
+        shell: false,
+        windowsHide: true
+      });
+      const finish = (ok, type, message) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve4({
+          ok,
+          type,
+          endpoint,
+          model: settings.mineruDefaultModel,
+          message,
+          responsePreview: ok ? stdout.trim().split(/\r?\n/)[0] || "MinerU CLI 可用" : "",
+          responseTimeMs: Date.now() - startedAt,
+          testedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      };
+      child.stdout.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk, 4e3);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk, 4e3);
+      });
+      child.once("error", (error) => finish(false, "local-service-offline", error.message));
+      child.once("close", (code) => {
+        if (code === 0) {
+          finish(true, "success", "MinerU CLI 可用；远程认证将在实际提取时验证。");
+          return;
+        }
+        finish(false, "local-service-offline", stderr.trim() || stdout.trim() || `MinerU CLI 退出码 ${code}`);
+      });
+      timer = window.setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish(false, "timeout", "MinerU CLI 版本检查超过 10 秒");
+      }, 1e4);
+    });
+  }
   probeClaudeCode(settings) {
     const startedAt = Date.now();
     const executable = String(settings.claudeExecutable || "");
@@ -2003,6 +2152,18 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       case "runtime":
         this.renderRuntimeSettings(containerEl);
         break;
+      case "mineru":
+        this.renderMineruSettings(containerEl);
+        break;
+      case "reader":
+        this.renderReaderSettings(containerEl);
+        break;
+      case "tasks":
+        this.renderTaskDefaultsSettings(containerEl);
+        break;
+      case "data":
+        this.renderDataSettings(containerEl);
+        break;
       case "codex":
         this.renderCodexSettings(containerEl);
         break;
@@ -2033,8 +2194,29 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       page: "runtime",
       icon: "terminal",
       title: "运行环境",
-      description: "项目目录、Codex/Claude/Python/R 可执行文件、任务超时和环境检查。",
+      description: "项目目录、Agent/Python/R 可执行文件、任务超时和环境检查。",
       status: "本地执行"
+    });
+    this.createSettingsNavigationItem(navigation, {
+      page: "mineru",
+      icon: "file-scan",
+      title: "MinerU 文献解析",
+      description: "CLI、服务地址、认证状态提示和文献入库默认参数。",
+      status: this.plugin.settings.mineruServiceMode === "private" ? "私有服务" : `官方服务 · ${this.plugin.settings.mineruDefaultModel.toUpperCase()}`
+    });
+    this.createSettingsNavigationItem(navigation, {
+      page: "reader",
+      icon: "book-open-text",
+      title: "MinerU 阅读器",
+      description: "新阅读器的显示模式、跟随阅读、版面框、缩放与双栏比例。",
+      status: this.plugin.settings.mineruReaderDefaultMode === "visuals" ? "图片与图注" : "原始 PDF"
+    });
+    this.createSettingsNavigationItem(navigation, {
+      page: "tasks",
+      icon: "sliders-horizontal",
+      title: "任务默认策略",
+      description: "按操作设置默认后端、模型、推理强度、速度和查询模式。",
+      status: `${CONFIGURABLE_ACTION_IDS.length} 项策略`
     });
     const reasoningLabel = REASONING_OPTIONS.find(
       (option) => option.id === this.plugin.settings.codexReasoningEffort
@@ -2098,6 +2280,13 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       description: "只读知识库助手的供应商、凭据、模型能力和连接测试。",
       status: activeProfile ? `${activeProfile.name} · 已启用` : profiles.length ? `${profiles.length} 个配置` : "未配置"
     });
+    this.createSettingsNavigationItem(navigation, {
+      page: "data",
+      icon: "database-zap",
+      title: "数据与诊断",
+      description: "历史保留、知识库维护范围、脱敏诊断和清理操作。",
+      status: `任务 ${this.plugin.settings.taskHistoryLimit} · 对话 ${this.plugin.settings.querySessionLimit}`
+    });
   }
   renderRuntimeSettings(containerEl) {
     this.createSettingsPageHeader(
@@ -2145,22 +2334,6 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.invalidateCliModelDiscovery("opencode");
       }
     });
-    this.renderCliExecutableSetting(containerEl, {
-      kind: "mineru",
-      name: "MinerU 可执行文件",
-      description: "用于文献入库的 PDF 高精度提取；插件调用 precision extract，不使用快速占位模式。",
-      placeholder: "mineru-open-api.cmd",
-      getValue: () => this.plugin.settings.mineruExecutable,
-      setValue: (value) => {
-        this.plugin.settings.mineruExecutable = value;
-      }
-    });
-    new import_obsidian.Setting(containerEl).setName("MinerU 私有服务地址").setDesc("可选。留空使用 MinerU 官方服务；仅私有部署时填写 base URL。Token 由 mineru-open-api auth 或 MINERU_TOKEN 管理，不写入插件配置。").addText(
-      (text) => text.setPlaceholder("https://mineru.example.com").setValue(this.plugin.settings.mineruBaseUrl).onChange(async (value) => {
-        this.plugin.settings.mineruBaseUrl = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
     new import_obsidian.Setting(containerEl).setName("Python 可执行文件").setDesc("用于统一 runner、知识库体检和 Python 代码练习。").addText(
       (text) => text.setPlaceholder("D:\\python\\python.exe").setValue(this.plugin.settings.pythonExecutable).onChange(async (value) => {
         this.plugin.settings.pythonExecutable = value.trim();
@@ -2240,6 +2413,282 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     refreshDescription();
+  }
+  renderMineruSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "MinerU 文献解析",
+      "管理 MinerU CLI、服务地址和新建文献入库任务的默认解析参数。每次入库仍可临时覆盖。",
+      true
+    );
+    this.createProviderSectionHeader(
+      containerEl,
+      "连接与认证",
+      "插件不保存 MinerU Token；认证继续由 mineru-open-api 配置或 MINERU_TOKEN 环境变量管理。"
+    );
+    this.renderCliExecutableSetting(containerEl, {
+      kind: "mineru",
+      name: "MinerU 可执行文件",
+      description: "用于文献入库的 precision extract；固定生成 Markdown 与 JSON。",
+      placeholder: "mineru-open-api.cmd",
+      getValue: () => this.plugin.settings.mineruExecutable,
+      setValue: (value) => {
+        this.plugin.settings.mineruExecutable = value;
+        this.plugin.providerRuntimeState.delete("mineru");
+      }
+    });
+    new import_obsidian.Setting(containerEl).setName("服务类型").setDesc("官方服务不传入自定义 Base URL；私有部署使用下方地址。").addDropdown((dropdown) => dropdown.addOption("official", "MinerU 官方服务").addOption("private", "私有部署").setValue(this.plugin.settings.mineruServiceMode).onChange(async (value) => {
+      this.plugin.settings.mineruServiceMode = value === "private" ? "private" : "official";
+      if (value !== "private") this.plugin.settings.mineruBaseUrl = "";
+      this.plugin.providerRuntimeState.delete("mineru");
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+    if (this.plugin.settings.mineruServiceMode === "private") {
+      new import_obsidian.Setting(containerEl).setName("MinerU 私有服务地址").setDesc("必须使用 http:// 或 https://；保存时自动移除末尾斜杠。").addText((text) => text.setPlaceholder("https://mineru.example.com").setValue(this.plugin.settings.mineruBaseUrl).onChange(async (value) => {
+        this.plugin.settings.mineruBaseUrl = value.trim().replace(/\/+$/g, "").slice(0, 500);
+        this.plugin.providerRuntimeState.delete("mineru");
+        await this.plugin.saveSettings();
+      }));
+    }
+    const tokenDetected = Boolean(String(process.env.MINERU_TOKEN || "").trim());
+    new import_obsidian.Setting(containerEl).setName("认证来源").setDesc(
+      tokenDetected ? "已检测到 MINERU_TOKEN 环境变量。真实 Token 不会写入插件配置或诊断信息。" : "未检测到 MINERU_TOKEN；如已使用 mineru-open-api auth 登录，认证仍可能保存在 CLI 配置中。插件不会读取或复制该凭据。"
+    );
+    const mineruResult = this.plugin.providerRuntimeState.get("mineru") || null;
+    new import_obsidian.Setting(containerEl).setName("CLI 可用性检查").setDesc("执行本地 version 检查，不上传 PDF，也不声称验证远程认证。").addButton((button) => {
+      const testing = mineruResult?.status === "testing";
+      button.setButtonText(testing ? "检查中…" : "检查 CLI").setDisabled(testing).onClick(async () => {
+        this.plugin.providerRuntimeState.set("mineru", { status: "testing" });
+        this.display();
+        const result = await this.plugin.probeMineruCliConnection();
+        this.plugin.providerRuntimeState.set("mineru", { status: "done", result });
+        this.display();
+      });
+    });
+    if (mineruResult?.result) {
+      new import_obsidian.Setting(containerEl).setName(mineruResult.result.ok ? "CLI 检查通过" : "CLI 检查失败").setDesc(mineruResult.result.message || mineruResult.result.responsePreview || "无详细信息");
+    }
+    this.createProviderSectionHeader(
+      containerEl,
+      "文献入库默认值",
+      "这些值只作为新任务的起点；任务弹窗中的选择优先。"
+    );
+    new import_obsidian.Setting(containerEl).setName("解析模型").setDesc("VLM 适合复杂版面；Pipeline 更保守；Auto 由服务端选择。").addDropdown((dropdown) => dropdown.addOption("vlm", "VLM · 推荐").addOption("pipeline", "Pipeline · 保守").addOption("auto", "Auto · 服务端选择").setValue(this.plugin.settings.mineruDefaultModel).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultModel = value === "pipeline" || value === "auto" ? value : "vlm";
+      await this.plugin.saveSettings();
+    }));
+    const languageLabels = {
+      en: "English",
+      ch: "中文 + English",
+      ch_server: "中文 / 繁体 / 日文",
+      japan: "日本語",
+      korean: "한국어",
+      latin: "Latin 语系",
+      arabic: "Arabic 语系",
+      cyrillic: "Cyrillic 语系",
+      devanagari: "Devanagari 语系"
+    };
+    new import_obsidian.Setting(containerEl).setName("文档语言").setDesc("作为新任务默认值；英文论文建议选择 English。").addDropdown((dropdown) => {
+      MINERU_LANGUAGE_IDS.forEach((id) => dropdown.addOption(id, languageLabels[id] || id));
+      dropdown.setValue(this.plugin.settings.mineruDefaultLanguage).onChange(async (value) => {
+        this.plugin.settings.mineruDefaultLanguage = MINERU_LANGUAGE_IDS.includes(
+          value
+        ) ? value : "en";
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("默认附带原 PDF").setDesc("支持双栏阅读、版面框定位和完整图重建，但会增加 Vault 占用。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruDefaultIncludeSourcePdf).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultIncludeSourcePdf = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("扫描件 OCR").setDesc("仅扫描版或无文本层 PDF 建议默认开启。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruDefaultOcr).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultOcr = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("识别公式与表格").setDesc("两个开关独立保存；默认均开启。").addToggle((toggle) => toggle.setTooltip("公式识别").setValue(this.plugin.settings.mineruDefaultFormula).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultFormula = value;
+      await this.plugin.saveSettings();
+    })).addToggle((toggle) => toggle.setTooltip("表格识别").setValue(this.plugin.settings.mineruDefaultTable).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultTable = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("提取超时（秒）").setDesc("范围 60–1800 秒。").addText((text) => text.setValue(String(this.plugin.settings.mineruDefaultTimeoutSeconds)).onChange(async (value) => {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return;
+      this.plugin.settings.mineruDefaultTimeoutSeconds = Math.max(60, Math.min(1800, parsed));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("初步文章 Wiki 来源").setDesc("Auto 优先使用本次验证通过的 article.md，否则使用原 PDF。").addDropdown((dropdown) => dropdown.addOption("auto", "Auto · 推荐").addOption("article", "验证后的 article.md").addOption("pdf", "原始 PDF").setValue(this.plugin.settings.mineruDefaultArticleWikiSource).onChange(async (value) => {
+      this.plugin.settings.mineruDefaultArticleWikiSource = value === "article" || value === "pdf" ? value : "auto";
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("每次确认远程上传").setDesc("开启后，文献入库弹窗必须再次确认 PDF 将发送至配置的 MinerU 服务。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruConfirmRemoteUpload).onChange(async (value) => {
+      this.plugin.settings.mineruConfirmRemoteUpload = value;
+      await this.plugin.saveSettings();
+    }));
+  }
+  renderReaderSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "MinerU 阅读器",
+      "设置新打开阅读器的初始状态；已经打开的阅读器保留自己的页码、缩放和双栏状态。",
+      true
+    );
+    new import_obsidian.Setting(containerEl).setName("默认右栏模式").setDesc("选择打开文章时优先显示原始 PDF 或图片与图注。").addDropdown((dropdown) => dropdown.addOption("pdf", "原始 PDF").addOption("visuals", "图片与图注").setValue(this.plugin.settings.mineruReaderDefaultMode).onChange(async (value) => {
+      this.plugin.settings.mineruReaderDefaultMode = value === "visuals" ? "visuals" : "pdf";
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("原始 PDF 跟随正文页").setDesc("新阅读器默认根据左侧正文最上方内容同步到对应 PDF 页。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruReaderFollowPdfReading).onChange(async (value) => {
+      this.plugin.settings.mineruReaderFollowPdfReading = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("图片与图注跟随正文图").setDesc("新阅读器默认根据正文图锚点切换右侧图片。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruReaderFollowVisualReading).onChange(async (value) => {
+      this.plugin.settings.mineruReaderFollowVisualReading = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("默认显示版面框").setDesc("在原始 PDF 上显示 MinerU 文本、图像和图注定位框。").addToggle((toggle) => toggle.setValue(this.plugin.settings.mineruReaderShowLayoutBoxes).onChange(async (value) => {
+      this.plugin.settings.mineruReaderShowLayoutBoxes = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("默认 PDF 缩放").setDesc("40%–400%；100% 表示适合宽度基准。").addSlider((slider) => slider.setLimits(0.4, 2, 0.1).setDynamicTooltip().setValue(this.plugin.settings.mineruReaderPdfZoom).onChange(async (value) => {
+      this.plugin.settings.mineruReaderPdfZoom = Math.max(0.4, Math.min(4, value));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Markdown 栏宽度").setDesc("双栏中左侧 Markdown 的初始比例，范围 42%–78%。").addSlider((slider) => slider.setLimits(0.42, 0.78, 0.02).setDynamicTooltip().setValue(this.plugin.settings.mineruReaderSplitRatio).onChange(async (value) => {
+      this.plugin.settings.mineruReaderSplitRatio = Math.max(0.42, Math.min(0.78, value));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("PDF 渲染质量").setDesc("高清模式提高 Canvas 像素密度，文字和图表更清晰，但占用更多显存。").addDropdown((dropdown) => dropdown.addOption("standard", "标准").addOption("high", "高清").setValue(this.plugin.settings.mineruReaderRenderQuality).onChange(async (value) => {
+      this.plugin.settings.mineruReaderRenderQuality = value === "high" ? "high" : "standard";
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("图像重建策略").setDesc("当前保持代码规则的保守策略：只自动采用具有版面证据且通过契约验证的重建结果。原始正则和坐标阈值不开放，避免降低泛化能力。");
+  }
+  getActionDefault(actionId) {
+    return this.plugin.settings.actionExecutionDefaults[actionId] || { ...DEFAULT_ACTION_EXECUTION_DEFAULTS[actionId] };
+  }
+  renderTaskDefaultsSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "任务默认策略",
+      "为常用 AI 操作设置默认值。运行弹窗中的临时选择仍具有最高优先级。",
+      true
+    );
+    const actions = CONFIGURABLE_ACTION_IDS.map((id) => ACTIONS.find((action) => action.id === id)).filter((action) => Boolean(action));
+    actions.forEach((action) => {
+      const value = this.getActionDefault(action.id);
+      this.createProviderSectionHeader(
+        containerEl,
+        action.label,
+        STAGE_WRITE_BACKEND_ACTION_IDS.has(action.id) ? "可选择受阶段写入边界约束的 Agent；运行前仍可修改。" : "该操作固定使用 Codex CLI 权限边界；可覆盖模型、推理和速度。"
+      );
+      if (STAGE_WRITE_BACKEND_ACTION_IDS.has(action.id)) {
+        new import_obsidian.Setting(containerEl).setName("默认执行后端").setDesc("未配置的后端仍会显示，但不能在任务弹窗中启动。").addDropdown((dropdown) => dropdown.addOption("codex-cli", "Codex CLI").addOption("claude-code", this.plugin.isCliBackendAvailable("claude-code") ? "Claude Code" : "Claude Code · 未配置").addOption("opencode", this.plugin.isCliBackendAvailable("opencode") ? "OpenCode" : "OpenCode · 未配置").setValue(value.backend).onChange(async (backend) => {
+          value.backend = backend === "claude-code" || backend === "opencode" ? backend : "codex-cli";
+          value.model = "";
+          value.serviceTier = "default";
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+      }
+      new import_obsidian.Setting(containerEl).setName("模型覆盖").setDesc("留空使用动作推荐模型或当前后端的全局默认模型。").addText((text) => text.setPlaceholder("留空使用推荐默认").setValue(value.model).onChange(async (model) => {
+        value.model = model.trim().slice(0, 200);
+        await this.plugin.saveSettings();
+      }));
+      new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("任务弹窗选择优先；这里控制无临时覆盖时的默认值。").addDropdown((dropdown) => {
+        REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
+        dropdown.setValue(value.reasoningEffort || action.reasoningEffort || "medium").onChange(async (reasoning) => {
+          value.reasoningEffort = reasoning;
+          await this.plugin.saveSettings();
+        });
+      });
+      if (value.backend === "codex-cli") {
+        new import_obsidian.Setting(containerEl).setName("默认速度").setDesc("Fast 仅在当前模型支持时生效，否则自动回退标准速度。").addDropdown((dropdown) => dropdown.addOption("default", "标准").addOption("fast", "Fast").setValue(value.serviceTier).onChange(async (tier) => {
+          value.serviceTier = tier === "fast" ? "fast" : "default";
+          await this.plugin.saveSettings();
+        }));
+      }
+      new import_obsidian.Setting(containerEl).setName("恢复该操作默认值").addButton((button) => button.setButtonText("恢复").onClick(async () => {
+        this.plugin.settings.actionExecutionDefaults[action.id] = {
+          ...DEFAULT_ACTION_EXECUTION_DEFAULTS[action.id]
+        };
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+    });
+    this.createProviderSectionHeader(
+      containerEl,
+      "查询侧边栏",
+      "只影响新建对话；已有对话继续保留自己的检索模式和后端。"
+    );
+    new import_obsidian.Setting(containerEl).setName("新对话默认检索模式").setDesc("联网模式仅适用于 Agent；Direct API 会自动限制为知识库。").addDropdown((dropdown) => dropdown.addOption("web", "联网检索").addOption("vault", "仅知识库").setValue(this.plugin.settings.queryDefaultRetrievalMode).onChange(async (mode) => {
+      this.plugin.settings.queryDefaultRetrievalMode = mode === "vault" ? "vault" : "web";
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("新对话默认后端").setDesc("可选择 Agent 或已通过连接测试的 Direct API。").addDropdown((dropdown) => {
+      dropdown.addOption("codex-cli", "Agent · Codex CLI").addOption("claude-code", "Agent · Claude Code").addOption("opencode", "Agent · OpenCode");
+      this.plugin.settings.providerProfiles.filter((profile) => profile.lastTest?.ok).forEach((profile) => dropdown.addOption(profile.id, `Direct API · ${profile.name}`));
+      dropdown.setValue(this.plugin.settings.queryDefaultBackendId).onChange(async (backendId) => {
+        this.plugin.settings.queryDefaultBackendId = backendId;
+        await this.plugin.saveSettings();
+      });
+    });
+  }
+  renderDataSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "数据与诊断",
+      "管理本地历史保留、请求超时和脱敏诊断；不会修改论文原文包。",
+      true
+    );
+    new import_obsidian.Setting(containerEl).setName("Direct API 超时（秒）").setDesc("连接测试和普通请求的基础超时，范围 3–120 秒。").addText((text) => text.setValue(String(this.plugin.settings.providerTimeoutSeconds)).onChange(async (value) => {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return;
+      this.plugin.settings.providerTimeoutSeconds = Math.max(3, Math.min(120, parsed));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("任务历史保留数量").setDesc("范围 5–100；正在运行的任务不会被清理按钮移除。").addText((text) => text.setValue(String(this.plugin.settings.taskHistoryLimit)).onChange(async (value) => {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return;
+      this.plugin.settings.taskHistoryLimit = Math.max(5, Math.min(100, parsed));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("查询会话保留数量").setDesc("范围 1–30。").addText((text) => text.setValue(String(this.plugin.settings.querySessionLimit)).onChange(async (value) => {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return;
+      this.plugin.settings.querySessionLimit = Math.max(1, Math.min(30, parsed));
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("每个会话保留消息数").setDesc("范围 10–100；限制本地持久化体积，不改变当前回答上下文裁剪规则。").addText((text) => text.setValue(String(this.plugin.settings.queryMessageLimit)).onChange(async (value) => {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return;
+      this.plugin.settings.queryMessageLimit = Math.max(10, Math.min(100, parsed));
+      await this.plugin.saveSettings();
+    }));
+    this.createProviderSectionHeader(
+      containerEl,
+      "知识库维护范围",
+      "核心范围由项目契约固定，避免用户设置造成原文包污染或跨目录链接冲突。"
+    );
+    new import_obsidian.Setting(containerEl).setName("体检范围").setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");
+    this.createProviderSectionHeader(
+      containerEl,
+      "清理与诊断",
+      "诊断内容不包含 API Key、MinerU Token、对话正文或论文内容。"
+    );
+    new import_obsidian.Setting(containerEl).setName("清理本地历史").setDesc("任务清理只移除已结束记录；查询清理会新建一个空白对话。").addButton((button) => button.setButtonText("清理已完成任务").onClick(async () => {
+      const count = await this.plugin.clearCompletedTaskHistory();
+      new import_obsidian.Notice(`已清理 ${count} 条已完成任务记录。`);
+    })).addButton((button) => button.setButtonText("重置查询历史").setWarning().onClick(async () => {
+      if (!window.confirm("重置全部查询历史？此操作不会删除知识库文件。")) return;
+      await this.plugin.resetQueryHistory();
+      new import_obsidian.Notice("查询历史已重置。");
+    }));
+    new import_obsidian.Setting(containerEl).setName("脱敏诊断").setDesc("复制插件版本、运行环境、CLI 检测来源和功能范围，不复制密钥或正文。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
+      await navigator.clipboard.writeText(this.plugin.buildDiagnosticsSummary());
+      new import_obsidian.Notice("脱敏诊断已复制到剪贴板。");
+    }));
   }
   renderCodexSettings(containerEl) {
     const configSource = this.plugin.settings.codexConfigSource;
@@ -3755,7 +4204,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
           { value: "pipeline", label: "Pipeline · 保守提取" },
           { value: "auto", label: "Auto · 服务端选择" }
         ],
-        "vlm"
+        this.plugin.settings.mineruDefaultModel === "pipeline" || this.plugin.settings.mineruDefaultModel === "auto" ? this.plugin.settings.mineruDefaultModel : "vlm"
       );
       const language = createSelectField(
         mineruGrid,
@@ -3772,31 +4221,31 @@ var ActionInputModal = class extends import_obsidian4.Modal {
           { value: "cyrillic", label: "Cyrillic 语系" },
           { value: "devanagari", label: "Devanagari 语系" }
         ],
-        "en"
+        this.plugin.settings.mineruDefaultLanguage || "en"
       );
       const includeSourcePdf = this.createCheckboxOption(
         mineruPanel,
         "在原文包中附带 PDF",
         "将原 PDF 复制到 _extraction/source.pdf，用于双栏阅读、版面框定位和完整图重建。",
-        true
+        this.plugin.settings.mineruDefaultIncludeSourcePdf
       );
       const ocr = this.createCheckboxOption(
         mineruPanel,
         "扫描件 OCR",
         "仅扫描版或无文本层 PDF 开启；普通数字 PDF 保持关闭。",
-        false
+        this.plugin.settings.mineruDefaultOcr
       );
       const formula = this.createCheckboxOption(
         mineruPanel,
         "识别公式",
         "保留数学公式识别。",
-        true
+        this.plugin.settings.mineruDefaultFormula
       );
       const table = this.createCheckboxOption(
         mineruPanel,
         "识别表格",
         "生成可搜索的 HTML 表格并保留表格裁图证据。",
-        true
+        this.plugin.settings.mineruDefaultTable
       );
       const advanced = mineruPanel.createEl("details", {
         cls: "agent-dashboard-mineru-advanced"
@@ -3809,7 +4258,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         advancedGrid,
         "提取超时（秒）",
         "单篇请求上限，范围 60–1800 秒。",
-        600,
+        this.plugin.settings.mineruDefaultTimeoutSeconds,
         60,
         1800,
         30
@@ -3831,6 +4280,12 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         cls: "agent-dashboard-action-options-description",
         text: "文档会上传到 MinerU 服务端处理。Token 由 MinerU CLI 管理，插件不保存密钥；批量模式和非 Markdown 输出不在单篇入库中开放。"
       });
+      const uploadConfirmation = this.plugin.settings.mineruConfirmRemoteUpload ? this.createCheckboxOption(
+        mineruPanel,
+        "确认远程处理",
+        "我确认本次 PDF 将发送至配置的 MinerU 服务进行解析。",
+        false
+      ) : null;
       const wikiOption = this.createCheckboxOption(
         section,
         "创建初步文章 Wiki",
@@ -3851,6 +4306,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       sourceSelect.createEl("option", { text: "自动选择", attr: { value: "auto" } });
       sourceSelect.createEl("option", { text: "原始 PDF", attr: { value: "pdf" } });
       sourceSelect.createEl("option", { text: "已有 article.md", attr: { value: "article" } });
+      sourceSelect.value = this.plugin.settings.mineruDefaultArticleWikiSource;
       const normalizePages = () => {
         const text = pagesInput.value.trim().replace(/，/g, ",");
         if (!text) return "";
@@ -3889,7 +4345,8 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         formula,
         table,
         pagesInput,
-        timeout.input
+        timeout.input,
+        ...uploadConfirmation ? [uploadConfirmation] : []
       ]) {
         control.addEventListener("change", sync);
         control.addEventListener("input", sync);
@@ -3899,7 +4356,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         getOptions: () => ({
           createArticleMarkdown: markdownOption.checked,
           createArticleWiki: wikiOption.checked,
-          articleWikiSource: sourceSelect.value === "pdf" ? "pdf" : sourceSelect.value === "article" ? "article" : "auto",
+          articleWikiSource: sourceSelect.value === "pdf" ? "pdf" : sourceSelect.value === "article" ? "article" : this.plugin.settings.mineruDefaultArticleWikiSource,
           mineruModel: model.select.value === "pipeline" ? "pipeline" : model.select.value === "auto" ? "auto" : "vlm",
           mineruLanguage: language.select.value,
           mineruOcr: ocr.checked,
@@ -3912,7 +4369,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         isValid: () => {
           if (!markdownOption.checked && !wikiOption.checked) return false;
           if (!markdownOption.checked) return true;
-          return mineruAvailable && normalizePages() !== null && isNumberInRange(timeout.input, 60, 1800) && Number.isInteger(timeout.input.valueAsNumber);
+          return mineruAvailable && normalizePages() !== null && isNumberInRange(timeout.input, 60, 1800) && Number.isInteger(timeout.input.valueAsNumber) && (!uploadConfirmation || uploadConfirmation.checked);
         }
       };
     }
@@ -3967,7 +4424,9 @@ var ActionInputModal = class extends import_obsidian4.Modal {
     const supportsStageWriteBackends = ["code-analysis", "synthesis"].includes(
       this.action.id
     );
-    let backendId = "codex-cli";
+    const configuredDefault = this.plugin.settings.actionExecutionDefaults[this.action.id];
+    const configuredBackend = configuredDefault?.backend;
+    let backendId = supportsStageWriteBackends && (configuredBackend === "claude-code" || configuredBackend === "opencode") && this.plugin.isCliBackendAvailable(configuredBackend) ? configuredBackend : "codex-cli";
     const resolveEffective = (overrides = {}) => {
       return this.plugin.resolveCliActionExecutionConfig(
         this.action,
@@ -3999,6 +4458,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
         attr: { value: "opencode" }
       });
       openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
+      backendSelect.value = backendId;
     }
     const modelSelect = this.createSelectField(section, "模型", "运行模型");
     const reasoningSelect = this.createSelectField(section, "推理强度", "运行推理强度");
@@ -4015,7 +4475,7 @@ var ActionInputModal = class extends import_obsidian4.Modal {
       cls: "agent-dashboard-speed-control",
       attr: { role: "group", "aria-label": "运行速度" }
     });
-    let serviceTier = "default";
+    let serviceTier = backendId === "codex-cli" && configuredDefault?.serviceTier === "fast" ? "fast" : "default";
     const speedOptions = [
       ["default", "标准", "默认速度"],
       ["fast", "快速", "约 1.5 倍速度，用量更多"]
@@ -4309,13 +4769,17 @@ var DashboardDataService = class {
     const version = ++this.loadVersion;
     const nextRecords = new Map(this.recordByPath);
     if (!this.initialized) {
-      const files = this.app.vault.getMarkdownFiles();
+      const files = this.app.vault.getMarkdownFiles().filter((file) => !this.isExcludedMaintenancePath(file.path));
       const records2 = await Promise.all(files.map((file) => this.readRecord(file)));
       if (version !== this.loadVersion) return null;
       nextRecords.clear();
       records2.forEach((record) => nextRecords.set(record.path, record));
     } else {
       for (const change of changes) {
+        if (this.isExcludedMaintenancePath(change.path)) {
+          nextRecords.delete((0, import_obsidian6.normalizePath)(change.path));
+          continue;
+        }
         if (change.type === "delete") {
           nextRecords.delete((0, import_obsidian6.normalizePath)(change.path));
           continue;
@@ -4403,6 +4867,9 @@ var DashboardDataService = class {
       okf
     };
     return version === this.loadVersion ? result : null;
+  }
+  isExcludedMaintenancePath(value) {
+    return (0, import_obsidian6.normalizePath)(value).startsWith("papers/");
   }
   async readRecord(file) {
     const text = await this.app.vault.cachedRead(file);
@@ -7959,8 +8426,9 @@ var MineruPackageLoader = class {
 
 // src/mineru/pdf-renderer.ts
 var import_obsidian9 = require("obsidian");
-function outputScale() {
-  return Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+function outputScale(quality) {
+  const density = window.devicePixelRatio || 1;
+  return quality === "high" ? Math.max(1, Math.min(3, density * 1.5)) : Math.max(1, Math.min(2, density));
 }
 function getCanvasContext(canvas) {
   const context = canvas.getContext("2d", { alpha: false });
@@ -7980,6 +8448,10 @@ var MineruPdfRenderer = class {
     this.generation = 0;
     this.pageGeneration = 0;
     this.cropGeneration = 0;
+    this.renderQuality = "standard";
+  }
+  setRenderQuality(value) {
+    this.renderQuality = value === "high" ? "high" : "standard";
   }
   get numPages() {
     return this.document?.numPages || 0;
@@ -8016,7 +8488,7 @@ var MineruPdfRenderer = class {
     const baseViewport = page.getViewport({ scale: 1 });
     const fitScale = Math.max(0.25, availableWidth / Math.max(1, baseViewport.width));
     const viewport = page.getViewport({ scale: fitScale * Math.max(0.4, Math.min(4, zoom)) });
-    const ratio = outputScale();
+    const ratio = outputScale(this.renderQuality);
     canvas.width = Math.max(1, Math.floor(viewport.width * ratio));
     canvas.height = Math.max(1, Math.floor(viewport.height * ratio));
     canvas.style.width = `${Math.floor(viewport.width)}px`;
@@ -8123,7 +8595,7 @@ var MineruPdfRenderer = class {
     const top = viewport.height * crop[1] / 1e3;
     const width = viewport.width * (crop[2] - crop[0]) / 1e3;
     const height = viewport.height * (crop[3] - crop[1]) / 1e3;
-    const ratio = outputScale();
+    const ratio = outputScale(this.renderQuality);
     canvas.width = Math.max(1, Math.floor(width * ratio));
     canvas.height = Math.max(1, Math.floor(height * ratio));
     canvas.style.width = `${Math.floor(width)}px`;
@@ -8208,6 +8680,17 @@ var DEFAULT_STATE = {
   pdfZoom: 1,
   splitRatio: 0.64
 };
+function defaultStateForSettings(settings) {
+  return {
+    ...DEFAULT_STATE,
+    mode: settings.mineruReaderDefaultMode,
+    followPdfReading: settings.mineruReaderFollowPdfReading,
+    followVisualReading: settings.mineruReaderFollowVisualReading,
+    showLayoutBoxes: settings.mineruReaderShowLayoutBoxes,
+    pdfZoom: settings.mineruReaderPdfZoom,
+    splitRatio: settings.mineruReaderSplitRatio
+  };
+}
 function boundedNumber(value, fallback, min, max) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.max(min, Math.min(max, numeric)) : fallback;
@@ -8215,22 +8698,22 @@ function boundedNumber(value, fallback, min, max) {
 function isAbortError(error) {
   return error instanceof DOMException ? error.name === "AbortError" : /abort|cancel|superseded/i.test(error instanceof Error ? error.message : String(error));
 }
-function normalizeState(value) {
+function normalizeState(value, defaults = DEFAULT_STATE) {
   const record = value !== null && typeof value === "object" ? value : {};
-  const mode = record.mode === "visuals" ? "visuals" : "pdf";
-  const legacyFollowReading = record.followReading !== false;
+  const mode = record.mode === "visuals" ? "visuals" : record.mode === "pdf" ? "pdf" : defaults.mode;
+  const legacyFollowReading = typeof record.followReading === "boolean" ? record.followReading : null;
   return {
     articlePath: String(record.articlePath || ""),
     mode,
-    followPdfReading: typeof record.followPdfReading === "boolean" ? record.followPdfReading : legacyFollowReading,
-    followVisualReading: typeof record.followVisualReading === "boolean" ? record.followVisualReading : legacyFollowReading,
-    showLayoutBoxes: record.showLayoutBoxes !== false,
+    followPdfReading: typeof record.followPdfReading === "boolean" ? record.followPdfReading : legacyFollowReading ?? defaults.followPdfReading,
+    followVisualReading: typeof record.followVisualReading === "boolean" ? record.followVisualReading : legacyFollowReading ?? defaults.followVisualReading,
+    showLayoutBoxes: typeof record.showLayoutBoxes === "boolean" ? record.showLayoutBoxes : defaults.showLayoutBoxes,
     currentVisualId: String(record.currentVisualId || ""),
     markdownAnchor: String(record.markdownAnchor || ""),
     markdownPage: Math.floor(boundedNumber(record.markdownPage, 1, 1, Number.MAX_SAFE_INTEGER)),
     pdfPage: Math.floor(boundedNumber(record.pdfPage, 1, 1, Number.MAX_SAFE_INTEGER)),
-    pdfZoom: boundedNumber(record.pdfZoom, 1, 0.4, 4),
-    splitRatio: boundedNumber(record.splitRatio, 0.64, 0.42, 0.78)
+    pdfZoom: boundedNumber(record.pdfZoom, defaults.pdfZoom, 0.4, 4),
+    splitRatio: boundedNumber(record.splitRatio, defaults.splitRatio, 0.42, 0.78)
   };
 }
 function iconButton(parent, icon, label, className = "") {
@@ -8246,7 +8729,6 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.pdfRenderer = new MineruPdfRenderer();
-    this.readerState = { ...DEFAULT_STATE };
     this.readerPackage = null;
     this.markdownScroller = null;
     this.markdownPageStatus = null;
@@ -8265,6 +8747,8 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
     this.pdfFollowInteractionSource = "markdown";
     this.plugin = plugin;
     this.loader = new MineruPackageLoader(plugin.app);
+    this.readerState = defaultStateForSettings(plugin.settings);
+    this.pdfRenderer.setRenderQuality(plugin.settings.mineruReaderRenderQuality);
     this.navigation = true;
   }
   getViewType() {
@@ -8281,7 +8765,7 @@ var MineruReaderView = class extends import_obsidian10.ItemView {
   }
   async setState(state, _result) {
     const previousPath = this.readerState.articlePath;
-    this.readerState = normalizeState(state);
+    this.readerState = normalizeState(state, defaultStateForSettings(this.plugin.settings));
     if (this.opened && this.readerState.articlePath) {
       if (this.readerState.articlePath !== previousPath || !this.readerPackage) {
         await this.loadAndRender();
@@ -13991,8 +14475,14 @@ ${result.stderr.trim()}` : ""
     this.settings.activeProviderId = String(storedSettings.activeProviderId || "");
     const providerTimeout = Number.parseInt(String(storedSettings.providerTimeoutSeconds || ""), 10);
     this.settings.providerTimeoutSeconds = Number.isFinite(providerTimeout) ? Math.max(3, Math.min(120, providerTimeout)) : DEFAULT_SETTINGS.providerTimeoutSeconds;
-    this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns);
-    this.querySessions = Array.isArray(stored.querySessions) ? stored.querySessions.slice(0, 8).map((session) => this.normalizeQuerySession(session)) : [];
+    const taskHistoryLimit = Number.parseInt(String(storedSettings.taskHistoryLimit || ""), 10);
+    this.settings.taskHistoryLimit = Number.isFinite(taskHistoryLimit) ? Math.max(5, Math.min(100, taskHistoryLimit)) : DEFAULT_SETTINGS.taskHistoryLimit;
+    const querySessionLimit = Number.parseInt(String(storedSettings.querySessionLimit || ""), 10);
+    this.settings.querySessionLimit = Number.isFinite(querySessionLimit) ? Math.max(1, Math.min(30, querySessionLimit)) : DEFAULT_SETTINGS.querySessionLimit;
+    const queryMessageLimit = Number.parseInt(String(storedSettings.queryMessageLimit || ""), 10);
+    this.settings.queryMessageLimit = Number.isFinite(queryMessageLimit) ? Math.max(10, Math.min(100, queryMessageLimit)) : DEFAULT_SETTINGS.queryMessageLimit;
+    this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns, this.settings.taskHistoryLimit);
+    this.querySessions = Array.isArray(stored.querySessions) ? stored.querySessions.slice(0, this.settings.querySessionLimit).map((session) => this.normalizeQuerySession(session)) : [];
     this.activeQuerySessionId = typeof stored.activeQuerySessionId === "string" ? stored.activeQuerySessionId : "";
     if (!this.settings.projectRoot) {
       this.settings.projectRoot = this.inferProjectRoot();
@@ -14077,6 +14567,57 @@ ${result.stderr.trim()}` : ""
     const configuredMineruExecutable = String(this.settings.mineruExecutable || "").trim();
     if (!configuredMineruExecutable && preferredMineruExecutable) {
       this.settings.mineruExecutable = preferredMineruExecutable;
+      changed = true;
+    }
+    this.settings.mineruServiceMode = storedSettings.mineruServiceMode === "private" || !storedSettings.mineruServiceMode && Boolean(String(storedSettings.mineruBaseUrl || "").trim()) ? "private" : "official";
+    if (this.settings.mineruServiceMode === "official" && this.settings.mineruBaseUrl) {
+      this.settings.mineruBaseUrl = "";
+      changed = true;
+    }
+    this.settings.mineruDefaultModel = storedSettings.mineruDefaultModel === "pipeline" || storedSettings.mineruDefaultModel === "auto" ? storedSettings.mineruDefaultModel : "vlm";
+    const mineruLanguages = [
+      "en",
+      "ch",
+      "ch_server",
+      "japan",
+      "korean",
+      "latin",
+      "arabic",
+      "cyrillic",
+      "devanagari"
+    ];
+    this.settings.mineruDefaultLanguage = mineruLanguages.includes(
+      String(storedSettings.mineruDefaultLanguage || "")
+    ) ? String(storedSettings.mineruDefaultLanguage) : DEFAULT_SETTINGS.mineruDefaultLanguage;
+    this.settings.mineruDefaultOcr = storedSettings.mineruDefaultOcr === true;
+    this.settings.mineruDefaultFormula = storedSettings.mineruDefaultFormula !== false;
+    this.settings.mineruDefaultTable = storedSettings.mineruDefaultTable !== false;
+    const mineruTimeout = Number.parseInt(String(storedSettings.mineruDefaultTimeoutSeconds || ""), 10);
+    this.settings.mineruDefaultTimeoutSeconds = Number.isFinite(mineruTimeout) ? Math.max(60, Math.min(1800, mineruTimeout)) : DEFAULT_SETTINGS.mineruDefaultTimeoutSeconds;
+    this.settings.mineruDefaultIncludeSourcePdf = storedSettings.mineruDefaultIncludeSourcePdf !== false;
+    this.settings.mineruDefaultArticleWikiSource = storedSettings.mineruDefaultArticleWikiSource === "pdf" || storedSettings.mineruDefaultArticleWikiSource === "article" ? storedSettings.mineruDefaultArticleWikiSource : "auto";
+    this.settings.mineruConfirmRemoteUpload = storedSettings.mineruConfirmRemoteUpload === true;
+    this.settings.mineruReaderDefaultMode = storedSettings.mineruReaderDefaultMode === "visuals" ? "visuals" : "pdf";
+    this.settings.mineruReaderFollowPdfReading = storedSettings.mineruReaderFollowPdfReading !== false;
+    this.settings.mineruReaderFollowVisualReading = storedSettings.mineruReaderFollowVisualReading !== false;
+    this.settings.mineruReaderShowLayoutBoxes = storedSettings.mineruReaderShowLayoutBoxes !== false;
+    const readerZoom = Number(storedSettings.mineruReaderPdfZoom);
+    this.settings.mineruReaderPdfZoom = Number.isFinite(readerZoom) ? Math.max(0.4, Math.min(4, readerZoom)) : DEFAULT_SETTINGS.mineruReaderPdfZoom;
+    const splitRatio = Number(storedSettings.mineruReaderSplitRatio);
+    this.settings.mineruReaderSplitRatio = Number.isFinite(splitRatio) ? Math.max(0.42, Math.min(0.78, splitRatio)) : DEFAULT_SETTINGS.mineruReaderSplitRatio;
+    this.settings.mineruReaderRenderQuality = storedSettings.mineruReaderRenderQuality === "high" ? "high" : "standard";
+    this.settings.actionExecutionDefaults = normalizeActionExecutionDefaults(
+      storedSettings.actionExecutionDefaults
+    );
+    this.settings.queryDefaultRetrievalMode = storedSettings.queryDefaultRetrievalMode === "vault" ? "vault" : "web";
+    this.settings.queryDefaultBackendId = String(
+      storedSettings.queryDefaultBackendId || "codex-cli"
+    ).slice(0, 160);
+    const normalizedQueryDefaultBackend = this.resolveQueryBackendId(
+      this.settings.queryDefaultBackendId
+    );
+    if (normalizedQueryDefaultBackend !== this.settings.queryDefaultBackendId) {
+      this.settings.queryDefaultBackendId = normalizedQueryDefaultBackend;
       changed = true;
     }
     const legacySettings = this.settings;
@@ -14345,13 +14886,52 @@ ${result.stderr.trim()}` : ""
   probeCodexCliConnection() {
     return this.processExecution.probeCodexCli(this.settings);
   }
+  probeMineruCliConnection() {
+    return this.processExecution.probeMineruCli(this.settings);
+  }
+  async clearCompletedTaskHistory() {
+    const before = this.taskRuns.length;
+    this.taskRuns = this.taskRuns.filter((run) => run.status === "running" || run.status === "queued");
+    await this.saveSettings();
+    return before - this.taskRuns.length;
+  }
+  async resetQueryHistory() {
+    const session = this.makeQuerySession();
+    this.querySessions = [session];
+    this.activeQuerySessionId = session.id;
+    await this.saveSettings();
+  }
+  buildDiagnosticsSummary() {
+    const describe = (label, kind, executable) => {
+      const detection = describeCliExecutable(kind, executable);
+      return `${label}: ${detection.found ? "可用" : "不可用"} · ${detection.sourceLabel}`;
+    };
+    return [
+      `Agent Dashboard ${this.manifest.version}`,
+      `平台: ${process.platform} ${process.arch}`,
+      `项目根目录: ${this.settings.projectRoot && fs4.existsSync(this.settings.projectRoot) ? "可用" : "不可用"}`,
+      describe("Codex CLI", "codex", this.settings.codexExecutable),
+      describe("Claude Code", "claude", this.settings.claudeExecutable),
+      describe("OpenCode", "opencode", this.settings.openCodeExecutable),
+      describe("MinerU CLI", "mineru", this.settings.mineruExecutable),
+      `MinerU 服务: ${this.settings.mineruServiceMode === "private" ? "私有部署" : "官方服务"}`,
+      `Python: ${this.settings.pythonExecutable && fs4.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
+      `Rscript: ${this.settings.rscriptExecutable && fs4.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,
+      `Direct API 配置数: ${this.settings.providerProfiles.length}`,
+      "体检范围: wiki/ 与顶层索引；排除 papers/",
+      "凭据、endpoint、正文和对话内容: 已排除"
+    ].join("\n");
+  }
   makeQuerySession(title = "新对话") {
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    const queryBackendId = this.resolveQueryBackendId(this.settings.queryDefaultBackendId);
+    const directApi = !isCliBackendId(queryBackendId);
+    const defaultRetrievalMode = this.settings.queryDefaultRetrievalMode === "vault" ? "vault" : "web";
     return {
       id: `query-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       title,
-      retrievalMode: "web",
-      queryBackendId: "codex-cli",
+      retrievalMode: directApi ? "vault" : defaultRetrievalMode,
+      queryBackendId,
       createdAt: now,
       updatedAt: now,
       messages: []
@@ -14360,7 +14940,7 @@ ${result.stderr.trim()}` : ""
   normalizeQuerySession(session) {
     const source = asRecord8(session);
     const fallback = this.makeQuerySession();
-    const messages = Array.isArray(source.messages) ? source.messages.slice(-60).map((value) => {
+    const messages = Array.isArray(source.messages) ? source.messages.slice(-(this.settings.queryMessageLimit || DEFAULT_SETTINGS.queryMessageLimit)).map((value) => {
       const message = asRecord8(value);
       return {
         id: String(message.id || this.createQueryMessageId()),
@@ -14417,7 +14997,10 @@ ${result.stderr.trim()}` : ""
       return activeSession;
     }
     const session = this.makeQuerySession();
-    this.querySessions = [session, ...this.querySessions].slice(0, 8);
+    this.querySessions = [session, ...this.querySessions].slice(
+      0,
+      this.settings.querySessionLimit || DEFAULT_SETTINGS.querySessionLimit
+    );
     this.activeQuerySessionId = session.id;
     await this.saveSettings();
     return session;
@@ -14462,7 +15045,9 @@ ${result.stderr.trim()}` : ""
   async appendQueryMessages(sessionId, messages, firstQuestion = "") {
     const session = this.querySessions.find((item) => item.id === sessionId);
     if (!session) throw new Error("查询会话不存在");
-    session.messages = [...session.messages, ...messages].slice(-60);
+    session.messages = [...session.messages, ...messages].slice(
+      -(this.settings.queryMessageLimit || DEFAULT_SETTINGS.queryMessageLimit)
+    );
     if (session.title === "新对话" && firstQuestion) {
       session.title = firstQuestion.replace(/\s+/g, " ").slice(0, 36);
     }
@@ -14597,8 +15182,9 @@ ${result.stderr.trim()}` : ""
   }
   resolveActionExecutionConfig(action, overrides = {}) {
     const useOfficialConfig = this.settings.codexConfigSource === "official";
-    const buttonModel = useOfficialConfig ? action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel : "";
-    const buttonReasoning = useOfficialConfig ? action.reasoningEffort || this.settings.codexReasoningEffort || DEFAULT_SETTINGS.codexReasoningEffort : "";
+    const configuredDefault = this.settings.actionExecutionDefaults?.[action.id];
+    const buttonModel = useOfficialConfig ? configuredDefault?.model || action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel : "";
+    const buttonReasoning = useOfficialConfig ? configuredDefault?.reasoningEffort || action.reasoningEffort || this.settings.codexReasoningEffort || DEFAULT_SETTINGS.codexReasoningEffort : "";
     const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
     const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
     const reasoningEffort = REASONING_OPTIONS.some((option) => option.id === requestedReasoning) ? requestedReasoning : buttonReasoning;
@@ -14607,9 +15193,9 @@ ${result.stderr.trim()}` : ""
       backend: "codex-cli",
       model: effectiveModel,
       reasoningEffort,
-      serviceTier: overrides.serviceTier === "fast" && this.supportsFast(effectiveModel) ? "fast" : "default",
-      modelSource: requestedModel ? "本次覆盖" : useOfficialConfig ? action.model ? "按钮默认" : "全局默认" : getCodexDefaultModelLabel(this.settings.codexConfigSource),
-      reasoningSource: requestedReasoning ? "本次覆盖" : useOfficialConfig ? action.reasoningEffort ? "按钮默认" : "全局默认" : "Codex CLI 配置"
+      serviceTier: (overrides.serviceTier || configuredDefault?.serviceTier) === "fast" && this.supportsFast(effectiveModel) ? "fast" : "default",
+      modelSource: requestedModel ? "本次覆盖" : useOfficialConfig ? configuredDefault?.model ? "任务设置" : action.model ? "按钮默认" : "全局默认" : getCodexDefaultModelLabel(this.settings.codexConfigSource),
+      reasoningSource: requestedReasoning ? "本次覆盖" : useOfficialConfig ? configuredDefault?.reasoningEffort ? "任务设置" : action.reasoningEffort ? "按钮默认" : "全局默认" : "Codex CLI 配置"
     };
   }
   resolveCliActionExecutionConfig(action, backendId, overrides = {}) {
@@ -14617,22 +15203,24 @@ ${result.stderr.trim()}` : ""
       return this.resolveActionExecutionConfig(action, overrides);
     }
     const isOpenCode = backendId === "opencode";
+    const configuredDefault = this.settings.actionExecutionDefaults?.[action.id];
+    const configuredForBackend = configuredDefault?.backend === backendId ? configuredDefault : null;
     const requestedModel = typeof overrides.model === "string" ? overrides.model.trim() : "";
     const requestedReasoning = typeof overrides.reasoningEffort === "string" ? overrides.reasoningEffort.trim() : "";
     const defaultReasoning = REASONING_OPTIONS.some(
       (option) => option.id === (isOpenCode ? this.settings.openCodeReasoningEffort : this.settings.claudeReasoningEffort)
     ) ? isOpenCode ? this.settings.openCodeReasoningEffort : this.settings.claudeReasoningEffort : isOpenCode ? DEFAULT_SETTINGS.openCodeReasoningEffort : DEFAULT_SETTINGS.claudeReasoningEffort;
-    const configuredModel = isOpenCode ? this.settings.openCodeModel.trim() : this.settings.claudeModel.trim();
+    const configuredModel = configuredForBackend?.model || (isOpenCode ? this.settings.openCodeModel.trim() : this.settings.claudeModel.trim());
     const configSource = isOpenCode ? this.settings.openCodeConfigSource : this.settings.claudeConfigSource;
     return {
       backend: backendId,
       model: requestedModel || configuredModel,
       reasoningEffort: REASONING_OPTIONS.some(
         (option) => option.id === requestedReasoning
-      ) ? requestedReasoning : defaultReasoning,
+      ) ? requestedReasoning : configuredForBackend?.reasoningEffort || defaultReasoning,
       serviceTier: "default",
-      modelSource: requestedModel ? "本次覆盖" : configuredModel ? `${getCliBackendLabel(backendId)} 默认` : isOpenCode ? getOpenCodeDefaultModelLabel(configSource) : getClaudeDefaultModelLabel(configSource),
-      reasoningSource: requestedReasoning ? "本次覆盖" : `${getCliBackendLabel(backendId)} 默认`
+      modelSource: requestedModel ? "本次覆盖" : configuredForBackend?.model ? "任务设置" : configuredModel ? `${getCliBackendLabel(backendId)} 默认` : isOpenCode ? getOpenCodeDefaultModelLabel(configSource) : getClaudeDefaultModelLabel(configSource),
+      reasoningSource: requestedReasoning ? "本次覆盖" : configuredForBackend?.reasoningEffort ? "任务设置" : `${getCliBackendLabel(backendId)} 默认`
     };
   }
   async startTaskRun(action, summary, executionConfig = null) {
@@ -14651,7 +15239,10 @@ ${result.stderr.trim()}` : ""
       output: "",
       error: ""
     };
-    this.taskRuns = [run, ...this.taskRuns].slice(0, 30);
+    this.taskRuns = [run, ...this.taskRuns].slice(
+      0,
+      this.settings.taskHistoryLimit || DEFAULT_SETTINGS.taskHistoryLimit
+    );
     await this.saveSettings();
     return run;
   }

@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOL_ROOT = PROJECT_ROOT / "tool-library"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge-base"
 IGNORED_KNOWLEDGE_DIRS = {".obsidian", ".verysync", ".trash", ".git"}
+EXCLUDED_KNOWLEDGE_ROOTS = {"papers"}
 
 REQUIRED_PROJECT_FILES = [
     "AGENTS.md",
@@ -98,10 +99,16 @@ def read_text(path: Path) -> str:
 
 
 def iter_knowledge_markdown() -> list[Path]:
+    """Return authored knowledge notes, excluding faithful paper packages."""
     return [
         path
         for path in KNOWLEDGE_ROOT.rglob("*.md")
-        if not any(part in IGNORED_KNOWLEDGE_DIRS for part in path.relative_to(KNOWLEDGE_ROOT).parts)
+        if not any(
+            part in IGNORED_KNOWLEDGE_DIRS
+            for part in path.relative_to(KNOWLEDGE_ROOT).parts
+        )
+        and path.relative_to(KNOWLEDGE_ROOT).parts[0]
+        not in EXCLUDED_KNOWLEDGE_ROOTS
     ]
 
 

@@ -76,13 +76,18 @@ export class DashboardDataService {
 		const version = ++this.loadVersion;
 		const nextRecords = new Map(this.recordByPath);
 		if (!this.initialized) {
-			const files = this.app.vault.getMarkdownFiles();
+			const files = this.app.vault.getMarkdownFiles()
+				.filter((file) => !this.isExcludedMaintenancePath(file.path));
 			const records = await Promise.all(files.map((file) => this.readRecord(file)));
 			if (version !== this.loadVersion) return null;
 			nextRecords.clear();
 			records.forEach((record) => nextRecords.set(record.path, record));
 		} else {
 			for (const change of changes) {
+				if (this.isExcludedMaintenancePath(change.path)) {
+					nextRecords.delete(normalizePath(change.path));
+					continue;
+				}
 				if (change.type === "delete") {
 					nextRecords.delete(normalizePath(change.path));
 					continue;
@@ -181,6 +186,10 @@ export class DashboardDataService {
 			okf,
 		};
 		return version === this.loadVersion ? result : null;
+	}
+
+	isExcludedMaintenancePath(value: string): boolean {
+		return normalizePath(value).startsWith("papers/");
 	}
 
 	async readRecord(file: TFile): Promise<VaultRecord> {

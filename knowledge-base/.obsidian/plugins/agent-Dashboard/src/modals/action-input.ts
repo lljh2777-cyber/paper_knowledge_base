@@ -43,6 +43,21 @@ interface ActionInputHost {
 		openCodeConfigSource: OpenCodeConfigSource;
 		openCodeModel: string;
 		mineruExecutable: string;
+		mineruDefaultModel: "vlm" | "pipeline" | "auto" | "html";
+		mineruDefaultLanguage: string;
+		mineruDefaultOcr: boolean;
+		mineruDefaultFormula: boolean;
+		mineruDefaultTable: boolean;
+		mineruDefaultTimeoutSeconds: number;
+		mineruDefaultIncludeSourcePdf: boolean;
+		mineruDefaultArticleWikiSource: "auto" | "pdf" | "article";
+		mineruConfirmRemoteUpload: boolean;
+		actionExecutionDefaults: Record<string, {
+			backend: CliBackendId;
+			model: string;
+			reasoningEffort: string;
+			serviceTier: "default" | "fast";
+		}>;
 	};
 	resolveActionExecutionConfig(
 		action: DashboardAction,
@@ -268,7 +283,10 @@ export class ActionInputModal extends Modal {
 					{ value: "pipeline", label: "Pipeline · 保守提取" },
 					{ value: "auto", label: "Auto · 服务端选择" },
 				],
-				"vlm",
+				this.plugin.settings.mineruDefaultModel === "pipeline"
+					|| this.plugin.settings.mineruDefaultModel === "auto"
+					? this.plugin.settings.mineruDefaultModel
+					: "vlm",
 			);
 			const language = createSelectField(
 				mineruGrid,
@@ -285,31 +303,31 @@ export class ActionInputModal extends Modal {
 					{ value: "cyrillic", label: "Cyrillic 语系" },
 					{ value: "devanagari", label: "Devanagari 语系" },
 				],
-				"en",
+				this.plugin.settings.mineruDefaultLanguage || "en",
 			);
 			const includeSourcePdf = this.createCheckboxOption(
 				mineruPanel,
 				"在原文包中附带 PDF",
 				"将原 PDF 复制到 _extraction/source.pdf，用于双栏阅读、版面框定位和完整图重建。",
-				true,
+				this.plugin.settings.mineruDefaultIncludeSourcePdf,
 			);
 			const ocr = this.createCheckboxOption(
 				mineruPanel,
 				"扫描件 OCR",
 				"仅扫描版或无文本层 PDF 开启；普通数字 PDF 保持关闭。",
-				false,
+				this.plugin.settings.mineruDefaultOcr,
 			);
 			const formula = this.createCheckboxOption(
 				mineruPanel,
 				"识别公式",
 				"保留数学公式识别。",
-				true,
+				this.plugin.settings.mineruDefaultFormula,
 			);
 			const table = this.createCheckboxOption(
 				mineruPanel,
 				"识别表格",
 				"生成可搜索的 HTML 表格并保留表格裁图证据。",
-				true,
+				this.plugin.settings.mineruDefaultTable,
 			);
 
 			const advanced = mineruPanel.createEl("details", {
@@ -323,7 +341,7 @@ export class ActionInputModal extends Modal {
 				advancedGrid,
 				"提取超时（秒）",
 				"单篇请求上限，范围 60–1800 秒。",
-				600,
+				this.plugin.settings.mineruDefaultTimeoutSeconds,
 				60,
 				1800,
 				30,
@@ -345,6 +363,14 @@ export class ActionInputModal extends Modal {
 				cls: "agent-dashboard-action-options-description",
 				text: "文档会上传到 MinerU 服务端处理。Token 由 MinerU CLI 管理，插件不保存密钥；批量模式和非 Markdown 输出不在单篇入库中开放。",
 			});
+			const uploadConfirmation = this.plugin.settings.mineruConfirmRemoteUpload
+				? this.createCheckboxOption(
+					mineruPanel,
+					"确认远程处理",
+					"我确认本次 PDF 将发送至配置的 MinerU 服务进行解析。",
+					false,
+				)
+				: null;
 
 			const wikiOption = this.createCheckboxOption(
 				section,
@@ -366,6 +392,7 @@ export class ActionInputModal extends Modal {
 			sourceSelect.createEl("option", { text: "自动选择", attr: { value: "auto" } });
 			sourceSelect.createEl("option", { text: "原始 PDF", attr: { value: "pdf" } });
 			sourceSelect.createEl("option", { text: "已有 article.md", attr: { value: "article" } });
+			sourceSelect.value = this.plugin.settings.mineruDefaultArticleWikiSource;
 
 			const normalizePages = (): string | null => {
 				const text = pagesInput.value.trim().replace(/，/g, ",");
@@ -410,6 +437,7 @@ export class ActionInputModal extends Modal {
 				table,
 				pagesInput,
 				timeout.input,
+				...(uploadConfirmation ? [uploadConfirmation] : []),
 			]) {
 				control.addEventListener("change", sync);
 				control.addEventListener("input", sync);
@@ -424,7 +452,7 @@ export class ActionInputModal extends Modal {
 						? "pdf"
 						: sourceSelect.value === "article"
 							? "article"
-							: "auto",
+							: this.plugin.settings.mineruDefaultArticleWikiSource,
 					mineruModel: model.select.value === "pipeline"
 						? "pipeline"
 						: model.select.value === "auto"
@@ -444,7 +472,8 @@ export class ActionInputModal extends Modal {
 					return mineruAvailable
 						&& normalizePages() !== null
 						&& isNumberInRange(timeout.input, 60, 1800)
-						&& Number.isInteger(timeout.input.valueAsNumber);
+						&& Number.isInteger(timeout.input.valueAsNumber)
+						&& (!uploadConfirmation || uploadConfirmation.checked);
 				},
 			};
 		}
@@ -515,7 +544,13 @@ export class ActionInputModal extends Modal {
 		const supportsStageWriteBackends = ["code-analysis", "synthesis"].includes(
 			this.action.id,
 		);
-		let backendId: CliBackendId = "codex-cli";
+		const configuredDefault = this.plugin.settings.actionExecutionDefaults[this.action.id];
+		const configuredBackend = configuredDefault?.backend;
+		let backendId: CliBackendId = supportsStageWriteBackends
+			&& (configuredBackend === "claude-code" || configuredBackend === "opencode")
+			&& this.plugin.isCliBackendAvailable(configuredBackend)
+			? configuredBackend
+			: "codex-cli";
 		const resolveEffective = (overrides: ExecutionOverrides = {}) => {
 			return this.plugin.resolveCliActionExecutionConfig(
 				this.action,
@@ -552,6 +587,7 @@ export class ActionInputModal extends Modal {
 				attr: { value: "opencode" },
 			});
 			openCodeOption.disabled = !this.plugin.isCliBackendAvailable("opencode");
+			backendSelect.value = backendId;
 		}
 
 		const modelSelect = this.createSelectField(section, "模型", "运行模型");
@@ -570,7 +606,9 @@ export class ActionInputModal extends Modal {
 			cls: "agent-dashboard-speed-control",
 			attr: { role: "group", "aria-label": "运行速度" },
 		});
-		let serviceTier: ServiceTier = "default";
+		let serviceTier: ServiceTier = backendId === "codex-cli" && configuredDefault?.serviceTier === "fast"
+			? "fast"
+			: "default";
 		const speedOptions: Array<[ServiceTier, string, string]> = [
 			["default", "标准", "默认速度"],
 			["fast", "快速", "约 1.5 倍速度，用量更多"],

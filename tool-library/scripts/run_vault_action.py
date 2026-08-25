@@ -330,6 +330,11 @@ direct inspection proves that the change is local, reversible, structural, and
 low risk. Preserve scientific meaning, evidence depth, frontmatter schema,
 filenames, and page taxonomy.
 
+The `knowledge-base/papers/` tree contains faithful MinerU reading packages and
+is outside the lint and repair scope. Do not edit it or create Obsidian/Markdown
+links between `knowledge-base/papers/` and `knowledge-base/wiki/`; when a Wiki
+note needs to record a package location, use a non-clickable inline-code path.
+
 Examples of permitted low-risk repairs include adding a required frontmatter
 key with an empty value when the true value is unknown, adding an existing page
 to a missing index using that index's current format, and replacing a broken

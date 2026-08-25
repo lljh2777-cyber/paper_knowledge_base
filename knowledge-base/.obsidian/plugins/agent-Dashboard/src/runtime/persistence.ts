@@ -78,9 +78,9 @@ function normalizeExecutionConfig(value: unknown): ExecutionConfig | null {
 	};
 }
 
-export function normalizeStoredTaskRuns(value: unknown): TaskRun[] {
+export function normalizeStoredTaskRuns(value: unknown, limit = 30): TaskRun[] {
 	if (!Array.isArray(value)) return [];
-	return value.slice(0, 30).map((item) => {
+	return value.slice(0, Math.max(5, Math.min(100, limit))).map((item) => {
 		const source = asRecord(item);
 		return {
 			id: String(source.id || ""),
@@ -135,16 +135,19 @@ export function sanitizeSettingsForStorage(settings: DashboardSettings): Dashboa
 }
 
 export function createPersistenceSnapshot(state: DashboardPersistenceState): DashboardStoredData {
+	const taskHistoryLimit = Math.max(5, Math.min(100, state.settings.taskHistoryLimit || 30));
+	const querySessionLimit = Math.max(1, Math.min(30, state.settings.querySessionLimit || 8));
+	const queryMessageLimit = Math.max(10, Math.min(100, state.settings.queryMessageLimit || 30));
 	return JSON.parse(JSON.stringify({
 		settings: sanitizeSettingsForStorage(state.settings),
-		taskRuns: state.taskRuns.map((run) => ({
+		taskRuns: state.taskRuns.slice(0, taskHistoryLimit).map((run) => ({
 			...run,
 			output: String(run.output || "").slice(0, 12000),
 			error: String(run.error || "").slice(0, 4000),
 		})),
-		querySessions: state.querySessions.map((session) => ({
+		querySessions: state.querySessions.slice(0, querySessionLimit).map((session) => ({
 			...session,
-			messages: session.messages.slice(-30).map((message) => ({
+			messages: session.messages.slice(-queryMessageLimit).map((message) => ({
 				...message,
 				content: String(message.content || "").slice(0, 8000),
 				error: String(message.error || "").slice(0, 4000),

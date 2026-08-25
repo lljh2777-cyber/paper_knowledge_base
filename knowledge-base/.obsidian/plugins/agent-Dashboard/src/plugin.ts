@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { ACTION_BY_ID, type DashboardAction } from "./actions";
 import {
 	DEFAULT_SETTINGS,
+	describeCliExecutable,
 	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
 	findPreferredMineruExecutable,
@@ -23,6 +24,7 @@ import {
 	getOpenCodeDefaultModelLabel,
 	inferLegacyClaudeConfigSource,
 	isManagedCodexExecutable,
+	normalizeActionExecutionDefaults,
 } from "./runtime/settings";
 import type { DashboardSettings } from "./runtime/settings";
 import { DashboardLifecycleState } from "./runtime/lifecycle-state";
@@ -681,9 +683,23 @@ export default class AgentDashboardPlugin extends Plugin {
 		this.settings.providerTimeoutSeconds = Number.isFinite(providerTimeout)
 			? Math.max(3, Math.min(120, providerTimeout))
 			: DEFAULT_SETTINGS.providerTimeoutSeconds;
-		this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns);
+		const taskHistoryLimit = Number.parseInt(String(storedSettings.taskHistoryLimit || ""), 10);
+		this.settings.taskHistoryLimit = Number.isFinite(taskHistoryLimit)
+			? Math.max(5, Math.min(100, taskHistoryLimit))
+			: DEFAULT_SETTINGS.taskHistoryLimit;
+		const querySessionLimit = Number.parseInt(String(storedSettings.querySessionLimit || ""), 10);
+		this.settings.querySessionLimit = Number.isFinite(querySessionLimit)
+			? Math.max(1, Math.min(30, querySessionLimit))
+			: DEFAULT_SETTINGS.querySessionLimit;
+		const queryMessageLimit = Number.parseInt(String(storedSettings.queryMessageLimit || ""), 10);
+		this.settings.queryMessageLimit = Number.isFinite(queryMessageLimit)
+			? Math.max(10, Math.min(100, queryMessageLimit))
+			: DEFAULT_SETTINGS.queryMessageLimit;
+		this.taskRuns = normalizeStoredTaskRuns(stored.taskRuns, this.settings.taskHistoryLimit);
 		this.querySessions = Array.isArray(stored.querySessions)
-			? stored.querySessions.slice(0, 8).map((session) => this.normalizeQuerySession(session))
+			? stored.querySessions
+				.slice(0, this.settings.querySessionLimit)
+				.map((session) => this.normalizeQuerySession(session))
 			: [];
 		this.activeQuerySessionId = typeof stored.activeQuerySessionId === "string"
 			? stored.activeQuerySessionId
@@ -789,6 +805,72 @@ export default class AgentDashboardPlugin extends Plugin {
 		const configuredMineruExecutable = String(this.settings.mineruExecutable || "").trim();
 		if (!configuredMineruExecutable && preferredMineruExecutable) {
 			this.settings.mineruExecutable = preferredMineruExecutable;
+			changed = true;
+		}
+		this.settings.mineruServiceMode = storedSettings.mineruServiceMode === "private"
+			|| (!storedSettings.mineruServiceMode && Boolean(String(storedSettings.mineruBaseUrl || "").trim()))
+			? "private"
+			: "official";
+		if (this.settings.mineruServiceMode === "official" && this.settings.mineruBaseUrl) {
+			this.settings.mineruBaseUrl = "";
+			changed = true;
+		}
+		this.settings.mineruDefaultModel = storedSettings.mineruDefaultModel === "pipeline"
+			|| storedSettings.mineruDefaultModel === "auto"
+			? storedSettings.mineruDefaultModel
+			: "vlm";
+		const mineruLanguages = [
+			"en", "ch", "ch_server", "japan", "korean", "latin", "arabic", "cyrillic", "devanagari",
+		];
+		this.settings.mineruDefaultLanguage = mineruLanguages.includes(
+			String(storedSettings.mineruDefaultLanguage || ""),
+		)
+			? String(storedSettings.mineruDefaultLanguage)
+			: DEFAULT_SETTINGS.mineruDefaultLanguage;
+		this.settings.mineruDefaultOcr = storedSettings.mineruDefaultOcr === true;
+		this.settings.mineruDefaultFormula = storedSettings.mineruDefaultFormula !== false;
+		this.settings.mineruDefaultTable = storedSettings.mineruDefaultTable !== false;
+		const mineruTimeout = Number.parseInt(String(storedSettings.mineruDefaultTimeoutSeconds || ""), 10);
+		this.settings.mineruDefaultTimeoutSeconds = Number.isFinite(mineruTimeout)
+			? Math.max(60, Math.min(1800, mineruTimeout))
+			: DEFAULT_SETTINGS.mineruDefaultTimeoutSeconds;
+		this.settings.mineruDefaultIncludeSourcePdf = storedSettings.mineruDefaultIncludeSourcePdf !== false;
+		this.settings.mineruDefaultArticleWikiSource = storedSettings.mineruDefaultArticleWikiSource === "pdf"
+			|| storedSettings.mineruDefaultArticleWikiSource === "article"
+			? storedSettings.mineruDefaultArticleWikiSource
+			: "auto";
+		this.settings.mineruConfirmRemoteUpload = storedSettings.mineruConfirmRemoteUpload === true;
+		this.settings.mineruReaderDefaultMode = storedSettings.mineruReaderDefaultMode === "visuals"
+			? "visuals"
+			: "pdf";
+		this.settings.mineruReaderFollowPdfReading = storedSettings.mineruReaderFollowPdfReading !== false;
+		this.settings.mineruReaderFollowVisualReading = storedSettings.mineruReaderFollowVisualReading !== false;
+		this.settings.mineruReaderShowLayoutBoxes = storedSettings.mineruReaderShowLayoutBoxes !== false;
+		const readerZoom = Number(storedSettings.mineruReaderPdfZoom);
+		this.settings.mineruReaderPdfZoom = Number.isFinite(readerZoom)
+			? Math.max(0.4, Math.min(4, readerZoom))
+			: DEFAULT_SETTINGS.mineruReaderPdfZoom;
+		const splitRatio = Number(storedSettings.mineruReaderSplitRatio);
+		this.settings.mineruReaderSplitRatio = Number.isFinite(splitRatio)
+			? Math.max(0.42, Math.min(0.78, splitRatio))
+			: DEFAULT_SETTINGS.mineruReaderSplitRatio;
+		this.settings.mineruReaderRenderQuality = storedSettings.mineruReaderRenderQuality === "high"
+			? "high"
+			: "standard";
+		this.settings.actionExecutionDefaults = normalizeActionExecutionDefaults(
+			storedSettings.actionExecutionDefaults,
+		);
+		this.settings.queryDefaultRetrievalMode = storedSettings.queryDefaultRetrievalMode === "vault"
+			? "vault"
+			: "web";
+		this.settings.queryDefaultBackendId = String(
+			storedSettings.queryDefaultBackendId || "codex-cli",
+		).slice(0, 160);
+		const normalizedQueryDefaultBackend = this.resolveQueryBackendId(
+			this.settings.queryDefaultBackendId,
+		);
+		if (normalizedQueryDefaultBackend !== this.settings.queryDefaultBackendId) {
+			this.settings.queryDefaultBackendId = normalizedQueryDefaultBackend;
 			changed = true;
 		}
 		const legacySettings = this.settings as unknown as Record<string, unknown>;
@@ -1136,13 +1218,58 @@ export default class AgentDashboardPlugin extends Plugin {
 		return this.processExecution.probeCodexCli(this.settings);
 	}
 
+	probeMineruCliConnection(): Promise<ProviderConnectionTestResult> {
+		return this.processExecution.probeMineruCli(this.settings);
+	}
+
+	async clearCompletedTaskHistory(): Promise<number> {
+		const before = this.taskRuns.length;
+		this.taskRuns = this.taskRuns.filter((run) => run.status === "running" || run.status === "queued");
+		await this.saveSettings();
+		return before - this.taskRuns.length;
+	}
+
+	async resetQueryHistory(): Promise<void> {
+		const session = this.makeQuerySession();
+		this.querySessions = [session];
+		this.activeQuerySessionId = session.id;
+		await this.saveSettings();
+	}
+
+	buildDiagnosticsSummary(): string {
+		const describe = (label: string, kind: "codex" | "claude" | "opencode" | "mineru", executable: string) => {
+			const detection = describeCliExecutable(kind, executable);
+			return `${label}: ${detection.found ? "可用" : "不可用"} · ${detection.sourceLabel}`;
+		};
+		return [
+			`Agent Dashboard ${this.manifest.version}`,
+			`平台: ${process.platform} ${process.arch}`,
+			`项目根目录: ${this.settings.projectRoot && fs.existsSync(this.settings.projectRoot) ? "可用" : "不可用"}`,
+			describe("Codex CLI", "codex", this.settings.codexExecutable),
+			describe("Claude Code", "claude", this.settings.claudeExecutable),
+			describe("OpenCode", "opencode", this.settings.openCodeExecutable),
+			describe("MinerU CLI", "mineru", this.settings.mineruExecutable),
+			`MinerU 服务: ${this.settings.mineruServiceMode === "private" ? "私有部署" : "官方服务"}`,
+			`Python: ${this.settings.pythonExecutable && fs.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
+			`Rscript: ${this.settings.rscriptExecutable && fs.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,
+			`Direct API 配置数: ${this.settings.providerProfiles.length}`,
+			"体检范围: wiki/ 与顶层索引；排除 papers/",
+			"凭据、endpoint、正文和对话内容: 已排除",
+		].join("\n");
+	}
+
 	makeQuerySession(title = "新对话"): QuerySession {
 		const now = new Date().toISOString();
+		const queryBackendId = this.resolveQueryBackendId(this.settings.queryDefaultBackendId);
+		const directApi = !isCliBackendId(queryBackendId);
+		const defaultRetrievalMode = this.settings.queryDefaultRetrievalMode === "vault"
+			? "vault"
+			: "web";
 		return {
 			id: `query-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			title,
-			retrievalMode: "web",
-			queryBackendId: "codex-cli",
+			retrievalMode: directApi ? "vault" : defaultRetrievalMode,
+			queryBackendId,
 			createdAt: now,
 			updatedAt: now,
 			messages: [],
@@ -1153,7 +1280,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		const source = asRecord(session);
 		const fallback = this.makeQuerySession();
 		const messages: QueryMessage[] = Array.isArray(source.messages)
-			? source.messages.slice(-60).map((value) => {
+			? source.messages.slice(-(this.settings.queryMessageLimit || DEFAULT_SETTINGS.queryMessageLimit)).map((value) => {
 				const message = asRecord(value);
 				return {
 				id: String(message.id || this.createQueryMessageId()),
@@ -1217,7 +1344,10 @@ export default class AgentDashboardPlugin extends Plugin {
 			return activeSession;
 		}
 		const session = this.makeQuerySession();
-		this.querySessions = [session, ...this.querySessions].slice(0, 8);
+		this.querySessions = [session, ...this.querySessions].slice(
+			0,
+			this.settings.querySessionLimit || DEFAULT_SETTINGS.querySessionLimit,
+		);
 		this.activeQuerySessionId = session.id;
 		await this.saveSettings();
 		return session;
@@ -1272,7 +1402,9 @@ export default class AgentDashboardPlugin extends Plugin {
 	): Promise<void> {
 		const session = this.querySessions.find((item) => item.id === sessionId);
 		if (!session) throw new Error("查询会话不存在");
-		session.messages = [...session.messages, ...messages].slice(-60);
+		session.messages = [...session.messages, ...messages].slice(
+			-(this.settings.queryMessageLimit || DEFAULT_SETTINGS.queryMessageLimit),
+		);
 		if (session.title === "新对话" && firstQuestion) {
 			session.title = firstQuestion.replace(/\s+/g, " ").slice(0, 36);
 		}
@@ -1448,11 +1580,16 @@ export default class AgentDashboardPlugin extends Plugin {
 		overrides: ExecutionOverrides = {},
 	): CodexExecutionConfig {
 		const useOfficialConfig = this.settings.codexConfigSource === "official";
+		const configuredDefault = this.settings.actionExecutionDefaults?.[action.id];
 		const buttonModel = useOfficialConfig
-			? action.model || this.settings.codexModel || DEFAULT_SETTINGS.codexModel
+			? configuredDefault?.model
+				|| action.model
+				|| this.settings.codexModel
+				|| DEFAULT_SETTINGS.codexModel
 			: "";
 		const buttonReasoning = useOfficialConfig
-			? action.reasoningEffort
+			? configuredDefault?.reasoningEffort
+				|| action.reasoningEffort
 				|| this.settings.codexReasoningEffort
 				|| DEFAULT_SETTINGS.codexReasoningEffort
 			: "";
@@ -1466,16 +1603,23 @@ export default class AgentDashboardPlugin extends Plugin {
 			backend: "codex-cli",
 			model: effectiveModel,
 			reasoningEffort,
-			serviceTier: overrides.serviceTier === "fast" && this.supportsFast(effectiveModel) ? "fast" : "default",
+			serviceTier: (overrides.serviceTier || configuredDefault?.serviceTier) === "fast"
+				&& this.supportsFast(effectiveModel)
+				? "fast"
+				: "default",
 			modelSource: requestedModel
 				? "本次覆盖"
 				: useOfficialConfig
-					? action.model ? "按钮默认" : "全局默认"
+					? configuredDefault?.model
+						? "任务设置"
+						: action.model ? "按钮默认" : "全局默认"
 					: getCodexDefaultModelLabel(this.settings.codexConfigSource),
 			reasoningSource: requestedReasoning
 				? "本次覆盖"
 				: useOfficialConfig
-					? action.reasoningEffort ? "按钮默认" : "全局默认"
+					? configuredDefault?.reasoningEffort
+						? "任务设置"
+						: action.reasoningEffort ? "按钮默认" : "全局默认"
 					: "Codex CLI 配置",
 		};
 	}
@@ -1489,6 +1633,10 @@ export default class AgentDashboardPlugin extends Plugin {
 			return this.resolveActionExecutionConfig(action, overrides);
 		}
 		const isOpenCode = backendId === "opencode";
+		const configuredDefault = this.settings.actionExecutionDefaults?.[action.id];
+		const configuredForBackend = configuredDefault?.backend === backendId
+			? configuredDefault
+			: null;
 		const requestedModel = typeof overrides.model === "string"
 			? overrides.model.trim()
 			: "";
@@ -1510,9 +1658,9 @@ export default class AgentDashboardPlugin extends Plugin {
 			: isOpenCode
 				? DEFAULT_SETTINGS.openCodeReasoningEffort
 				: DEFAULT_SETTINGS.claudeReasoningEffort;
-		const configuredModel = isOpenCode
+		const configuredModel = configuredForBackend?.model || (isOpenCode
 			? this.settings.openCodeModel.trim()
-			: this.settings.claudeModel.trim();
+			: this.settings.claudeModel.trim());
 		const configSource = isOpenCode
 			? this.settings.openCodeConfigSource
 			: this.settings.claudeConfigSource;
@@ -1523,10 +1671,12 @@ export default class AgentDashboardPlugin extends Plugin {
 				(option) => option.id === requestedReasoning,
 			)
 				? requestedReasoning
-				: defaultReasoning,
+				: configuredForBackend?.reasoningEffort || defaultReasoning,
 			serviceTier: "default",
 			modelSource: requestedModel
 				? "本次覆盖"
+				: configuredForBackend?.model
+					? "任务设置"
 				: configuredModel
 					? `${getCliBackendLabel(backendId)} 默认`
 					: isOpenCode
@@ -1534,7 +1684,9 @@ export default class AgentDashboardPlugin extends Plugin {
 						: getClaudeDefaultModelLabel(configSource),
 			reasoningSource: requestedReasoning
 				? "本次覆盖"
-				: `${getCliBackendLabel(backendId)} 默认`,
+				: configuredForBackend?.reasoningEffort
+					? "任务设置"
+					: `${getCliBackendLabel(backendId)} 默认`,
 		};
 	}
 
@@ -1558,7 +1710,10 @@ export default class AgentDashboardPlugin extends Plugin {
 			output: "",
 			error: "",
 		};
-		this.taskRuns = [run, ...this.taskRuns].slice(0, 30);
+		this.taskRuns = [run, ...this.taskRuns].slice(
+			0,
+			this.settings.taskHistoryLimit || DEFAULT_SETTINGS.taskHistoryLimit,
+		);
 		await this.saveSettings();
 		return run;
 	}

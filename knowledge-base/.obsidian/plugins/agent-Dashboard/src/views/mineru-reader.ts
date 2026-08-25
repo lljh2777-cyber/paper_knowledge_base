@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 
 import { MINERU_READER_VIEW_TYPE } from "../config";
+import type { DashboardSettings } from "../runtime/settings";
 import { bboxToPercent } from "../mineru/normalization";
 import { MineruPackageLoader, resolvePackageAssetPath } from "../mineru/package-loader";
 import { MineruPdfRenderer } from "../mineru/pdf-renderer";
@@ -33,6 +34,7 @@ import type {
 
 interface MineruReaderHost {
 	app: App;
+	settings: DashboardSettings;
 }
 
 const DEFAULT_STATE: MineruReaderViewState = {
@@ -49,6 +51,18 @@ const DEFAULT_STATE: MineruReaderViewState = {
 	splitRatio: 0.64,
 };
 
+function defaultStateForSettings(settings: DashboardSettings): MineruReaderViewState {
+	return {
+		...DEFAULT_STATE,
+		mode: settings.mineruReaderDefaultMode,
+		followPdfReading: settings.mineruReaderFollowPdfReading,
+		followVisualReading: settings.mineruReaderFollowVisualReading,
+		showLayoutBoxes: settings.mineruReaderShowLayoutBoxes,
+		pdfZoom: settings.mineruReaderPdfZoom,
+		splitRatio: settings.mineruReaderSplitRatio,
+	};
+}
+
 function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
 	const numeric = Number(value);
 	return Number.isFinite(numeric) ? Math.max(min, Math.min(max, numeric)) : fallback;
@@ -60,28 +74,39 @@ function isAbortError(error: unknown): boolean {
 		: /abort|cancel|superseded/i.test(error instanceof Error ? error.message : String(error));
 }
 
-function normalizeState(value: unknown): MineruReaderViewState {
+function normalizeState(
+	value: unknown,
+	defaults: MineruReaderViewState = DEFAULT_STATE,
+): MineruReaderViewState {
 	const record = value !== null && typeof value === "object"
 		? value as Record<string, unknown>
 		: {};
-	const mode: MineruReaderMode = record.mode === "visuals" ? "visuals" : "pdf";
-	const legacyFollowReading = record.followReading !== false;
+	const mode: MineruReaderMode = record.mode === "visuals"
+		? "visuals"
+		: record.mode === "pdf"
+			? "pdf"
+			: defaults.mode;
+	const legacyFollowReading = typeof record.followReading === "boolean"
+		? record.followReading
+		: null;
 	return {
 		articlePath: String(record.articlePath || ""),
 		mode,
 		followPdfReading: typeof record.followPdfReading === "boolean"
 			? record.followPdfReading
-			: legacyFollowReading,
+			: legacyFollowReading ?? defaults.followPdfReading,
 		followVisualReading: typeof record.followVisualReading === "boolean"
 			? record.followVisualReading
-			: legacyFollowReading,
-		showLayoutBoxes: record.showLayoutBoxes !== false,
+			: legacyFollowReading ?? defaults.followVisualReading,
+		showLayoutBoxes: typeof record.showLayoutBoxes === "boolean"
+			? record.showLayoutBoxes
+			: defaults.showLayoutBoxes,
 		currentVisualId: String(record.currentVisualId || ""),
 		markdownAnchor: String(record.markdownAnchor || ""),
 		markdownPage: Math.floor(boundedNumber(record.markdownPage, 1, 1, Number.MAX_SAFE_INTEGER)),
 		pdfPage: Math.floor(boundedNumber(record.pdfPage, 1, 1, Number.MAX_SAFE_INTEGER)),
-		pdfZoom: boundedNumber(record.pdfZoom, 1, 0.4, 4),
-		splitRatio: boundedNumber(record.splitRatio, 0.64, 0.42, 0.78),
+		pdfZoom: boundedNumber(record.pdfZoom, defaults.pdfZoom, 0.4, 4),
+		splitRatio: boundedNumber(record.splitRatio, defaults.splitRatio, 0.42, 0.78),
 	};
 }
 
@@ -104,7 +129,7 @@ export class MineruReaderView extends ItemView {
 	private readonly plugin: MineruReaderHost;
 	private readonly loader: MineruPackageLoader;
 	private readonly pdfRenderer = new MineruPdfRenderer();
-	private readerState: MineruReaderViewState = { ...DEFAULT_STATE };
+	private readerState: MineruReaderViewState;
 	private readerPackage: MineruReaderPackage | null = null;
 	private markdownScroller: HTMLElement | null = null;
 	private markdownPageStatus: HTMLElement | null = null;
@@ -126,6 +151,8 @@ export class MineruReaderView extends ItemView {
 		super(leaf);
 		this.plugin = plugin;
 		this.loader = new MineruPackageLoader(plugin.app);
+		this.readerState = defaultStateForSettings(plugin.settings);
+		this.pdfRenderer.setRenderQuality(plugin.settings.mineruReaderRenderQuality);
 		this.navigation = true;
 	}
 
@@ -147,7 +174,7 @@ export class MineruReaderView extends ItemView {
 
 	async setState(state: unknown, _result: ViewStateResult): Promise<void> {
 		const previousPath = this.readerState.articlePath;
-		this.readerState = normalizeState(state);
+		this.readerState = normalizeState(state, defaultStateForSettings(this.plugin.settings));
 		if (this.opened && this.readerState.articlePath) {
 			if (this.readerState.articlePath !== previousPath || !this.readerPackage) {
 				await this.loadAndRender();

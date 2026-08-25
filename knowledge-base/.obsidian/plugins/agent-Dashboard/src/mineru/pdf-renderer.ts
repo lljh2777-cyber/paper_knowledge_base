@@ -50,8 +50,11 @@ export interface PdfPageRenderResult {
 	height: number;
 }
 
-function outputScale(): number {
-	return Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+function outputScale(quality: "standard" | "high"): number {
+	const density = window.devicePixelRatio || 1;
+	return quality === "high"
+		? Math.max(1, Math.min(3, density * 1.5))
+		: Math.max(1, Math.min(2, density));
 }
 
 function getCanvasContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
@@ -73,6 +76,11 @@ export class MineruPdfRenderer {
 	private generation = 0;
 	private pageGeneration = 0;
 	private cropGeneration = 0;
+	private renderQuality: "standard" | "high" = "standard";
+
+	setRenderQuality(value: "standard" | "high"): void {
+		this.renderQuality = value === "high" ? "high" : "standard";
+	}
 
 	get numPages(): number {
 		return this.document?.numPages || 0;
@@ -116,7 +124,7 @@ export class MineruPdfRenderer {
 		const baseViewport = page.getViewport({ scale: 1 });
 		const fitScale = Math.max(0.25, availableWidth / Math.max(1, baseViewport.width));
 		const viewport = page.getViewport({ scale: fitScale * Math.max(0.4, Math.min(4, zoom)) });
-		const ratio = outputScale();
+		const ratio = outputScale(this.renderQuality);
 		canvas.width = Math.max(1, Math.floor(viewport.width * ratio));
 		canvas.height = Math.max(1, Math.floor(viewport.height * ratio));
 		canvas.style.width = `${Math.floor(viewport.width)}px`;
@@ -243,7 +251,7 @@ export class MineruPdfRenderer {
 		const top = viewport.height * crop[1] / 1000;
 		const width = viewport.width * (crop[2] - crop[0]) / 1000;
 		const height = viewport.height * (crop[3] - crop[1]) / 1000;
-		const ratio = outputScale();
+		const ratio = outputScale(this.renderQuality);
 		canvas.width = Math.max(1, Math.floor(width * ratio));
 		canvas.height = Math.max(1, Math.floor(height * ratio));
 		canvas.style.width = `${Math.floor(width)}px`;
