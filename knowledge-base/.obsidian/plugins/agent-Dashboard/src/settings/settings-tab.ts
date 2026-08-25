@@ -42,6 +42,10 @@ import {
 	type CliExecutableKind,
 } from "../runtime/settings";
 import type {
+	ObsidianCliConnectionResult,
+	ObsidianCliProbeState,
+} from "../runtime/obsidian-cli";
+import type {
 	PluginHost,
 	ProviderConnectionTestResult,
 	ProviderRuntimeEntry,
@@ -49,12 +53,14 @@ import type {
 
 interface SettingsPluginHost extends PluginHost {
 	providerRuntimeState: Map<string, ProviderRuntimeEntry>;
+	obsidianCliProbeState: ObsidianCliProbeState;
 	providerEditorProfileId: string;
 	saveSettings(): Promise<void>;
 	checkRuntime(): { ready: boolean; message: string };
 	listProviderModels(profileId: string): Promise<ProviderModel[]>;
 	testProviderConnection(profileId: string): Promise<ProviderConnectionTestResult>;
 	probeMineruCliConnection(): Promise<ProviderConnectionTestResult>;
+	probeObsidianCliConnection(): Promise<ObsidianCliConnectionResult>;
 	invalidateCliModelDiscovery(backendId: CliBackendId): void;
 	getProviderErrorLabel(type: string): string;
 	supportsFast(model: string): boolean;
@@ -66,6 +72,7 @@ interface SettingsPluginHost extends PluginHost {
 type SettingsPage =
 	| "home"
 	| "runtime"
+	| "obsidian-cli"
 	| "mineru"
 	| "reader"
 	| "tasks"
@@ -92,6 +99,9 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		switch (this.activePage) {
 			case "runtime":
 				this.renderRuntimeSettings(containerEl);
+				break;
+			case "obsidian-cli":
+				this.renderObsidianCliSettings(containerEl);
 				break;
 			case "mineru":
 				this.renderMineruSettings(containerEl);
@@ -138,6 +148,19 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			title: "运行环境",
 			description: "项目目录、Agent/Python/R 可执行文件、任务超时和环境检查。",
 			status: "本地执行",
+		});
+		const obsidianCliDetection = describeCliExecutable(
+			"obsidian",
+			this.plugin.settings.obsidianCliExecutable,
+		);
+		this.createSettingsNavigationItem(navigation, {
+			page: "obsidian-cli",
+			icon: "square-terminal",
+			title: "Obsidian CLI",
+			description: "可选的外部自动化桥梁、连接诊断与开发回归入口。",
+			status: obsidianCliDetection.found
+				? obsidianCliDetection.sourceLabel
+				: "可选 · 未检测到",
 		});
 		this.createSettingsNavigationItem(navigation, {
 			page: "mineru",
@@ -426,6 +449,93 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				})
 		);
 		refreshDescription();
+	}
+
+	private renderObsidianCliSettings(containerEl: HTMLElement): void {
+		this.createSettingsPageHeader(
+			containerEl,
+			"Obsidian CLI",
+			"连接运行中的 Obsidian，用于外部自动化、开发诊断和真实界面回归。Dashboard 核心功能不依赖此能力。",
+			true,
+		);
+		this.createProviderSectionHeader(
+			containerEl,
+			"连接设置",
+			"请先在 Obsidian 设置 → 常规中启用“命令行接口”。插件不会修改 PATH，也不会通过 CLI 绕过 Vault 与 Workspace API。",
+		);
+		this.renderCliExecutableSetting(containerEl, {
+			kind: "obsidian",
+			name: "Obsidian CLI 可执行文件",
+			description: "Windows 优先检测当前 Obsidian.exe 同目录的 Obsidian.com，也支持环境变量、PATH 和手动路径。",
+			placeholder: process.platform === "win32" ? "Obsidian.com" : "obsidian",
+			getValue: () => this.plugin.settings.obsidianCliExecutable,
+			setValue: (value) => {
+				this.plugin.settings.obsidianCliExecutable = value;
+				this.plugin.obsidianCliProbeState = { status: "idle" };
+			},
+		});
+		new Setting(containerEl)
+			.setName("当前 Vault")
+			.setDesc(`连接测试固定核对当前 Vault“${this.app.vault.getName()}”及插件“${this.plugin.manifest.id}”；不读取正文，也不写入文件。`);
+
+		const state = this.plugin.obsidianCliProbeState;
+		new Setting(containerEl)
+			.setName("最小连接测试")
+			.setDesc("依次执行 version、vaults verbose 和当前 Vault 的 plugin 状态查询；均为只读命令。")
+			.addButton((button) => {
+				const testing = state.status === "testing";
+				button
+					.setButtonText(testing ? "测试中…" : "测试连接")
+					.setCta()
+					.setDisabled(testing)
+					.onClick(async () => {
+						this.plugin.obsidianCliProbeState = { status: "testing" };
+						this.display();
+						await this.plugin.probeObsidianCliConnection();
+						this.display();
+					});
+			});
+		if (state.result) this.renderObsidianCliConnectionResult(containerEl, state.result);
+
+		this.createProviderSectionHeader(
+			containerEl,
+			"安全边界",
+			"插件内读写、导航和检索继续使用 Obsidian Plugin API；CLI 仅作为可选桥梁。",
+		);
+		new Setting(containerEl)
+			.setName("生产功能")
+			.setDesc("不开放任意 eval，不自动执行重载、重启、恢复、删除、插件禁用或其他破坏性命令。");
+	}
+
+	private renderObsidianCliConnectionResult(
+		parent: HTMLElement,
+		result: ObsidianCliConnectionResult,
+	): void {
+		const panel = parent.createDiv({
+			cls: `agent-dashboard-provider-result ${result.ok ? "is-success" : "is-error"}`,
+		});
+		const heading = panel.createDiv({ cls: "agent-dashboard-provider-result-heading" });
+		setIcon(heading.createSpan(), result.ok ? "circle-check" : "circle-alert");
+		heading.createEl("strong", { text: result.ok ? "CLI 连接成功" : "CLI 连接失败" });
+		const grid = panel.createDiv({ cls: "agent-dashboard-provider-result-grid" });
+		const addRow = (label: string, value: unknown): void => {
+			const row = grid.createDiv();
+			row.createSpan({ text: label });
+			row.createEl("strong", { text: String(value || "—") });
+		};
+		addRow("应用版本", result.appVersion);
+		addRow("安装器版本", result.installerVersion || "未返回");
+		addRow("Vault", result.vaultFound ? `${result.vaultName} · 已识别` : `${result.vaultName} · 未识别`);
+		if (result.vaultPath) addRow("Vault 路径", result.vaultPath);
+		addRow(
+			"插件",
+			result.pluginVersion
+				? `${result.pluginName || result.pluginId} ${result.pluginVersion} · ${result.pluginEnabled ? "已启用" : "未启用"}`
+				: `${result.pluginId} · 状态未知`,
+		);
+		addRow("只读命令", `${result.commands.filter((command) => command.ok).length}/${result.commands.length} 通过`);
+		addRow(result.ok ? "状态" : "详情", result.message);
+		addRow("耗时", `${result.durationMs} ms`);
 	}
 
 	private renderMineruSettings(containerEl: HTMLElement): void {

@@ -221,13 +221,15 @@ var CLI_ENVIRONMENT_VARIABLES = {
   codex: "CODEX_CLI_PATH",
   claude: "CLAUDE_CODE_PATH",
   opencode: "OPENCODE_PATH",
-  mineru: "MINERU_CLI_PATH"
+  mineru: "MINERU_CLI_PATH",
+  obsidian: "OBSIDIAN_CLI_PATH"
 };
 var CLI_COMMAND_NAMES = {
   codex: "codex",
   claude: "claude",
   opencode: "opencode",
-  mineru: "mineru-open-api"
+  mineru: "mineru-open-api",
+  obsidian: "obsidian"
 };
 function joinFromEnvironment(base, ...segments) {
   return base ? path.join(base, ...segments) : "";
@@ -286,6 +288,26 @@ function commonCliCandidates(kind) {
   const userProfile = process.env.USERPROFILE;
   const appData = process.env.APPDATA;
   const localAppData = process.env.LOCALAPPDATA;
+  if (kind === "obsidian") {
+    if (process.platform === "win32") {
+      return [
+        path.join(path.dirname(process.execPath), "Obsidian.com"),
+        joinFromEnvironment(localAppData, "Programs", "Obsidian", "Obsidian.com"),
+        joinFromEnvironment(process.env.ProgramFiles, "Obsidian", "Obsidian.com")
+      ];
+    }
+    if (process.platform === "darwin") {
+      return [
+        "/usr/local/bin/obsidian",
+        "/Applications/Obsidian.app/Contents/MacOS/obsidian-cli"
+      ];
+    }
+    return [
+      joinFromEnvironment(process.env.HOME, ".local", "bin", "obsidian"),
+      "/usr/local/bin/obsidian",
+      "/usr/bin/obsidian"
+    ];
+  }
   if (kind === "codex") {
     return [
       ...managedCodexCandidates(),
@@ -410,6 +432,10 @@ function findPreferredOpenCodeExecutable() {
   const detected = detectCliExecutable("opencode");
   return detected.found ? detected.executable : "";
 }
+function findPreferredObsidianCliExecutable() {
+  const detected = detectCliExecutable("obsidian");
+  return detected.found ? detected.executable : "";
+}
 function findPreferredMineruExecutable() {
   const detected = detectCliExecutable("mineru");
   return detected.found ? detected.executable : "";
@@ -474,6 +500,7 @@ function isManagedCodexExecutable(executable) {
 }
 var DEFAULT_SETTINGS = {
   projectRoot: "",
+  obsidianCliExecutable: findPreferredObsidianCliExecutable(),
   codexExecutable: findPreferredCodexExecutable(),
   codexConfigSource: "official",
   codexModel: "gpt-5.6-terra",
@@ -529,6 +556,156 @@ var DEFAULT_SETTINGS = {
   taskHistoryLimit: 30,
   querySessionLimit: 8,
   queryMessageLimit: 30
+};
+
+// src/runtime/obsidian-cli.ts
+var fs2 = __toESM(require("node:fs"));
+var import_node_child_process2 = require("node:child_process");
+var OUTPUT_LIMIT = 32e3;
+var COMMAND_TIMEOUT_MS = 8e3;
+function appendOutput(current, chunk) {
+  return `${current}${chunk.toString()}`.slice(-OUTPUT_LIMIT);
+}
+function parseObsidianVersionOutput(output) {
+  const firstLine = output.trim().split(/\r?\n/)[0] || "";
+  const match = firstLine.match(/^(.+?)(?:\s+\(installer\s+(.+?)\))?$/i);
+  return {
+    appVersion: match?.[1]?.trim() || "",
+    installerVersion: match?.[2]?.trim() || ""
+  };
+}
+function parseObsidianVaultsOutput(output, vaultName) {
+  const target = vaultName.trim().toLowerCase();
+  for (const line of output.split(/\r?\n/)) {
+    const [name, ...pathParts] = line.split("	");
+    if (name.trim().toLowerCase() !== target) continue;
+    return { found: true, path: pathParts.join("	").trim() };
+  }
+  return { found: false, path: "" };
+}
+function parseObsidianPluginOutput(output) {
+  const fields = {};
+  for (const line of output.split(/\r?\n/)) {
+    const separator = line.indexOf("	");
+    if (separator <= 0) continue;
+    fields[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+  }
+  return fields;
+}
+function runObsidianCliCommand(executable, args, cwd, label) {
+  const startedAt = Date.now();
+  return new Promise((resolve4) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let child = null;
+    const finish = (exitCode, errorMessage = "") => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (errorMessage) stderr = appendOutput(stderr, errorMessage);
+      resolve4({
+        label,
+        ok: exitCode === 0,
+        exitCode,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        durationMs: Date.now() - startedAt
+      });
+    };
+    const timer = window.setTimeout(() => {
+      child?.kill();
+      finish(null, `Obsidian CLI ${label} 检查超过 ${COMMAND_TIMEOUT_MS / 1e3} 秒`);
+    }, COMMAND_TIMEOUT_MS);
+    try {
+      child = (0, import_node_child_process2.spawn)(executable, args, {
+        cwd,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      child.stdout?.on("data", (chunk) => {
+        stdout = appendOutput(stdout, chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr = appendOutput(stderr, chunk);
+      });
+      child.on("error", (error) => finish(null, error.message));
+      child.on("close", (code) => finish(code));
+    } catch (error) {
+      finish(null, error instanceof Error ? error.message : String(error));
+    }
+  });
+}
+var ObsidianCliService = class {
+  async probe(options) {
+    const startedAt = Date.now();
+    const executable = String(options.executable || "").trim();
+    const base = {
+      executable,
+      vaultName: options.vaultName,
+      vaultPath: "",
+      vaultFound: false,
+      appVersion: "",
+      installerVersion: "",
+      pluginId: options.pluginId,
+      pluginName: "",
+      pluginVersion: "",
+      pluginEnabled: false,
+      testedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (!executable || !fs2.existsSync(executable)) {
+      return {
+        ...base,
+        ok: false,
+        message: `Obsidian CLI 可执行文件不存在：${executable || "未配置"}`,
+        durationMs: Date.now() - startedAt,
+        commands: []
+      };
+    }
+    const commands = [];
+    const version = await runObsidianCliCommand(executable, ["version"], options.cwd, "version");
+    commands.push(version);
+    const versionIdentity = parseObsidianVersionOutput(version.stdout);
+    if (!version.ok) {
+      return {
+        ...base,
+        ...versionIdentity,
+        ok: false,
+        message: version.stderr || version.stdout || "无法连接运行中的 Obsidian。",
+        durationMs: Date.now() - startedAt,
+        commands
+      };
+    }
+    const vaults = await runObsidianCliCommand(executable, ["vaults", "verbose"], options.cwd, "vaults");
+    commands.push(vaults);
+    const vaultIdentity = parseObsidianVaultsOutput(vaults.stdout, options.vaultName);
+    const plugin = await runObsidianCliCommand(
+      executable,
+      [`vault=${options.vaultName}`, "plugin", `id=${options.pluginId}`],
+      options.cwd,
+      "plugin"
+    );
+    commands.push(plugin);
+    const pluginIdentity = parseObsidianPluginOutput(plugin.stdout);
+    const pluginEnabled = pluginIdentity.enabled?.toLowerCase() === "true";
+    const ok = vaults.ok && vaultIdentity.found && plugin.ok && pluginEnabled;
+    const failedCommand = commands.find((command) => !command.ok);
+    const message = ok ? "Obsidian CLI 已连接，当前 Vault 与 Agent Dashboard 插件状态正常。" : failedCommand?.stderr || failedCommand?.stdout || (!vaultIdentity.found ? `CLI 未返回当前 Vault：${options.vaultName}` : !pluginEnabled ? "Agent Dashboard 插件未启用或状态无法确认。" : "Obsidian CLI 连接测试未完全通过。");
+    return {
+      ...base,
+      ...versionIdentity,
+      ok,
+      vaultPath: vaultIdentity.path,
+      vaultFound: vaultIdentity.found,
+      pluginName: pluginIdentity.name || "",
+      pluginVersion: pluginIdentity.version || "",
+      pluginEnabled,
+      message,
+      durationMs: Date.now() - startedAt,
+      commands
+    };
+  }
 };
 
 // src/runtime/lifecycle-state.ts
@@ -956,10 +1133,10 @@ function normalizeProviderModelList(payload) {
 }
 
 // src/runtime/process-execution.ts
-var fs2 = __toESM(require("node:fs"));
+var fs3 = __toESM(require("node:fs"));
 var path2 = __toESM(require("node:path"));
-var import_node_child_process2 = require("node:child_process");
-function appendOutput(current, chunk, limit) {
+var import_node_child_process3 = require("node:child_process");
+function appendOutput2(current, chunk, limit) {
   return `${current}${chunk.toString()}`.slice(-limit);
 }
 function asRecord4(value) {
@@ -970,7 +1147,7 @@ function prepareCliSpawn(executable, args) {
     return { executable, args };
   }
   const powershellShim = executable.replace(/\.(?:cmd|bat)$/i, ".ps1");
-  if (!fs2.existsSync(powershellShim)) {
+  if (!fs3.existsSync(powershellShim)) {
     return { executable, args };
   }
   const powershellExecutable = path2.join(
@@ -1038,7 +1215,7 @@ var ProcessExecutionService = class {
     if (!useOfficialConfig) {
       const codexHome = String(process.env.CODEX_HOME || "").trim() || path2.join(process.env.USERPROFILE || "", ".codex");
       try {
-        const lines = fs2.readFileSync(path2.join(codexHome, "config.toml"), "utf8").split(/\r?\n/);
+        const lines = fs3.readFileSync(path2.join(codexHome, "config.toml"), "utf8").split(/\r?\n/);
         for (const rawLine of lines) {
           const line = rawLine.trim();
           if (line.startsWith("[")) break;
@@ -1068,7 +1245,7 @@ var ProcessExecutionService = class {
       message,
       discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve(fallback(`Codex 可执行文件不存在：${executable || "未配置"}`));
     }
     return new Promise((resolve4) => {
@@ -1082,7 +1259,7 @@ var ProcessExecutionService = class {
         "--stdio"
       ];
       const invocation = prepareCliSpawn(executable, appServerArgs);
-      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+      const child = (0, import_node_child_process3.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1154,7 +1331,7 @@ var ProcessExecutionService = class {
         lines.forEach(inspectLine);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 4e3);
+        stderr = appendOutput2(stderr, chunk, 4e3);
       });
       child.once("error", (error) => finish(fallback(error.message)));
       child.once("close", () => {
@@ -1202,7 +1379,7 @@ var ProcessExecutionService = class {
         "settings.json"
       );
       try {
-        const source = asRecord4(JSON.parse(fs2.readFileSync(settingsPath, "utf8")));
+        const source = asRecord4(JSON.parse(fs3.readFileSync(settingsPath, "utf8")));
         const env = asRecord4(source.env);
         settingsFound = true;
         configuredModel = String(env.ANTHROPIC_MODEL || "").trim();
@@ -1253,7 +1430,7 @@ var ProcessExecutionService = class {
         path2.join(process.env.USERPROFILE || "", ".opencode", "config.json")
       ]) {
         try {
-          const content = fs2.readFileSync(configPath, "utf8");
+          const content = fs3.readFileSync(configPath, "utf8");
           const source = asRecord4(JSON.parse(content));
           configuredModel = String(source.model || "").trim();
           if (configuredModel) break;
@@ -1278,7 +1455,7 @@ var ProcessExecutionService = class {
       message,
       discoveredAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve(fallback(`OpenCode 可执行文件不存在：${executable || "未配置"}`));
     }
     return new Promise((resolve4) => {
@@ -1288,7 +1465,7 @@ var ProcessExecutionService = class {
       let timer = 0;
       const args = useOfficialConfig ? ["models", "opencode"] : ["models"];
       const invocation = prepareCliSpawn(executable, args);
-      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+      const child = (0, import_node_child_process3.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1300,10 +1477,10 @@ var ProcessExecutionService = class {
         resolve4(result);
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 2e5);
+        stdout = appendOutput2(stdout, chunk, 2e5);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 8e3);
+        stderr = appendOutput2(stderr, chunk, 8e3);
       });
       child.once("error", (error) => finish(fallback(error.message)));
       child.once("close", (code) => {
@@ -1354,20 +1531,20 @@ var ProcessExecutionService = class {
       "code-practice",
       "runs"
     );
-    if (!fs2.existsSync(runsDirectory)) return;
-    for (const name of fs2.readdirSync(runsDirectory)) {
+    if (!fs3.existsSync(runsDirectory)) return;
+    for (const name of fs3.readdirSync(runsDirectory)) {
       if (!name.endsWith(".json")) continue;
       const recordPath = path2.join(runsDirectory, name);
       try {
         const record = JSON.parse(
-          fs2.readFileSync(recordPath, "utf8")
+          fs3.readFileSync(recordPath, "utf8")
         );
         if (record.status !== "queued" && record.status !== "running") continue;
         record.status = "stopped";
         record.finished_at = (/* @__PURE__ */ new Date()).toISOString();
         record.stderr = `${String(record.stderr || "")}
 Execution interrupted before the plugin restarted.`.trim();
-        fs2.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
+        fs3.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
       } catch (error) {
         console.warn(`Could not recover code-practice record: ${recordPath}`, error);
       }
@@ -1376,11 +1553,11 @@ Execution interrupted before the plugin restarted.`.trim();
   runCodePractice(settings, request) {
     const projectRoot = settings.projectRoot;
     const runner = path2.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-    if (!fs2.existsSync(runner)) {
+    if (!fs3.existsSync(runner)) {
       return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
     }
     const interpreter = request.language === "python" ? settings.pythonExecutable : settings.rscriptExecutable;
-    if (!interpreter || !fs2.existsSync(interpreter)) {
+    if (!interpreter || !fs3.existsSync(interpreter)) {
       return Promise.reject(new Error(
         `${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`
       ));
@@ -1406,7 +1583,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let stdout = "";
       let stderr = "";
       let settled = false;
-      const child = (0, import_node_child_process2.spawn)(settings.pythonExecutable, args, {
+      const child = (0, import_node_child_process3.spawn)(settings.pythonExecutable, args, {
         cwd: projectRoot,
         shell: false,
         windowsHide: true,
@@ -1418,10 +1595,10 @@ Execution interrupted before the plugin restarted.`.trim();
       });
       this.state.activePracticeRuns.set(request.run_id, { child, stopPath });
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 4e5);
+        stdout = appendOutput2(stdout, chunk, 4e5);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 4e5);
+        stderr = appendOutput2(stderr, chunk, 4e5);
       });
       child.once("error", (error) => {
         if (settled) return;
@@ -1451,8 +1628,8 @@ Execution interrupted before the plugin restarted.`.trim();
     const active = this.state.activePracticeRuns.get(runId);
     if (!active) return false;
     try {
-      fs2.mkdirSync(path2.dirname(active.stopPath), { recursive: true });
-      fs2.writeFileSync(active.stopPath, "stop\n", "utf8");
+      fs3.mkdirSync(path2.dirname(active.stopPath), { recursive: true });
+      fs3.writeFileSync(active.stopPath, "stop\n", "utf8");
       return true;
     } catch (error) {
       console.error("Could not request code-practice stop", error);
@@ -1478,8 +1655,8 @@ Execution interrupted before the plugin restarted.`.trim();
       "stop",
       `${runId}.stop`
     );
-    fs2.mkdirSync(path2.dirname(stopPath), { recursive: true });
-    if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
+    fs3.mkdirSync(path2.dirname(stopPath), { recursive: true });
+    if (fs3.existsSync(stopPath)) fs3.unlinkSync(stopPath);
     const backendId = executionConfig.backend === "claude-code" ? "claude-code" : executionConfig.backend === "opencode" ? "opencode" : "codex-cli";
     const backendExecutable = backendId === "claude-code" ? settings.claudeExecutable : backendId === "opencode" ? settings.openCodeExecutable : settings.codexExecutable;
     const backendConfigSource = backendId === "claude-code" ? settings.claudeConfigSource : backendId === "opencode" ? settings.openCodeConfigSource : settings.codexConfigSource;
@@ -1527,7 +1704,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let settled = false;
       let timedOut = false;
       let timer = 0;
-      const child = (0, import_node_child_process2.spawn)(settings.pythonExecutable, args, {
+      const child = (0, import_node_child_process3.spawn)(settings.pythonExecutable, args, {
         cwd: projectRoot,
         shell: false,
         windowsHide: true,
@@ -1543,7 +1720,7 @@ Execution interrupted before the plugin restarted.`.trim();
         this.state.activeProcesses.delete(runId);
         this.state.activeProcessStops.delete(runId);
         try {
-          if (fs2.existsSync(stopPath)) fs2.unlinkSync(stopPath);
+          if (fs3.existsSync(stopPath)) fs3.unlinkSync(stopPath);
         } catch (error) {
           console.warn("Could not remove Dashboard stop signal", error);
         }
@@ -1562,11 +1739,11 @@ Execution interrupted before the plugin restarted.`.trim();
           }
           return;
         }
-        stderr = appendOutput(stderr, `${line}${keepNewline ? "\n" : ""}`, 16e4);
+        stderr = appendOutput2(stderr, `${line}${keepNewline ? "\n" : ""}`, 16e4);
         hooks.onStderr?.(line);
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 16e4);
+        stdout = appendOutput2(stdout, chunk, 16e4);
         hooks.onStdout?.(chunk.toString("utf8"));
       });
       child.stderr.on("data", (chunk) => {
@@ -1614,7 +1791,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let stderr = "";
       let settled = false;
       let timer = 0;
-      const child = (0, import_node_child_process2.spawn)(options.executable, options.args, {
+      const child = (0, import_node_child_process3.spawn)(options.executable, options.args, {
         cwd: options.cwd,
         shell: false,
         windowsHide: true,
@@ -1635,10 +1812,10 @@ Execution interrupted before the plugin restarted.`.trim();
         callback();
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 2e5);
+        stdout = appendOutput2(stdout, chunk, 2e5);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 4e4);
+        stderr = appendOutput2(stderr, chunk, 4e4);
       });
       child.once("error", (error) => finish(() => reject(error)));
       child.once("close", (code) => {
@@ -1661,7 +1838,7 @@ Execution interrupted before the plugin restarted.`.trim();
     const startedAt = Date.now();
     const executable = String(settings.codexExecutable || "");
     const displayModel = settings.codexConfigSource === "cc-switch" ? "CC Switch 当前模型" : settings.codexModel || "Codex 官方默认模型";
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -1677,7 +1854,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let settled = false;
       let timer = 0;
       const invocation = prepareCliSpawn(executable, ["--version"]);
-      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+      const child = (0, import_node_child_process3.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1694,10 +1871,10 @@ Execution interrupted before the plugin restarted.`.trim();
         });
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 4e3);
+        stdout = appendOutput2(stdout, chunk, 4e3);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 4e3);
+        stderr = appendOutput2(stderr, chunk, 4e3);
       });
       child.once("error", (error) => {
         finish({ ok: false, type: "local-service-offline", message: error.message });
@@ -1744,7 +1921,7 @@ Execution interrupted before the plugin restarted.`.trim();
         testedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -1761,7 +1938,7 @@ Execution interrupted before the plugin restarted.`.trim();
       let settled = false;
       let timer = 0;
       const invocation = prepareCliSpawn(executable, ["version"]);
-      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+      const child = (0, import_node_child_process3.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true
@@ -1782,10 +1959,10 @@ Execution interrupted before the plugin restarted.`.trim();
         });
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 4e3);
+        stdout = appendOutput2(stdout, chunk, 4e3);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 4e3);
+        stderr = appendOutput2(stderr, chunk, 4e3);
       });
       child.once("error", (error) => finish(false, "local-service-offline", error.message));
       child.once("close", (code) => {
@@ -1804,7 +1981,7 @@ Execution interrupted before the plugin restarted.`.trim();
   probeClaudeCode(settings) {
     const startedAt = Date.now();
     const executable = String(settings.claudeExecutable || "");
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -1840,7 +2017,7 @@ Execution interrupted before the plugin restarted.`.trim();
       }
       args.push("仅回复：CLAUDE_BACKEND_OK");
       const invocation = prepareCliSpawn(executable, args);
-      const child = (0, import_node_child_process2.spawn)(invocation.executable, invocation.args, {
+      const child = (0, import_node_child_process3.spawn)(invocation.executable, invocation.args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true,
@@ -1871,11 +2048,11 @@ Execution interrupted before the plugin restarted.`.trim();
         }
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 2e4);
+        stdout = appendOutput2(stdout, chunk, 2e4);
         String(chunk).split(/\r?\n/).forEach(inspectLine);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 8e3);
+        stderr = appendOutput2(stderr, chunk, 8e3);
       });
       child.once("error", (error) => {
         finish({
@@ -1951,7 +2128,7 @@ Execution interrupted before the plugin restarted.`.trim();
         testedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    if (!fs2.existsSync(pythonExecutable)) {
+    if (!fs3.existsSync(pythonExecutable)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -1962,7 +2139,7 @@ Execution interrupted before the plugin restarted.`.trim();
         testedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    if (!fs2.existsSync(runner)) {
+    if (!fs3.existsSync(runner)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -1973,7 +2150,7 @@ Execution interrupted before the plugin restarted.`.trim();
         testedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
-    if (!executable || !fs2.existsSync(executable)) {
+    if (!executable || !fs3.existsSync(executable)) {
       return Promise.resolve({
         ok: false,
         type: "configuration",
@@ -2011,7 +2188,7 @@ Execution interrupted before the plugin restarted.`.trim();
         String(runnerTimeoutSeconds)
       ];
       if (configuredModel) args.push("--backend-model", configuredModel);
-      const child = (0, import_node_child_process2.spawn)(pythonExecutable, args, {
+      const child = (0, import_node_child_process3.spawn)(pythonExecutable, args, {
         cwd: settings.projectRoot,
         shell: false,
         windowsHide: true,
@@ -2033,10 +2210,10 @@ Execution interrupted before the plugin restarted.`.trim();
         });
       };
       child.stdout.on("data", (chunk) => {
-        stdout = appendOutput(stdout, chunk, 3e4);
+        stdout = appendOutput2(stdout, chunk, 3e4);
       });
       child.stderr.on("data", (chunk) => {
-        stderr = appendOutput(stderr, chunk, 1e4);
+        stderr = appendOutput2(stderr, chunk, 1e4);
       });
       child.once("error", (error) => {
         finish({
@@ -2108,8 +2285,8 @@ Execution interrupted before the plugin restarted.`.trim();
     const stopPath = this.state.activeProcessStops.get(runId);
     if (!child || child.killed || !stopPath) return false;
     try {
-      fs2.mkdirSync(path2.dirname(stopPath), { recursive: true });
-      fs2.writeFileSync(stopPath, "stop\n", "utf8");
+      fs3.mkdirSync(path2.dirname(stopPath), { recursive: true });
+      fs3.writeFileSync(stopPath, "stop\n", "utf8");
       return true;
     } catch (error) {
       console.error("Could not request Dashboard action stop", error);
@@ -2151,6 +2328,9 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     switch (this.activePage) {
       case "runtime":
         this.renderRuntimeSettings(containerEl);
+        break;
+      case "obsidian-cli":
+        this.renderObsidianCliSettings(containerEl);
         break;
       case "mineru":
         this.renderMineruSettings(containerEl);
@@ -2196,6 +2376,17 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       title: "运行环境",
       description: "项目目录、Agent/Python/R 可执行文件、任务超时和环境检查。",
       status: "本地执行"
+    });
+    const obsidianCliDetection = describeCliExecutable(
+      "obsidian",
+      this.plugin.settings.obsidianCliExecutable
+    );
+    this.createSettingsNavigationItem(navigation, {
+      page: "obsidian-cli",
+      icon: "square-terminal",
+      title: "Obsidian CLI",
+      description: "可选的外部自动化桥梁、连接诊断与开发回归入口。",
+      status: obsidianCliDetection.found ? obsidianCliDetection.sourceLabel : "可选 · 未检测到"
     });
     this.createSettingsNavigationItem(navigation, {
       page: "mineru",
@@ -2413,6 +2604,73 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     refreshDescription();
+  }
+  renderObsidianCliSettings(containerEl) {
+    this.createSettingsPageHeader(
+      containerEl,
+      "Obsidian CLI",
+      "连接运行中的 Obsidian，用于外部自动化、开发诊断和真实界面回归。Dashboard 核心功能不依赖此能力。",
+      true
+    );
+    this.createProviderSectionHeader(
+      containerEl,
+      "连接设置",
+      "请先在 Obsidian 设置 → 常规中启用“命令行接口”。插件不会修改 PATH，也不会通过 CLI 绕过 Vault 与 Workspace API。"
+    );
+    this.renderCliExecutableSetting(containerEl, {
+      kind: "obsidian",
+      name: "Obsidian CLI 可执行文件",
+      description: "Windows 优先检测当前 Obsidian.exe 同目录的 Obsidian.com，也支持环境变量、PATH 和手动路径。",
+      placeholder: process.platform === "win32" ? "Obsidian.com" : "obsidian",
+      getValue: () => this.plugin.settings.obsidianCliExecutable,
+      setValue: (value) => {
+        this.plugin.settings.obsidianCliExecutable = value;
+        this.plugin.obsidianCliProbeState = { status: "idle" };
+      }
+    });
+    new import_obsidian.Setting(containerEl).setName("当前 Vault").setDesc(`连接测试固定核对当前 Vault“${this.app.vault.getName()}”及插件“${this.plugin.manifest.id}”；不读取正文，也不写入文件。`);
+    const state = this.plugin.obsidianCliProbeState;
+    new import_obsidian.Setting(containerEl).setName("最小连接测试").setDesc("依次执行 version、vaults verbose 和当前 Vault 的 plugin 状态查询；均为只读命令。").addButton((button) => {
+      const testing = state.status === "testing";
+      button.setButtonText(testing ? "测试中…" : "测试连接").setCta().setDisabled(testing).onClick(async () => {
+        this.plugin.obsidianCliProbeState = { status: "testing" };
+        this.display();
+        await this.plugin.probeObsidianCliConnection();
+        this.display();
+      });
+    });
+    if (state.result) this.renderObsidianCliConnectionResult(containerEl, state.result);
+    this.createProviderSectionHeader(
+      containerEl,
+      "安全边界",
+      "插件内读写、导航和检索继续使用 Obsidian Plugin API；CLI 仅作为可选桥梁。"
+    );
+    new import_obsidian.Setting(containerEl).setName("生产功能").setDesc("不开放任意 eval，不自动执行重载、重启、恢复、删除、插件禁用或其他破坏性命令。");
+  }
+  renderObsidianCliConnectionResult(parent, result) {
+    const panel = parent.createDiv({
+      cls: `agent-dashboard-provider-result ${result.ok ? "is-success" : "is-error"}`
+    });
+    const heading = panel.createDiv({ cls: "agent-dashboard-provider-result-heading" });
+    (0, import_obsidian.setIcon)(heading.createSpan(), result.ok ? "circle-check" : "circle-alert");
+    heading.createEl("strong", { text: result.ok ? "CLI 连接成功" : "CLI 连接失败" });
+    const grid = panel.createDiv({ cls: "agent-dashboard-provider-result-grid" });
+    const addRow = (label, value) => {
+      const row = grid.createDiv();
+      row.createSpan({ text: label });
+      row.createEl("strong", { text: String(value || "—") });
+    };
+    addRow("应用版本", result.appVersion);
+    addRow("安装器版本", result.installerVersion || "未返回");
+    addRow("Vault", result.vaultFound ? `${result.vaultName} · 已识别` : `${result.vaultName} · 未识别`);
+    if (result.vaultPath) addRow("Vault 路径", result.vaultPath);
+    addRow(
+      "插件",
+      result.pluginVersion ? `${result.pluginName || result.pluginId} ${result.pluginVersion} · ${result.pluginEnabled ? "已启用" : "未启用"}` : `${result.pluginId} · 状态未知`
+    );
+    addRow("只读命令", `${result.commands.filter((command) => command.ok).length}/${result.commands.length} 通过`);
+    addRow(result.ok ? "状态" : "详情", result.message);
+    addRow("耗时", `${result.durationMs} ms`);
   }
   renderMineruSettings(containerEl) {
     this.createSettingsPageHeader(
@@ -13614,7 +13872,7 @@ var ProviderHttpTransport = class {
 };
 
 // src/query/direct-query-service.ts
-var fs3 = __toESM(require("node:fs"));
+var fs4 = __toESM(require("node:fs"));
 var path6 = __toESM(require("node:path"));
 var DirectQueryService = class {
   constructor(deps) {
@@ -13879,10 +14137,10 @@ var DirectQueryService = class {
     const settings = this.deps.getSettings();
     const projectRoot = path6.resolve(settings.projectRoot);
     const script = path6.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
-    if (!fs3.existsSync(script)) {
+    if (!fs4.existsSync(script)) {
       throw new Error(`知识库检索脚本不存在：${script}`);
     }
-    if (!settings.pythonExecutable || !fs3.existsSync(settings.pythonExecutable)) {
+    if (!settings.pythonExecutable || !fs4.existsSync(settings.pythonExecutable)) {
       throw new Error(`Python 不可用：${settings.pythonExecutable}`);
     }
     const args = [script, "--project-root", projectRoot, "--query", question.slice(0, 4e3)];
@@ -13919,8 +14177,8 @@ var DirectQueryService = class {
       }
       const absolutePath = path6.resolve(vaultRoot, ...relativePath.split("/"));
       if (absolutePath !== vaultRoot && !absolutePath.startsWith(vaultPrefix)) continue;
-      if (!fs3.existsSync(absolutePath) || !fs3.statSync(absolutePath).isFile()) continue;
-      const raw = fs3.readFileSync(absolutePath, "utf8");
+      if (!fs4.existsSync(absolutePath) || !fs4.statSync(absolutePath).isFile()) continue;
+      const raw = fs4.readFileSync(absolutePath, "utf8");
       const content = raw.slice(0, Math.min(9e3, remaining));
       if (!content.trim()) continue;
       seen.add(relativePath.toLowerCase());
@@ -14006,7 +14264,7 @@ var DirectQueryService = class {
 
 // src/plugin.ts
 var import_obsidian15 = require("obsidian");
-var fs4 = __toESM(require("node:fs"));
+var fs5 = __toESM(require("node:fs"));
 var path7 = __toESM(require("node:path"));
 function asRecord8(value) {
   return value !== null && typeof value === "object" ? value : {};
@@ -14025,6 +14283,7 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
     this.lastContextFile = null;
     this.lifecycleState = new DashboardLifecycleState();
     this.processExecution = new ProcessExecutionService(this.lifecycleState);
+    this.obsidianCliService = new ObsidianCliService();
     this.providerTransport = new ProviderHttpTransport();
     this.directQueryService = new DirectQueryService({
       state: this.lifecycleState,
@@ -14043,6 +14302,7 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
     this.cliModelDiscoveryCache = /* @__PURE__ */ new Map();
     this.cliModelDiscoveryInFlight = /* @__PURE__ */ new Map();
     this.mineruReaderActivationQueue = Promise.resolve();
+    this.obsidianCliProbeState = { status: "idle" };
   }
   get providerRuntimeState() {
     return this.lifecycleState.providerRuntimeState;
@@ -14361,12 +14621,12 @@ ${result.stderr.trim()}` : ""
     const outputRoot = path7.join(root, "tool-library", "output", "code-practice", "figures");
     const candidate = path7.resolve(root, relativePath);
     const relative2 = path7.relative(outputRoot, candidate);
-    if (!relative2 || relative2.startsWith("..") || path7.isAbsolute(relative2) || !fs4.existsSync(candidate)) return "";
-    const stat = fs4.statSync(candidate);
+    if (!relative2 || relative2.startsWith("..") || path7.isAbsolute(relative2) || !fs5.existsSync(candidate)) return "";
+    const stat = fs5.statSync(candidate);
     if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return "";
     const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" }[path7.extname(candidate).toLowerCase()];
     if (!mime) return "";
-    return `data:${mime};base64,${fs4.readFileSync(candidate).toString("base64")}`;
+    return `data:${mime};base64,${fs5.readFileSync(candidate).toString("base64")}`;
   }
   async savePracticeNote(payload) {
     const folder = (0, import_obsidian15.normalizePath)("wiki/code/practice");
@@ -14536,6 +14796,14 @@ ${result.stderr.trim()}` : ""
       return { ...session, queryBackendId, retrievalMode, messages };
     });
     const preferredCodexExecutable = findPreferredCodexExecutable();
+    const preferredObsidianCliExecutable = findPreferredObsidianCliExecutable();
+    const configuredObsidianCliExecutable = String(storedSettings.obsidianCliExecutable || "").trim();
+    if (configuredObsidianCliExecutable) {
+      this.settings.obsidianCliExecutable = configuredObsidianCliExecutable;
+    } else if (preferredObsidianCliExecutable) {
+      this.settings.obsidianCliExecutable = preferredObsidianCliExecutable;
+      changed = true;
+    }
     const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
     if (!configuredCodexExecutable || isManagedCodexExecutable(configuredCodexExecutable)) {
       if (preferredCodexExecutable && configuredCodexExecutable !== preferredCodexExecutable) {
@@ -14733,7 +15001,7 @@ ${result.stderr.trim()}` : ""
   }
   isCliBackendAvailable(backendId) {
     const executable = backendId === "claude-code" ? this.settings.claudeExecutable : backendId === "opencode" ? this.settings.openCodeExecutable : this.settings.codexExecutable;
-    return Boolean(executable && fs4.existsSync(executable));
+    return Boolean(executable && fs5.existsSync(executable));
   }
   resolveDirectQueryExecutionConfig(profile) {
     return {
@@ -14889,6 +15157,16 @@ ${result.stderr.trim()}` : ""
   probeMineruCliConnection() {
     return this.processExecution.probeMineruCli(this.settings);
   }
+  async probeObsidianCliConnection() {
+    const result = await this.obsidianCliService.probe({
+      executable: this.settings.obsidianCliExecutable,
+      vaultName: this.app.vault.getName(),
+      pluginId: this.manifest.id,
+      cwd: this.settings.projectRoot && fs5.existsSync(this.settings.projectRoot) ? this.settings.projectRoot : process.cwd()
+    });
+    this.obsidianCliProbeState = { status: "done", result };
+    return result;
+  }
   async clearCompletedTaskHistory() {
     const before = this.taskRuns.length;
     this.taskRuns = this.taskRuns.filter((run) => run.status === "running" || run.status === "queued");
@@ -14909,14 +15187,15 @@ ${result.stderr.trim()}` : ""
     return [
       `Agent Dashboard ${this.manifest.version}`,
       `平台: ${process.platform} ${process.arch}`,
-      `项目根目录: ${this.settings.projectRoot && fs4.existsSync(this.settings.projectRoot) ? "可用" : "不可用"}`,
+      `项目根目录: ${this.settings.projectRoot && fs5.existsSync(this.settings.projectRoot) ? "可用" : "不可用"}`,
       describe("Codex CLI", "codex", this.settings.codexExecutable),
       describe("Claude Code", "claude", this.settings.claudeExecutable),
       describe("OpenCode", "opencode", this.settings.openCodeExecutable),
       describe("MinerU CLI", "mineru", this.settings.mineruExecutable),
+      describe("Obsidian CLI", "obsidian", this.settings.obsidianCliExecutable),
       `MinerU 服务: ${this.settings.mineruServiceMode === "private" ? "私有部署" : "官方服务"}`,
-      `Python: ${this.settings.pythonExecutable && fs4.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
-      `Rscript: ${this.settings.rscriptExecutable && fs4.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,
+      `Python: ${this.settings.pythonExecutable && fs5.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
+      `Rscript: ${this.settings.rscriptExecutable && fs5.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,
       `Direct API 配置数: ${this.settings.providerProfiles.length}`,
       "体检范围: wiki/ 与顶层索引；排除 papers/",
       "凭据、endpoint、正文和对话内容: 已排除"
@@ -15104,7 +15383,7 @@ ${result.stderr.trim()}` : ""
     if (!(adapter instanceof import_obsidian15.FileSystemAdapter)) return "";
     const vaultRoot = adapter.getBasePath();
     const parent = path7.dirname(vaultRoot);
-    if (fs4.existsSync(path7.join(parent, "AGENTS.md"))) return parent;
+    if (fs5.existsSync(path7.join(parent, "AGENTS.md"))) return parent;
     return vaultRoot;
   }
   getTaskRuns() {
@@ -15126,7 +15405,7 @@ ${result.stderr.trim()}` : ""
         ...String(run.outputPath).split("/")
       );
       try {
-        const payload = JSON.parse(fs4.readFileSync(absolutePath, "utf8"));
+        const payload = JSON.parse(fs5.readFileSync(absolutePath, "utf8"));
         if (typeof payload.output === "string") return payload.output;
       } catch (error) {
         console.warn("Could not read persisted Dashboard run output", error);
@@ -15143,8 +15422,8 @@ ${result.stderr.trim()}` : ""
       ...relativePath.split("/")
     );
     const temporaryPath = `${absolutePath}.tmp`;
-    await fs4.promises.mkdir(path7.dirname(absolutePath), { recursive: true });
-    await fs4.promises.writeFile(
+    await fs5.promises.mkdir(path7.dirname(absolutePath), { recursive: true });
+    await fs5.promises.writeFile(
       temporaryPath,
       JSON.stringify({
         schema_version: 1,
@@ -15158,7 +15437,7 @@ ${result.stderr.trim()}` : ""
       }, null, 2),
       "utf8"
     );
-    await fs4.promises.rename(temporaryPath, absolutePath);
+    await fs5.promises.rename(temporaryPath, absolutePath);
     return relativePath;
   }
   isActionRunning(actionId) {
@@ -15266,15 +15545,15 @@ ${result.stderr.trim()}` : ""
     const latestPath = path7.join(projectRoot, "tool-library", "output", "okf", "latest.json");
     let latest = null;
     let error = "";
-    if (fs4.existsSync(latestPath)) {
+    if (fs5.existsSync(latestPath)) {
       try {
-        latest = JSON.parse(fs4.readFileSync(latestPath, "utf8"));
+        latest = JSON.parse(fs5.readFileSync(latestPath, "utf8"));
       } catch (readError) {
         error = readError instanceof Error ? readError.message : String(readError);
       }
     }
     return {
-      exporterAvailable: fs4.existsSync(exporter),
+      exporterAvailable: fs5.existsSync(exporter),
       latest,
       error
     };
@@ -15284,9 +15563,9 @@ ${result.stderr.trim()}` : ""
     const latestPath = path7.join(projectRoot, "tool-library", "output", "lint", "latest.json");
     let latest = null;
     let error = "";
-    if (fs4.existsSync(latestPath)) {
+    if (fs5.existsSync(latestPath)) {
       try {
-        latest = JSON.parse(fs4.readFileSync(latestPath, "utf8"));
+        latest = JSON.parse(fs5.readFileSync(latestPath, "utf8"));
       } catch (readError) {
         error = readError instanceof Error ? readError.message : String(readError);
       }
@@ -15300,25 +15579,25 @@ ${result.stderr.trim()}` : ""
     const exporter = path7.join(projectRoot, "tool-library", "scripts", "export_okf.py");
     const lintScript = path7.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
     const checks = [
-      ["项目根目录", fs4.existsSync(projectRoot)],
-      ["AGENTS.md", fs4.existsSync(path7.join(projectRoot, "AGENTS.md"))],
-      ["Dashboard runner", fs4.existsSync(runner)],
-      ["Python", fs4.existsSync(this.settings.pythonExecutable)]
+      ["项目根目录", fs5.existsSync(projectRoot)],
+      ["AGENTS.md", fs5.existsSync(path7.join(projectRoot, "AGENTS.md"))],
+      ["Dashboard runner", fs5.existsSync(runner)],
+      ["Python", fs5.existsSync(this.settings.pythonExecutable)]
     ];
     if (!action) {
-      checks.push(["Code practice runner", fs4.existsSync(practiceRunner)]);
-      checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs4.existsSync(this.settings.rscriptExecutable)]);
-      checks.push(["MinerU CLI", Boolean(this.settings.mineruExecutable) && fs4.existsSync(this.settings.mineruExecutable)]);
+      checks.push(["Code practice runner", fs5.existsSync(practiceRunner)]);
+      checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs5.existsSync(this.settings.rscriptExecutable)]);
+      checks.push(["MinerU CLI", Boolean(this.settings.mineruExecutable) && fs5.existsSync(this.settings.mineruExecutable)]);
     }
     if (!action || action.id === "okf-export") {
-      checks.push(["OKF exporter", fs4.existsSync(exporter)]);
+      checks.push(["OKF exporter", fs5.existsSync(exporter)]);
     }
     if (!action || ["vault-lint", "vault-lint-fix"].includes(action.id) || backendId !== "codex-cli" && action.writes && ["code-analysis", "synthesis"].includes(action.id)) {
-      checks.push(["Vault lint", fs4.existsSync(lintScript)]);
+      checks.push(["Vault lint", fs5.existsSync(lintScript)]);
     }
     if (!action || !["vault-lint", "okf-export"].includes(action.id)) {
       const executable = backendId === "claude-code" ? this.settings.claudeExecutable : backendId === "opencode" ? this.settings.openCodeExecutable : this.settings.codexExecutable;
-      checks.push([getCliBackendLabel(backendId), fs4.existsSync(executable)]);
+      checks.push([getCliBackendLabel(backendId), fs5.existsSync(executable)]);
     }
     const missing = checks.filter(([, ready]) => !ready).map(([label]) => label);
     return {
@@ -15574,24 +15853,24 @@ ${result.stderr.trim()}` : ""
     }
     const projectRoot = path7.resolve(this.settings.projectRoot);
     const vaultRoot = path7.resolve(projectRoot, "knowledge-base");
-    if (!fs4.existsSync(vaultRoot)) {
+    if (!fs5.existsSync(vaultRoot)) {
       throw new ProviderConnectionError("attachment", `Vault 根目录不存在：${vaultRoot}`);
     }
     if (normalized.path.split("/").includes("..")) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
     const absolutePath = path7.resolve(vaultRoot, ...normalized.path.split("/"));
-    if (!fs4.existsSync(absolutePath)) {
+    if (!fs5.existsSync(absolutePath)) {
       throw new ProviderConnectionError("attachment", `图片不存在：${normalized.path}`);
     }
-    const vaultRealPath = fs4.realpathSync(vaultRoot);
-    const imageRealPath = fs4.realpathSync(absolutePath);
+    const vaultRealPath = fs5.realpathSync(vaultRoot);
+    const imageRealPath = fs5.realpathSync(absolutePath);
     const normalizedVault = vaultRealPath.toLowerCase();
     const normalizedImage = imageRealPath.toLowerCase();
     if (normalizedImage !== normalizedVault && !normalizedImage.startsWith(`${normalizedVault}${path7.sep}`)) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
-    const stat = fs4.statSync(imageRealPath);
+    const stat = fs5.statSync(imageRealPath);
     if (!stat.isFile()) {
       throw new ProviderConnectionError("attachment", "图片路径不是文件");
     }
@@ -15615,7 +15894,7 @@ ${result.stderr.trim()}` : ""
       content: {
         type: "image_url",
         image_url: {
-          url: `data:${mimeType};base64,${fs4.readFileSync(imageRealPath).toString("base64")}`
+          url: `data:${mimeType};base64,${fs5.readFileSync(imageRealPath).toString("base64")}`
         }
       }
     };

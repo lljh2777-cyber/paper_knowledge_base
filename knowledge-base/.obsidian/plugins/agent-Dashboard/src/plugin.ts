@@ -18,6 +18,7 @@ import {
 	findPreferredClaudeExecutable,
 	findPreferredCodexExecutable,
 	findPreferredMineruExecutable,
+	findPreferredObsidianCliExecutable,
 	findPreferredOpenCodeExecutable,
 	getClaudeDefaultModelLabel,
 	getCodexDefaultModelLabel,
@@ -27,6 +28,11 @@ import {
 	normalizeActionExecutionDefaults,
 } from "./runtime/settings";
 import type { DashboardSettings } from "./runtime/settings";
+import {
+	ObsidianCliService,
+	type ObsidianCliConnectionResult,
+	type ObsidianCliProbeState,
+} from "./runtime/obsidian-cli";
 import { DashboardLifecycleState } from "./runtime/lifecycle-state";
 import {
 	DashboardPersistence,
@@ -170,6 +176,7 @@ export default class AgentDashboardPlugin extends Plugin {
 
 	private readonly lifecycleState = new DashboardLifecycleState();
 	private readonly processExecution = new ProcessExecutionService(this.lifecycleState);
+	private readonly obsidianCliService = new ObsidianCliService();
 	private readonly providerTransport = new ProviderHttpTransport();
 	private readonly directQueryService = new DirectQueryService({
 		state: this.lifecycleState,
@@ -196,6 +203,7 @@ export default class AgentDashboardPlugin extends Plugin {
 		Promise<CliModelDiscoveryResult>
 	>();
 	private mineruReaderActivationQueue: Promise<void> = Promise.resolve();
+	obsidianCliProbeState: ObsidianCliProbeState = { status: "idle" };
 
 	get providerRuntimeState(): Map<string, ProviderRuntimeEntry> {
 		return this.lifecycleState.providerRuntimeState;
@@ -768,6 +776,14 @@ export default class AgentDashboardPlugin extends Plugin {
 			return { ...session, queryBackendId, retrievalMode, messages };
 		});
 		const preferredCodexExecutable = findPreferredCodexExecutable();
+		const preferredObsidianCliExecutable = findPreferredObsidianCliExecutable();
+		const configuredObsidianCliExecutable = String(storedSettings.obsidianCliExecutable || "").trim();
+		if (configuredObsidianCliExecutable) {
+			this.settings.obsidianCliExecutable = configuredObsidianCliExecutable;
+		} else if (preferredObsidianCliExecutable) {
+			this.settings.obsidianCliExecutable = preferredObsidianCliExecutable;
+			changed = true;
+		}
 		const configuredCodexExecutable = String(this.settings.codexExecutable || "").trim();
 		if (
 			!configuredCodexExecutable
@@ -1222,6 +1238,19 @@ export default class AgentDashboardPlugin extends Plugin {
 		return this.processExecution.probeMineruCli(this.settings);
 	}
 
+	async probeObsidianCliConnection(): Promise<ObsidianCliConnectionResult> {
+		const result = await this.obsidianCliService.probe({
+			executable: this.settings.obsidianCliExecutable,
+			vaultName: this.app.vault.getName(),
+			pluginId: this.manifest.id,
+			cwd: this.settings.projectRoot && fs.existsSync(this.settings.projectRoot)
+				? this.settings.projectRoot
+				: process.cwd(),
+		});
+		this.obsidianCliProbeState = { status: "done", result };
+		return result;
+	}
+
 	async clearCompletedTaskHistory(): Promise<number> {
 		const before = this.taskRuns.length;
 		this.taskRuns = this.taskRuns.filter((run) => run.status === "running" || run.status === "queued");
@@ -1237,7 +1266,7 @@ export default class AgentDashboardPlugin extends Plugin {
 	}
 
 	buildDiagnosticsSummary(): string {
-		const describe = (label: string, kind: "codex" | "claude" | "opencode" | "mineru", executable: string) => {
+		const describe = (label: string, kind: "codex" | "claude" | "opencode" | "mineru" | "obsidian", executable: string) => {
 			const detection = describeCliExecutable(kind, executable);
 			return `${label}: ${detection.found ? "可用" : "不可用"} · ${detection.sourceLabel}`;
 		};
@@ -1249,6 +1278,7 @@ export default class AgentDashboardPlugin extends Plugin {
 			describe("Claude Code", "claude", this.settings.claudeExecutable),
 			describe("OpenCode", "opencode", this.settings.openCodeExecutable),
 			describe("MinerU CLI", "mineru", this.settings.mineruExecutable),
+			describe("Obsidian CLI", "obsidian", this.settings.obsidianCliExecutable),
 			`MinerU 服务: ${this.settings.mineruServiceMode === "private" ? "私有部署" : "官方服务"}`,
 			`Python: ${this.settings.pythonExecutable && fs.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
 			`Rscript: ${this.settings.rscriptExecutable && fs.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,

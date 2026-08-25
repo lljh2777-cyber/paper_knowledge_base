@@ -13,7 +13,7 @@ import type { ProviderProfile } from "../providers/profile";
 export type ClaudeConfigSource = "official" | "cc-switch";
 export type CodexConfigSource = "official" | "cc-switch";
 export type OpenCodeConfigSource = "official" | "cc-switch";
-export type CliExecutableKind = "codex" | "claude" | "opencode" | "mineru";
+export type CliExecutableKind = "codex" | "claude" | "opencode" | "mineru" | "obsidian";
 export type CliExecutableDetectionSource =
 	| "environment"
 	| "common"
@@ -117,16 +117,19 @@ const CLI_ENVIRONMENT_VARIABLES: Record<CliExecutableKind, string> = {
 	claude: "CLAUDE_CODE_PATH",
 	opencode: "OPENCODE_PATH",
 	mineru: "MINERU_CLI_PATH",
+	obsidian: "OBSIDIAN_CLI_PATH",
 };
 const CLI_COMMAND_NAMES: Record<CliExecutableKind, string> = {
 	codex: "codex",
 	claude: "claude",
 	opencode: "opencode",
 	mineru: "mineru-open-api",
+	obsidian: "obsidian",
 };
 
 export interface DashboardSettings {
 	projectRoot: string;
+	obsidianCliExecutable: string;
 	codexExecutable: string;
 	codexConfigSource: CodexConfigSource;
 	codexModel: string;
@@ -255,6 +258,26 @@ function commonCliCandidates(kind: CliExecutableKind): string[] {
 	const userProfile = process.env.USERPROFILE;
 	const appData = process.env.APPDATA;
 	const localAppData = process.env.LOCALAPPDATA;
+	if (kind === "obsidian") {
+		if (process.platform === "win32") {
+			return [
+				path.join(path.dirname(process.execPath), "Obsidian.com"),
+				joinFromEnvironment(localAppData, "Programs", "Obsidian", "Obsidian.com"),
+				joinFromEnvironment(process.env.ProgramFiles, "Obsidian", "Obsidian.com"),
+			];
+		}
+		if (process.platform === "darwin") {
+			return [
+				"/usr/local/bin/obsidian",
+				"/Applications/Obsidian.app/Contents/MacOS/obsidian-cli",
+			];
+		}
+		return [
+			joinFromEnvironment(process.env.HOME, ".local", "bin", "obsidian"),
+			"/usr/local/bin/obsidian",
+			"/usr/bin/obsidian",
+		];
+	}
 	if (kind === "codex") {
 		return [
 			...managedCodexCandidates(),
@@ -413,6 +436,11 @@ export function findPreferredOpenCodeExecutable(): string {
 	return detected.found ? detected.executable : "";
 }
 
+export function findPreferredObsidianCliExecutable(): string {
+	const detected = detectCliExecutable("obsidian");
+	return detected.found ? detected.executable : "";
+}
+
 export function findPreferredMineruExecutable(): string {
 	const detected = detectCliExecutable("mineru");
 	return detected.found ? detected.executable : "";
@@ -492,6 +520,7 @@ export function isManagedCodexExecutable(executable: unknown): boolean {
 
 export const DEFAULT_SETTINGS: DashboardSettings = {
 	projectRoot: "",
+	obsidianCliExecutable: findPreferredObsidianCliExecutable(),
 	codexExecutable: findPreferredCodexExecutable(),
 	codexConfigSource: "official",
 	codexModel: "gpt-5.6-terra",

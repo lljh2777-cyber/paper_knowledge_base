@@ -10,6 +10,7 @@ const commands = [
 	[process.execPath, ["tool-library/tests/test_dashboard_direct_api_boundary.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_query_view.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_annotations.js"]],
+	[process.execPath, ["tool-library/tests/test_dashboard_obsidian_cli.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_paper_actions.js"]],
 	[process.execPath, ["tool-library/tests/test_dashboard_mineru_reader.js"]],
 	[python, ["-m", "unittest", "discover", "-s", "tool-library/tests", "-p", "test_*.py"]],
