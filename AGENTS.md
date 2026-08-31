@@ -86,6 +86,12 @@ Keep skill use lightweight and stage-owned. Use the router only to select the ri
 Lightweight handoff rules:
 
 - Dashboard `paper-ingest` is an orchestrator, not a new evidence owner. It always hands identity and metadata to `research-vault-ingest`; a selected original-Markdown output uses `tool-library/scripts/run_mineru_extract.py` and the configured MinerU CLI; a selected initial Wiki output goes to `research-vault-source-note`.
+- Treat document identity and output-slot existence as separate checks. A DOI, normalized-title, source-path, or PDF-hash match resolves the existing identity/citekey; it does not prove that every requested output already exists.
+- Check requested outputs independently and report one status per slot:
+  - `knowledge-base/papers/<citekey>/` is satisfied only by a complete, validated MinerU package for that citekey. An existing `wiki/` note or `Clippings/` Markdown file must not suppress generation of a missing package.
+  - `knowledge-base/Clippings/` is an independent faithful-Markdown root. A matching item under `papers/` or `wiki/` does not make a requested Clipping duplicate.
+  - `knowledge-base/wiki/` contains analysis and authored knowledge notes. A matching original under `papers/` or `Clippings/` does not make the requested Wiki output duplicate.
+- Never return a whole-action duplicate/skip merely because one slot already contains the document. Reuse or skip only the occupied requested slot, and continue producing every other requested slot that is absent. Whole-action duplicate is valid only when all requested slots independently exist and pass their own validation.
 - A validated MinerU package belongs under `knowledge-base/papers/<citekey>/` and contains `article.md`, `mineru-result.json`, optional `images/`, and `_extraction/manifest.json` plus `_extraction/validation.json`. `_extraction/source.pdf` is optional. The package is a faithful reading artifact, not an AI source note or scientific synthesis page.
 - Keep `knowledge-base/papers/` and `knowledge-base/wiki/` as independent roots. Do not create Obsidian wikilinks or Markdown links between them in either direction; record a package or note location as a non-clickable inline-code path when provenance must be shown. Vault lint excludes `knowledge-base/papers/` and audits authored Wiki notes plus top-level knowledge indexes only.
 - The initial article Wiki may use either the original PDF or a validated `article.md`, as selected by the user. It remains no deeper than `abstract-level` until the X-Ray checks are complete.

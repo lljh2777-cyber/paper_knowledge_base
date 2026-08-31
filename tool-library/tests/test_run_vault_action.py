@@ -269,6 +269,16 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertIn("generate_original_markdown: yes", request)
         self.assertIn("create_initial_article_wiki: yes", request)
         self.assertIn("article_wiki_source: auto", request)
+        self.assertIn("duplicate_scope: per-output-slot", request)
+        self.assertIn(
+            "original_markdown_roots: knowledge-base/papers, knowledge-base/Clippings",
+            request,
+        )
+        self.assertIn("analysis_root: knowledge-base/wiki", request)
+        self.assertIn(
+            "identity_match_does_not_satisfy_missing_outputs: yes",
+            request,
+        )
         self.assertIn(f"mineru_executable: {mineru.resolve()}", request)
         self.assertIn("mineru_mode: precision-extract", request)
         self.assertIn("mineru_formats: md,json", request)
@@ -283,6 +293,24 @@ class RunVaultActionQuerySessionTests(unittest.TestCase):
         self.assertEqual(context, "")
         self.assertEqual(retrieval_mode, "vault")
         self.assertEqual(attachments, [])
+
+    def test_paper_ingest_prompt_keeps_duplicate_checks_per_output_slot(self) -> None:
+        prompt = run_vault_action.build_prompt(
+            "paper-ingest",
+            "generate_original_markdown: yes\ncreate_initial_article_wiki: yes",
+            Path("D:/vault"),
+        )
+
+        self.assertIn("exact identity match only reuses the identity and citekey", prompt)
+        self.assertIn("Evaluate each requested output slot independently", prompt)
+        self.assertIn("knowledge-base/papers/", prompt)
+        self.assertIn("knowledge-base/Clippings/", prompt)
+        self.assertIn("knowledge-base/wiki/", prompt)
+        self.assertRegex(
+            prompt,
+            r"Continue creating every\s+missing requested slot",
+        )
+        self.assertIn("every requested slot", prompt)
 
     def test_paper_ingest_rejects_empty_output_selection(self) -> None:
         raw_input = json.dumps(
