@@ -159,18 +159,6 @@ Always use `research-vault-ingest` first for source identity, metadata
 normalization, DOI/title/PDF-hash duplicate checks, citekey selection,
 attachment discovery, and evidence-consistency checks. If identity conflicts
 with the PDF, stop before creating either selected output and record the gap.
-An exact identity match only reuses the identity and citekey. It MUST NOT be
-treated as proof that all requested outputs already exist.
-
-Evaluate each requested output slot independently. `knowledge-base/papers/`
-contains validated MinerU original-Markdown packages, `knowledge-base/Clippings/`
-contains independent faithful Markdown originals, and `knowledge-base/wiki/`
-contains analysis/authored notes. A match in one root never makes another root
-duplicate. For every requested slot, report `created`, `reused`, `skipped`, or
-`failed` with its exact path and validation basis. Continue creating every
-missing requested slot even when the DOI/title/source note is an exact match.
-Only report the whole action as duplicate/skipped when every requested slot
-already exists and independently passes its own validation.
 
 When `generate_original_markdown` is `yes`, use the configured MinerU CLI
 through `tool-library/scripts/run_mineru_extract.py`. Do not invoke Paper2MD and
@@ -993,10 +981,6 @@ def normalize_action_input(
                         f"- generate_original_markdown: {'yes' if create_markdown else 'no'}",
                         f"- create_initial_article_wiki: {'yes' if create_wiki else 'no'}",
                         f"- article_wiki_source: {wiki_source}",
-                        "- duplicate_scope: per-output-slot",
-                        "- original_markdown_roots: knowledge-base/papers, knowledge-base/Clippings",
-                        "- analysis_root: knowledge-base/wiki",
-                        "- identity_match_does_not_satisfy_missing_outputs: yes",
                         "- mineru_helper: tool-library/scripts/run_mineru_extract.py",
                         f"- mineru_executable: {mineru_executable or '<not configured>'}",
                         f"- mineru_base_url: {mineru_base_url or '<official default>'}",
