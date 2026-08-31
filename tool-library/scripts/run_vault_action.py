@@ -160,17 +160,21 @@ normalization, DOI/title/PDF-hash duplicate checks, citekey selection,
 attachment discovery, and evidence-consistency checks. If identity conflicts
 with the PDF, stop before creating either selected output and record the gap.
 An exact identity match only reuses the identity and citekey. It MUST NOT be
-treated as proof that all requested outputs already exist.
+treated as proof that every requested output class already exists.
 
-Evaluate each requested output slot independently. `knowledge-base/papers/`
-contains validated MinerU original-Markdown packages, `knowledge-base/Clippings/`
-contains independent faithful Markdown originals, and `knowledge-base/wiki/`
-contains analysis/authored notes. A match in one root never makes another root
-duplicate. For every requested slot, report `created`, `reused`, `skipped`, or
-`failed` with its exact path and validation basis. Continue creating every
-missing requested slot even when the DOI/title/source note is an exact match.
-Only report the whole action as duplicate/skipped when every requested slot
-already exists and independently passes its own validation.
+Evaluate two output classes independently. Original Markdown is one shared
+uniqueness domain spanning `knowledge-base/papers/` and
+`knowledge-base/Clippings/`: an exact document match in either root satisfies
+that class, so do not create the same original again in the other root. Before
+running MinerU, check both roots. Validate a structured package found under
+`papers/`, or verify the exact faithful Markdown found under `Clippings/`.
+Analysis/authored knowledge is a separate uniqueness domain under
+`knowledge-base/wiki/`; a match in the original-Markdown class never satisfies
+the analysis class, and vice versa. For every requested class, report `created`,
+`reused`, `skipped`, or `failed` with its exact path and validation basis.
+Continue creating every missing requested class even when the DOI/title/source
+note is an exact match. Only report the whole action as duplicate/skipped when
+every requested class already exists and independently passes validation.
 
 When `generate_original_markdown` is `yes`, use the configured MinerU CLI
 through `tool-library/scripts/run_mineru_extract.py`. Do not invoke Paper2MD and
@@ -993,10 +997,10 @@ def normalize_action_input(
                         f"- generate_original_markdown: {'yes' if create_markdown else 'no'}",
                         f"- create_initial_article_wiki: {'yes' if create_wiki else 'no'}",
                         f"- article_wiki_source: {wiki_source}",
-                        "- duplicate_scope: per-output-slot",
-                        "- original_markdown_roots: knowledge-base/papers, knowledge-base/Clippings",
-                        "- analysis_root: knowledge-base/wiki",
-                        "- identity_match_does_not_satisfy_missing_outputs: yes",
+                        "- duplicate_scope: per-output-class",
+                        "- original_markdown_uniqueness_roots: knowledge-base/papers, knowledge-base/Clippings",
+                        "- analysis_uniqueness_root: knowledge-base/wiki",
+                        "- identity_match_does_not_satisfy_missing_classes: yes",
                         "- mineru_helper: tool-library/scripts/run_mineru_extract.py",
                         f"- mineru_executable: {mineru_executable or '<not configured>'}",
                         f"- mineru_base_url: {mineru_base_url or '<official default>'}",
