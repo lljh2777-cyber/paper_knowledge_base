@@ -13,7 +13,6 @@
 - **知识关联**：通过 source、method、concept、dataset、project、code、R 和 Linux 页面连接论文、方法与实现。
 - **透明检索**：使用“词法种子 → 图扩展 → 无匹配回退”的只读检索级联，展示实际检查过的 Vault 页面。
 - **质量控制**：检查 frontmatter、链接、孤立页、索引、证据深度、代码关系和 OKF 导出状态。
-- **本地代码练习**：在 Obsidian 中使用 Python/R 单元格，逐格运行、查看输出、停止任务并保存练习笔记。
 - **文中批注**：在阅读视图中选中文字后使用 `Shift+S` 添加手动批注或 AI 初步解释，并可继续归档为正式知识节点。
 - **开放导出**：将 `knowledge-base/wiki/` 导出为 Open Knowledge Format v0.1 bundle。
 
@@ -34,7 +33,6 @@ Agent Dashboard（Obsidian 插件）
         │   └── OpenCode
         ├── Direct API Provider
         ├── MinerU precision 文档提取
-        ├── Python/R 本地执行器
         └── 检索、体检和 OKF 确定性脚本
         │
         ▼
@@ -65,7 +63,6 @@ papers / sources / methods / concepts / code / projects / synthesis
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
-| 代码练习 | 本地 Python/R | 独立进程执行，显式保存时才写入练习笔记 |
 
 “文献入库”固定使用 MinerU precision `extract` 并输出 `md,json`，不使用会将图表替换为占位符的 `flash-extract`。常用层可选择 VLM、Pipeline 或 Auto 模型，并配置语言、OCR、公式、表格和是否附带原 PDF；高级层可限制 1-based 页码范围与请求超时。提取先进入 `tool-library/output/mineru-runs/`，通过 Markdown、JSON、页码和资产检查后才发布。
 
@@ -192,7 +189,6 @@ knowledge-base/
 - Obsidian Desktop `1.8.0` 或更高版本
 - Codex App / Codex CLI；可选安装 Claude Code 或 OpenCode
 - Python 3
-- R / `Rscript`，仅代码练习或 R 工作流需要
 - Node.js 与 pnpm/npm，仅开发插件时需要
 - `mineru-open-api` CLI，仅在“文献入库”生成原文 Markdown 时需要
 
@@ -309,7 +305,6 @@ Git 默认忽略：
 - Agent Dashboard 当前为桌面端插件，不支持 Obsidian Mobile。
 - 知识库检索不是向量数据库；当前核心是词法检索、wikilink 图扩展和可解释回退。
 - Direct API 固定为知识库内只读推理；需要联网、运行工具或写入知识页面时必须切换到 Agent。
-- 代码练习使用独立进程和累计重放模拟 notebook 单元格，不是持久 Jupyter/R 内核。
 - 仓库不会公开提交个人论文库、PDF、API Key 或本地 Zotero 数据。
 
 ## 相关文档

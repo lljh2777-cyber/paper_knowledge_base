@@ -3,7 +3,7 @@
 	"name": "Agent Dashboard",
 	"version": "0.28.0",
 	"minAppVersion": "1.8.0",
-	"description": "A local research-vault dashboard with agent workflows and trusted local Python/R practice cells.",
+	"description": "A local research-vault dashboard with agent workflows.",
 	"author": "Jason",
 	"isDesktopOnly": true
 }

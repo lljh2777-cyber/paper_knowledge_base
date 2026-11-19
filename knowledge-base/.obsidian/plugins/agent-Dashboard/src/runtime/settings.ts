@@ -175,7 +175,6 @@ export interface DashboardSettings {
 	mineruReaderRenderQuality: MineruReaderRenderQuality;
 	pythonExecutable: string;
 	rscriptExecutable: string;
-	codePracticeTimeoutSeconds: number;
 	taskTimeoutMinutes: number;
 	actionExecutionDefaults: Record<string, ActionExecutionDefault>;
 	queryDefaultBackendId: string;
@@ -593,7 +592,6 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	mineruReaderRenderQuality: "standard",
 	pythonExecutable: "D:\\python\\python.exe",
 	rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
-	codePracticeTimeoutSeconds: 30,
 	taskTimeoutMinutes: 60,
 	actionExecutionDefaults: normalizeActionExecutionDefaults(DEFAULT_ACTION_EXECUTION_DEFAULTS),
 	queryDefaultBackendId: "codex-cli",

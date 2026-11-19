@@ -44,7 +44,6 @@ const ACTION_ICONS: Record<string, string> = {
 	"paper-ingest": "file-down",
 	"pdf-xray": "scan-search",
 	"code-analysis": "code-xml",
-	"code-practice": "square-terminal",
 	"vault-retrieval": "search",
 	synthesis: "network",
 	"vault-lint": "shield-check",
@@ -56,7 +55,6 @@ interface DashboardHost extends PluginHost {
 	stopDirectVaultQuery(runId: string): boolean;
 	stopVaultAction(runId: string): boolean;
 	activateQueryWikiView(initialInput?: string): Promise<void>;
-	activateCodePracticeView(): Promise<void>;
 	supportsFast(model: string): boolean;
 	runVaultAction(
 		runId: string,
@@ -570,10 +568,6 @@ export class DashboardView extends ItemView {
 		}
 		if (this.plugin.isActionRunning(action.id)) {
 			new Notice(`${action.label}正在运行`);
-			return;
-		}
-		if (action.localView) {
-			void this.plugin.activateCodePracticeView();
 			return;
 		}
 		if (action.ai || action.requiresInput) {

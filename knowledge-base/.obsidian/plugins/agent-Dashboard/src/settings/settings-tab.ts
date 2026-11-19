@@ -327,7 +327,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		});
 		new Setting(containerEl)
 			.setName("Python 可执行文件")
-			.setDesc("用于统一 runner、知识库体检和 Python 代码练习。")
+			.setDesc("用于统一 runner、知识库体检。")
 			.addText((text) =>
 				text
 					.setPlaceholder("D:\\python\\python.exe")
@@ -335,33 +335,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.pythonExecutable = value.trim();
 						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Rscript 可执行文件")
-			.setDesc("用于无状态 R 代码练习；不会自动安装 R 或 R 包。")
-			.addText((text) =>
-				text
-					.setPlaceholder("C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe")
-					.setValue(this.plugin.settings.rscriptExecutable)
-					.onChange(async (value) => {
-						this.plugin.settings.rscriptExecutable = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("代码练习超时（秒）")
-			.setDesc("每次 Python/R 练习的最长运行时间，范围 1-120 秒。")
-			.addText((text) =>
-				text
-					.setPlaceholder("30")
-					.setValue(String(this.plugin.settings.codePracticeTimeoutSeconds))
-					.onChange(async (value) => {
-						const parsed = Number.parseInt(value, 10);
-						if (Number.isFinite(parsed)) {
-							this.plugin.settings.codePracticeTimeoutSeconds = Math.max(1, Math.min(120, parsed));
-							await this.plugin.saveSettings();
-						}
 					})
 			);
 		new Setting(containerEl)

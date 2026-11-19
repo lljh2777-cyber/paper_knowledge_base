@@ -76,17 +76,6 @@ var ACTIONS = [
     reasoningEffort: "medium"
   },
   {
-    id: "code-practice",
-    label: "代码练习",
-    agent: "local-runtime",
-    description: "在独立视图中使用 Python/R 单元格。运行至当前单元格时会在新进程中累计重放前置代码，可逐格查看输出、停止任务并显式保存练习笔记。",
-    placeholder: "",
-    requiresInput: false,
-    writes: true,
-    enabled: true,
-    localView: true
-  },
-  {
     id: "vault-retrieval",
     label: "知识库检索",
     agent: "research-vault-retrieval",
@@ -560,7 +549,6 @@ var DEFAULT_SETTINGS = {
   mineruReaderRenderQuality: "standard",
   pythonExecutable: "D:\\python\\python.exe",
   rscriptExecutable: "C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe",
-  codePracticeTimeoutSeconds: 30,
   taskTimeoutMinutes: 60,
   actionExecutionDefaults: normalizeActionExecutionDefaults(DEFAULT_ACTION_EXECUTION_DEFAULTS),
   queryDefaultBackendId: "codex-cli",
@@ -728,7 +716,6 @@ var DashboardLifecycleState = class {
   constructor() {
     this.activeProcesses = /* @__PURE__ */ new Map();
     this.activeProcessStops = /* @__PURE__ */ new Map();
-    this.activePracticeRuns = /* @__PURE__ */ new Map();
     this.directQueryRuns = /* @__PURE__ */ new Map();
     this.providerRuntimeState = /* @__PURE__ */ new Map();
     this.providerEditorProfileId = "";
@@ -736,7 +723,6 @@ var DashboardLifecycleState = class {
   clearTransientState() {
     this.activeProcesses.clear();
     this.activeProcessStops.clear();
-    this.activePracticeRuns.clear();
     this.directQueryRuns.clear();
   }
 };
@@ -1538,119 +1524,6 @@ var ProcessExecutionService = class {
       }, 2e4);
     });
   }
-  recoverInterruptedPracticeRuns(settings) {
-    const runsDirectory = path2.join(
-      settings.projectRoot,
-      "tool-library",
-      "output",
-      "code-practice",
-      "runs"
-    );
-    if (!fs3.existsSync(runsDirectory)) return;
-    for (const name of fs3.readdirSync(runsDirectory)) {
-      if (!name.endsWith(".json")) continue;
-      const recordPath = path2.join(runsDirectory, name);
-      try {
-        const record = JSON.parse(
-          fs3.readFileSync(recordPath, "utf8")
-        );
-        if (record.status !== "queued" && record.status !== "running") continue;
-        record.status = "stopped";
-        record.finished_at = (/* @__PURE__ */ new Date()).toISOString();
-        record.stderr = `${String(record.stderr || "")}
-Execution interrupted before the plugin restarted.`.trim();
-        fs3.writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
-      } catch (error) {
-        console.warn(`Could not recover code-practice record: ${recordPath}`, error);
-      }
-    }
-  }
-  runCodePractice(settings, request) {
-    const projectRoot = settings.projectRoot;
-    const runner = path2.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-    if (!fs3.existsSync(runner)) {
-      return Promise.reject(new Error(`代码练习 runner 不存在：${runner}`));
-    }
-    const interpreter = request.language === "python" ? settings.pythonExecutable : settings.rscriptExecutable;
-    if (!interpreter || !fs3.existsSync(interpreter)) {
-      return Promise.reject(new Error(
-        `${request.language === "python" ? "Python" : "Rscript"} 解释器不可用：${interpreter || "未配置"}`
-      ));
-    }
-    const stopPath = path2.join(
-      projectRoot,
-      "tool-library",
-      "output",
-      "code-practice",
-      "stop",
-      `${request.run_id}.stop`
-    );
-    const args = [
-      runner,
-      "--project-root",
-      projectRoot,
-      "--python",
-      settings.pythonExecutable,
-      "--rscript",
-      settings.rscriptExecutable
-    ];
-    return new Promise((resolve4, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      const child = (0, import_node_child_process3.spawn)(settings.pythonExecutable, args, {
-        cwd: projectRoot,
-        shell: false,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          PYTHONUTF8: "1",
-          PYTHONIOENCODING: "utf-8"
-        }
-      });
-      this.state.activePracticeRuns.set(request.run_id, { child, stopPath });
-      child.stdout.on("data", (chunk) => {
-        stdout = appendOutput2(stdout, chunk, 4e5);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr = appendOutput2(stderr, chunk, 4e5);
-      });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        this.state.activePracticeRuns.delete(request.run_id);
-        reject(error);
-      });
-      child.once("close", () => {
-        if (settled) return;
-        settled = true;
-        this.state.activePracticeRuns.delete(request.run_id);
-        try {
-          const result = JSON.parse(stdout.trim());
-          if (stderr.trim()) result.runner_stderr = stderr.trim();
-          resolve4(result);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          reject(new Error(
-            `无法读取代码练习结果：${stderr.trim() || stdout.trim() || message}`
-          ));
-        }
-      });
-      child.stdin.end(JSON.stringify(request), "utf8");
-    });
-  }
-  stopCodePractice(runId) {
-    const active = this.state.activePracticeRuns.get(runId);
-    if (!active) return false;
-    try {
-      fs3.mkdirSync(path2.dirname(active.stopPath), { recursive: true });
-      fs3.writeFileSync(active.stopPath, "stop\n", "utf8");
-      return true;
-    } catch (error) {
-      console.error("Could not request code-practice stop", error);
-      return false;
-    }
-  }
   runVaultAction(options) {
     const { runId, action, input, executionConfig, settings, hooks = {} } = options;
     const projectRoot = settings.projectRoot;
@@ -2313,9 +2186,6 @@ Execution interrupted before the plugin restarted.`.trim();
     return Boolean(child && !child.killed);
   }
   shutdown() {
-    for (const runId of this.state.activePracticeRuns.keys()) {
-      this.stopCodePractice(runId);
-    }
     for (const [runId, child] of this.state.activeProcesses) {
       const stopRequested = this.requestVaultActionStop(runId);
       if (!stopRequested && !child.killed) child.kill();
@@ -2540,25 +2410,10 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.invalidateCliModelDiscovery("opencode");
       }
     });
-    new import_obsidian.Setting(containerEl).setName("Python 可执行文件").setDesc("用于统一 runner、知识库体检和 Python 代码练习。").addText(
+    new import_obsidian.Setting(containerEl).setName("Python 可执行文件").setDesc("用于统一 runner、知识库体检。").addText(
       (text) => text.setPlaceholder("D:\\python\\python.exe").setValue(this.plugin.settings.pythonExecutable).onChange(async (value) => {
         this.plugin.settings.pythonExecutable = value.trim();
         await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Rscript 可执行文件").setDesc("用于无状态 R 代码练习；不会自动安装 R 或 R 包。").addText(
-      (text) => text.setPlaceholder("C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe").setValue(this.plugin.settings.rscriptExecutable).onChange(async (value) => {
-        this.plugin.settings.rscriptExecutable = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("代码练习超时（秒）").setDesc("每次 Python/R 练习的最长运行时间，范围 1-120 秒。").addText(
-      (text) => text.setPlaceholder("30").setValue(String(this.plugin.settings.codePracticeTimeoutSeconds)).onChange(async (value) => {
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isFinite(parsed)) {
-          this.plugin.settings.codePracticeTimeoutSeconds = Math.max(1, Math.min(120, parsed));
-          await this.plugin.saveSettings();
-        }
       })
     );
     new import_obsidian.Setting(containerEl).setName("任务超时（分钟）").setDesc("单个本地脚本或 Codex 任务的最长运行时间，范围 1-240 分钟。").addText(
@@ -3778,554 +3633,23 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
   }
 };
 
-// src/modals/practice-note.ts
-var import_obsidian2 = require("obsidian");
-var PracticeNoteModal = class extends import_obsidian2.Modal {
-  constructor(app, defaultTitle, onSubmit) {
-    super(app);
-    this.defaultTitle = defaultTitle;
-    this.onSubmit = onSubmit;
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.addClass("agent-dashboard-modal", "code-practice-save-modal");
-    this.setTitle("保存练习笔记");
-    const title = this.createField(contentEl, "标题", "text", this.defaultTitle);
-    const goal = this.createField(contentEl, "目标", "textarea", "");
-    const notes = this.createField(contentEl, "补充说明", "textarea", "");
-    const footer = contentEl.createDiv({ cls: "agent-dashboard-modal-actions" });
-    const cancel = footer.createEl("button", { text: "取消" });
-    const save = footer.createEl("button", { cls: "mod-cta", text: "保存" });
-    cancel.type = "button";
-    save.type = "button";
-    const submit = () => {
-      const value = title.value.trim();
-      if (!value) {
-        new import_obsidian2.Notice("请输入练习标题");
-        return;
-      }
-      this.close();
-      void this.onSubmit({ title: value, goal: goal.value.trim(), notes: notes.value.trim() });
-    };
-    cancel.addEventListener("click", () => this.close());
-    save.addEventListener("click", submit);
-    title.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") submit();
-    });
-    window.setTimeout(() => title.focus(), 0);
-  }
-  createField(parent, labelText, type, value) {
-    const field = parent.createEl("label", { cls: "code-practice-modal-field" });
-    field.createSpan({ text: labelText });
-    if (type === "textarea") {
-      const textarea = field.createEl("textarea", { attr: { rows: "4" } });
-      textarea.value = value;
-      return textarea;
-    }
-    const input = field.createEl("input", { attr: { type: "text" } });
-    input.value = value;
-    return input;
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
-
 // src/views/code-practice.ts
-var import_node_path = __toESM(require("node:path"));
-var import_obsidian3 = require("obsidian");
-var CodePracticeView = class extends import_obsidian3.ItemView {
-  constructor(leaf, plugin) {
-    super(leaf);
-    this.plugin = plugin;
-    this.language = "python";
-    this.nextCellId = 1;
-    this.cellsByLanguage = {
-      python: this.createDefaultCells("python"),
-      r: this.createDefaultCells("r")
-    };
-    this.activeRunId = "";
-    this.activeCellId = "";
-    this.stopRequested = false;
-    this.runningAll = false;
-    this.executionCounter = 0;
-    this.relatedNotePath = "";
-    this.notebookControls = null;
-  }
-  createCell(code = "", placeholder = "") {
-    return { id: `cell-${this.nextCellId++}`, code, placeholder, result: null, executionCount: null };
-  }
-  createDefaultCells(language) {
-    return language === "r" ? [this.createCell("", "values <- c(1, 2, 3, 4)"), this.createCell("", "mean(values)")] : [this.createCell("", "values = [1, 2, 3, 4]"), this.createCell("", "sum(values) / len(values)")];
-  }
-  get cells() {
-    return this.cellsByLanguage[this.language];
-  }
+var import_obsidian2 = require("obsidian");
+var CodePracticeView = class extends import_obsidian2.ItemView {
   getViewType() {
     return CODE_PRACTICE_VIEW_TYPE;
   }
   getDisplayText() {
-    return "代码练习";
-  }
-  getIcon() {
-    return "square-code";
+    return "历史代码练习";
   }
   async onOpen() {
-    this.render();
-  }
-  async onClose() {
-    if (this.activeRunId) this.plugin.stopCodePractice(this.activeRunId);
-    this.contentEl.empty();
-  }
-  setRelatedNote(file) {
-    this.relatedNotePath = file?.extension === "md" ? file.path : "";
-    if (this.containerEl?.isConnected) this.render();
-  }
-  render() {
-    const scrollTop = this.contentEl.scrollTop;
-    const scrollLeft = this.contentEl.scrollLeft;
-    this.contentEl.empty();
-    this.contentEl.addClass("code-practice-view");
-    const shell = this.contentEl.createDiv({ cls: "code-practice-shell" });
-    this.renderHeader(shell);
-    this.renderRuntime(shell);
-    this.renderNotebook(shell);
-    this.contentEl.scrollTop = scrollTop;
-    this.contentEl.scrollLeft = scrollLeft;
-    window.requestAnimationFrame(() => {
-      if (!this.contentEl?.isConnected) return;
-      this.contentEl.scrollTop = scrollTop;
-      this.contentEl.scrollLeft = scrollLeft;
-    });
-  }
-  renderHeader(parent) {
-    const header = parent.createEl("header", { cls: "code-practice-header" });
-    const title = header.createDiv({ cls: "code-practice-title" });
-    title.createEl("p", { cls: "agent-dashboard-eyebrow", text: "本地运行" });
-    title.createEl("h1", { text: "代码练习" });
-    const context = header.createDiv({ cls: "code-practice-context" });
-    context.createSpan({ cls: "code-practice-context-label", text: "关联笔记" });
-    context.createSpan({
-      cls: "code-practice-context-value",
-      text: this.relatedNotePath ? this.relatedNotePath.replace(/\.md$/i, "") : "未关联",
-      attr: { title: this.relatedNotePath || "打开练习视图前选中的 Markdown 笔记会显示在这里" }
-    });
-  }
-  renderRuntime(parent) {
-    const bar = parent.createDiv({ cls: "code-practice-runtime" });
-    const warning = bar.createDiv({
-      cls: "code-practice-security-notice",
-      attr: { role: "note" }
-    });
-    (0, import_obsidian3.setIcon)(warning.createSpan(), "shield-alert");
-    warning.createSpan({
-      text: "仅运行可信代码：代码以当前用户权限在本机执行；规则拦截只用于减少误操作，不是安全沙箱。"
-    });
-    const languages = bar.createDiv({ cls: "code-practice-language-switch", attr: { "aria-label": "运行语言" } });
-    [["python", "Python"], ["r", "R"]].forEach(([value, label]) => {
-      const button = languages.createEl("button", {
-        cls: value === this.language ? "is-active" : "",
-        text: label,
-        attr: { "aria-pressed": value === this.language ? "true" : "false" }
-      });
-      button.type = "button";
-      button.disabled = Boolean(this.activeRunId);
-      button.addEventListener("click", () => this.setLanguage(value));
-    });
-    const details = bar.createDiv({ cls: "code-practice-runtime-details" });
-    this.createRuntimeDetail(details, "解释器", this.currentInterpreter());
-    this.createRuntimeDetail(details, "工作目录", "tool-library/output/code-practice/figures/<run-id>");
-    this.createRuntimeDetail(details, "权限边界", "当前 Windows 用户；可访问工作目录外路径");
-  }
-  createRuntimeDetail(parent, label, value) {
-    const detail = parent.createDiv({ cls: "code-practice-runtime-detail" });
-    detail.createSpan({ text: label });
-    detail.createEl("code", { text: value || "未配置", attr: { title: value || "未配置" } });
-  }
-  renderNotebook(parent) {
-    const section = parent.createEl("section", { cls: "code-practice-notebook" });
-    const toolbar = section.createDiv({ cls: "code-practice-toolbar" });
-    const heading = toolbar.createDiv({ cls: "code-practice-notebook-heading" });
-    heading.createEl("h2", { text: "练习单元格" });
-    heading.createSpan({ text: "运行至当前单元格时，会在新进程中静默重放前置单元格。" });
-    const commands = toolbar.createDiv({ cls: "code-practice-commands" });
-    const add = this.createCommandButton(commands, "plus", "新增单元格");
-    const run = this.createCommandButton(commands, "list-start", "全部运行", "mod-cta");
-    const stop = this.createCommandButton(commands, "square", "停止", "mod-warning");
-    const clear = this.createCommandButton(commands, "eraser", "清空输出");
-    const clearCode = this.createCommandButton(commands, "file-x-2", "清空代码");
-    const resetCells = this.createCommandButton(commands, "rows-2", "重置为两格");
-    const save = this.createCommandButton(commands, "save", "保存练习");
-    add.addEventListener("click", () => this.addCell(this.cells.length - 1));
-    run.addEventListener("click", () => void this.runAllCells());
-    stop.addEventListener("click", () => this.stopCode());
-    clear.addEventListener("click", () => {
-      this.cells.forEach((cell) => {
-        cell.result = null;
-        cell.executionCount = null;
-      });
-      this.render();
-    });
-    clearCode.addEventListener("click", () => this.clearAllCellCode());
-    resetCells.addEventListener("click", () => this.resetCellsToTwo());
-    save.addEventListener("click", () => this.openSaveModal());
-    const list = section.createDiv({ cls: "code-practice-cell-list" });
-    this.cells.forEach((cell, index) => this.renderCell(list, cell, index));
-    const addFooter = section.createEl("button", {
-      cls: "code-practice-add-cell",
-      attr: { title: "在末尾新增单元格", "aria-label": "在末尾新增单元格" }
-    });
-    addFooter.type = "button";
-    addFooter.disabled = Boolean(this.activeRunId);
-    (0, import_obsidian3.setIcon)(addFooter, "plus");
-    addFooter.createSpan({ text: "新增单元格" });
-    addFooter.addEventListener("click", () => this.addCell(this.cells.length - 1));
-    this.notebookControls = { add, run, stop, clear, clearCode, resetCells, save, addFooter };
-    this.updateNotebookControls();
-  }
-  updateNotebookControls() {
-    if (!this.notebookControls) return;
-    const busy = Boolean(this.activeRunId);
-    const { add, run, stop, clear, clearCode, resetCells, save, addFooter } = this.notebookControls;
-    add.disabled = busy;
-    addFooter.disabled = busy;
-    run.disabled = busy || !this.cells.some((cell) => cell.code.trim());
-    stop.disabled = !busy || this.stopRequested;
-    clear.disabled = busy || !this.cells.some((cell) => cell.result);
-    clearCode.disabled = busy || !this.cells.some((cell) => cell.code.trim());
-    resetCells.disabled = busy || this.cells.length === 2 && !this.cells.some((cell) => cell.code.trim() || cell.result);
-    save.disabled = busy || !this.cells.some((cell) => cell.result && cell.result.status !== "running");
-  }
-  createCommandButton(parent, icon, label, className = "") {
-    const button = parent.createEl("button", {
-      cls: `code-practice-command ${className}`.trim(),
-      attr: { title: label, "aria-label": label }
-    });
-    button.type = "button";
-    (0, import_obsidian3.setIcon)(button, icon);
-    button.createSpan({ text: label });
-    return button;
-  }
-  renderCell(parent, cell, index) {
-    const article = parent.createEl("article", { cls: "code-practice-cell", attr: { "data-cell-id": cell.id } });
-    if (cell.id === this.activeCellId) article.addClass("is-running");
-    const inputRow = article.createDiv({ cls: "code-practice-cell-input-row" });
-    const prompt = inputRow.createDiv({ cls: "code-practice-cell-prompt" });
-    prompt.createSpan({ text: cell.id === this.activeCellId ? "In [*]:" : `In [${cell.executionCount ?? " "}]:` });
-    const run = this.createIconButton(prompt, "play", "运行至此（Ctrl+Enter）");
-    run.setAttribute("aria-keyshortcuts", "Control+Enter Meta+Enter");
-    run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
-    run.addEventListener("click", () => void this.runCell(cell.id));
-    const body = inputRow.createDiv({ cls: "code-practice-cell-body" });
-    const controls = body.createDiv({ cls: "code-practice-cell-controls" });
-    const up = this.createIconButton(controls, "arrow-up", "上移单元格");
-    const down = this.createIconButton(controls, "arrow-down", "下移单元格");
-    const add = this.createIconButton(controls, "plus", "在下方新增单元格");
-    const remove = this.createIconButton(controls, "trash-2", "删除单元格");
-    up.disabled = Boolean(this.activeRunId) || index === 0;
-    down.disabled = Boolean(this.activeRunId) || index === this.cells.length - 1;
-    add.disabled = Boolean(this.activeRunId);
-    remove.disabled = Boolean(this.activeRunId) || this.cells.length === 1;
-    up.addEventListener("click", () => this.moveCell(index, index - 1));
-    down.addEventListener("click", () => this.moveCell(index, index + 1));
-    add.addEventListener("click", () => this.addCell(index));
-    remove.addEventListener("click", () => this.removeCell(index));
-    const editor = body.createEl("textarea", {
-      cls: "code-practice-cell-editor",
-      attr: {
-        rows: "4",
-        spellcheck: "false",
-        placeholder: cell.placeholder || (this.language === "r" ? "# 在此输入 R 代码" : "# 在此输入 Python 代码"),
-        "aria-label": `${this.language === "python" ? "Python" : "R"} 单元格 ${index + 1}`
-      }
-    });
-    editor.value = cell.code;
-    editor.disabled = Boolean(this.activeRunId);
-    this.resizeCellEditor(editor);
-    editor.addEventListener("input", () => {
-      cell.code = editor.value;
-      this.resizeCellEditor(editor);
-      this.invalidateCellsFrom(index);
-      run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
-      this.updateNotebookControls();
-    });
-    editor.addEventListener("keydown", (event) => {
-      const isRAssignmentShortcut = this.language === "r" && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.isComposing && (event.key === "-" || event.code === "Minus" || event.code === "NumpadSubtract");
-      if (isRAssignmentShortcut) {
-        event.preventDefault();
-        event.stopPropagation();
-        editor.setRangeText("<-", editor.selectionStart, editor.selectionEnd, "end");
-        editor.dispatchEvent(new Event("input", { bubbles: true }));
-        return;
-      }
-      if (event.key === "Tab") {
-        event.preventDefault();
-        const start = editor.selectionStart;
-        const end = editor.selectionEnd;
-        editor.setRangeText("	", start, end, "end");
-        cell.code = editor.value;
-        this.resizeCellEditor(editor);
-        this.invalidateCellsFrom(index);
-        run.disabled = Boolean(this.activeRunId) || !cell.code.trim();
-        this.updateNotebookControls();
-        return;
-      }
-      if (event.key !== "Enter" || this.activeRunId) return;
-      if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-        event.stopPropagation();
-        void this.runCell(cell.id);
-      } else if (event.shiftKey) {
-        event.preventDefault();
-        event.stopPropagation();
-        void this.runCell(cell.id, true);
-      }
-    });
-    const output = article.createDiv({ cls: "code-practice-cell-output" });
-    this.renderCellOutput(output, cell);
-  }
-  resizeCellEditor(editor) {
-    const minimumHeight = 132;
-    const maximumHeight = Math.max(240, Math.min(520, Math.round(window.innerHeight * 0.6)));
-    editor.style.height = `${minimumHeight}px`;
-    const contentHeight = editor.scrollHeight;
-    editor.style.height = `${Math.min(Math.max(contentHeight, minimumHeight), maximumHeight)}px`;
-    editor.style.overflowY = contentHeight > maximumHeight ? "auto" : "hidden";
-  }
-  createIconButton(parent, icon, label) {
-    const button = parent.createEl("button", {
-      cls: "code-practice-icon-button",
-      attr: { title: label, "aria-label": label }
-    });
-    button.type = "button";
-    (0, import_obsidian3.setIcon)(button, icon);
-    return button;
-  }
-  renderCellOutput(parent, cell) {
-    if (!cell.result) return;
-    const row = parent.createDiv({ cls: "code-practice-cell-output-row" });
-    const prompt = row.createDiv({ cls: "code-practice-cell-prompt is-output" });
-    prompt.createSpan({ text: `Out [${cell.executionCount ?? " "}]:` });
-    const content = row.createDiv({ cls: "code-practice-cell-result" });
-    const heading = content.createDiv({ cls: "code-practice-output-heading" });
-    const status = cell.result.status || "idle";
-    heading.createSpan({ cls: `code-practice-status code-practice-status-${status}`, text: this.displayStatus(status) });
-    const summary = heading.createSpan({ cls: "code-practice-cell-summary" });
-    summary.setText(`${this.formatDuration(cell.result.duration_ms)} · 退出码 ${cell.result.exit_code ?? "-"}`);
-    if (cell.result.stdout) this.renderStream(content, "标准输出", cell.result.stdout);
-    if (cell.result.stderr) {
-      const stderr = this.stderrPresentation(status);
-      this.renderStream(content, stderr.title, cell.result.stderr, stderr.tone);
-    }
-    this.renderFigures(content, cell.result.figures || []);
-  }
-  stderrPresentation(status) {
-    if (["failed", "timeout"].includes(status)) return { title: "错误与诊断（stderr）", tone: "error" };
-    if (status === "stopped") return { title: "运行消息（stderr）", tone: "message" };
-    return { title: "消息与警告（stderr）", tone: "message" };
-  }
-  renderStream(parent, title, value, tone = "output") {
-    const block = parent.createDiv({ cls: `code-practice-stream is-${tone}` });
-    block.createEl("h3", { text: title });
-    block.createEl("pre", { text: value || "（无）" });
-  }
-  renderFigures(parent, figures) {
-    if (!figures.length) return;
-    const block = parent.createDiv({ cls: "code-practice-figures" });
-    block.createEl("h3", { text: "生成图片" });
-    const grid = block.createDiv({ cls: "code-practice-figure-grid" });
-    figures.forEach((figurePath) => {
-      const item = grid.createEl("figure");
-      const dataUrl = this.plugin.readPracticeFigure(figurePath);
-      if (dataUrl) item.createEl("img", { attr: { src: dataUrl, alt: import_node_path.default.basename(figurePath) } });
-      item.createEl("figcaption", { text: figurePath, attr: { title: figurePath } });
-    });
-  }
-  setLanguage(language) {
-    if (this.activeRunId || language === this.language) return;
-    this.language = language;
-    this.render();
-  }
-  currentInterpreter() {
-    return this.language === "python" ? this.plugin.settings.pythonExecutable : this.plugin.settings.rscriptExecutable;
-  }
-  invalidateCellsFrom(index) {
-    this.cells.slice(index).forEach((candidate) => {
-      candidate.result = null;
-      candidate.executionCount = null;
-      const output = this.contentEl.querySelector(
-        `[data-cell-id="${candidate.id}"] .code-practice-cell-output`
-      );
-      if (output) output.empty();
-    });
-  }
-  clearAllCellCode() {
-    if (this.activeRunId) return;
-    this.cells.forEach((cell) => {
-      cell.code = "";
-      cell.result = null;
-      cell.executionCount = null;
-    });
-    this.render();
-    new import_obsidian3.Notice("已清空当前语言的代码和输出");
-  }
-  resetCellsToTwo() {
-    if (this.activeRunId) return;
-    this.cellsByLanguage[this.language] = this.createDefaultCells(this.language);
-    this.render();
-    new import_obsidian3.Notice("已重置为两个空单元格");
-  }
-  addCell(afterIndex) {
-    if (this.activeRunId) return;
-    const cell = this.createCell("", this.language === "r" ? "# 在此输入 R 代码" : "# 在此输入 Python 代码");
-    this.cells.splice(afterIndex + 1, 0, cell);
-    this.render();
-    this.focusCell(cell.id);
-  }
-  removeCell(index) {
-    if (this.activeRunId || this.cells.length === 1) return;
-    this.cells.splice(index, 1);
-    this.invalidateCellsFrom(index);
-    this.render();
-    this.focusCell(this.cells[Math.min(index, this.cells.length - 1)].id);
-  }
-  moveCell(from, to) {
-    if (this.activeRunId || to < 0 || to >= this.cells.length) return;
-    const [cell] = this.cells.splice(from, 1);
-    this.cells.splice(to, 0, cell);
-    this.invalidateCellsFrom(Math.min(from, to));
-    this.render();
-    this.focusCell(cell.id);
-  }
-  focusCell(cellId) {
-    window.setTimeout(() => {
-      this.contentEl.querySelector(
-        `[data-cell-id="${cellId}"] .code-practice-cell-editor`
-      )?.focus();
-    }, 0);
-  }
-  async runCell(cellId, focusNext = false) {
-    if (this.activeRunId) return null;
-    const index = this.cells.findIndex((cell2) => cell2.id === cellId);
-    if (index < 0) return null;
-    const cell = this.cells[index];
-    const code = cell.code.trimEnd();
-    if (!code.trim()) {
-      new import_obsidian3.Notice("请输入代码");
-      return null;
-    }
-    const contextCode = this.cells.slice(0, index).filter((candidate) => candidate.code.trim()).map((candidate, contextIndex) => `# --- replayed cell ${contextIndex + 1} ---
-${candidate.code.trimEnd()}`).join("\n\n");
-    this.activeRunId = this.plugin.createPracticeRunId();
-    this.activeCellId = cell.id;
-    this.stopRequested = false;
-    cell.result = {
-      run_id: this.activeRunId,
-      status: "running",
-      language: this.language,
-      exit_code: null,
-      duration_ms: 0,
-      stdout: "",
-      stderr: "",
-      figures: []
-    };
-    this.render();
-    try {
-      cell.result = await this.plugin.runCodePractice({
-        run_id: this.activeRunId,
-        language: this.language,
-        context_code: contextCode,
-        code,
-        working_directory: "tool-library/output/code-practice",
-        timeout_seconds: this.plugin.settings.codePracticeTimeoutSeconds
-      });
-    } catch (error) {
-      cell.result = {
-        run_id: this.activeRunId,
-        status: "failed",
-        language: this.language,
-        exit_code: null,
-        duration_ms: 0,
-        stdout: "",
-        stderr: error instanceof Error ? error.message : String(error),
-        figures: []
-      };
-    } finally {
-      this.executionCounter += 1;
-      cell.executionCount = this.executionCounter;
-      this.activeRunId = "";
-      this.activeCellId = "";
-      this.stopRequested = false;
-      this.render();
-      if (focusNext) {
-        if (index === this.cells.length - 1) this.addCell(index);
-        else this.focusCell(this.cells[index + 1].id);
-      }
-    }
-    return cell.result;
-  }
-  async runAllCells() {
-    if (this.activeRunId || this.runningAll) return;
-    this.runningAll = true;
-    try {
-      for (const cell of [...this.cells]) {
-        if (!cell.code.trim()) continue;
-        const result = await this.runCell(cell.id);
-        if (!result || result.status !== "success") break;
-      }
-    } finally {
-      this.runningAll = false;
-      this.render();
-    }
-  }
-  stopCode() {
-    if (!this.activeRunId || this.stopRequested) return;
-    this.stopRequested = true;
-    this.plugin.stopCodePractice(this.activeRunId);
-    new import_obsidian3.Notice("正在停止代码练习");
-    this.render();
-  }
-  openSaveModal() {
-    if (this.activeRunId || !this.cells.some((cell) => cell.result)) return;
-    const defaultTitle = `${this.language === "python" ? "Python" : "R"} 练习 ${(/* @__PURE__ */ new Date()).toLocaleDateString("zh-CN")}`;
-    new PracticeNoteModal(this.app, defaultTitle, async (form) => {
-      try {
-        const file = await this.plugin.savePracticeNote({
-          ...form,
-          language: this.language,
-          cells: this.cells.map((cell) => ({
-            code: cell.code,
-            result: cell.result,
-            executionCount: cell.executionCount
-          })),
-          relatedNotePath: this.relatedNotePath
-        });
-        new import_obsidian3.Notice(`已保存：${file.path}`);
-        await this.app.workspace.getLeaf(true).openFile(file);
-      } catch (error) {
-        new import_obsidian3.Notice(`保存失败：${error instanceof Error ? error.message : String(error)}`, 8e3);
-      }
-    }).open();
-  }
-  displayStatus(status) {
-    return {
-      idle: "未运行",
-      running: this.stopRequested ? "正在停止" : "运行中",
-      success: "成功",
-      failed: "失败",
-      timeout: "已超时",
-      stopped: "已停止"
-    }[status] || status;
-  }
-  formatDuration(durationMs) {
-    if (!Number.isFinite(Number(durationMs))) return "-";
-    return Number(durationMs) < 1e3 ? `${durationMs} ms` : `${(Number(durationMs) / 1e3).toFixed(2)} s`;
+    this.contentEl.createEl("p", { text: "代码练习功能已移除。已保存的练习笔记可在 wiki/code/practice 中打开。" });
   }
 };
 
 // src/modals/action-input.ts
-var import_obsidian4 = require("obsidian");
-var ActionInputModal = class extends import_obsidian4.Modal {
+var import_obsidian3 = require("obsidian");
+var ActionInputModal = class extends import_obsidian3.Modal {
   constructor(app, plugin, action, onSubmit, options = {}) {
     super(app);
     this.plugin = plugin;
@@ -4911,8 +4235,8 @@ var ActionInputModal = class extends import_obsidian4.Modal {
 };
 
 // src/modals/task-result.ts
-var import_obsidian5 = require("obsidian");
-var TaskResultModal = class extends import_obsidian5.Modal {
+var import_obsidian4 = require("obsidian");
+var TaskResultModal = class extends import_obsidian4.Modal {
   constructor(app, plugin, run, onRepair) {
     super(app);
     this.plugin = plugin;
@@ -4959,7 +4283,7 @@ var TaskResultModal = class extends import_obsidian5.Modal {
     copy.type = "button";
     copy.addEventListener("click", async () => {
       await navigator.clipboard.writeText(output);
-      new import_obsidian5.Notice("任务结果已复制");
+      new import_obsidian4.Notice("任务结果已复制");
     });
     if (this.canRepair()) {
       const repair = footer.createEl("button", {
@@ -5036,7 +4360,7 @@ function serializeActionRequest(action, request, options, mineruExecutable = "",
 }
 
 // src/services/dashboard-data.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var DashboardDataService = class {
   constructor(app, plugin) {
     this.app = app;
@@ -5057,11 +4381,11 @@ var DashboardDataService = class {
     } else {
       for (const change of changes) {
         if (this.isExcludedMaintenancePath(change.path)) {
-          nextRecords.delete((0, import_obsidian6.normalizePath)(change.path));
+          nextRecords.delete((0, import_obsidian5.normalizePath)(change.path));
           continue;
         }
         if (change.type === "delete") {
-          nextRecords.delete((0, import_obsidian6.normalizePath)(change.path));
+          nextRecords.delete((0, import_obsidian5.normalizePath)(change.path));
           continue;
         }
         if (change.file?.extension === "md") {
@@ -5149,7 +4473,7 @@ var DashboardDataService = class {
     return version === this.loadVersion ? result : null;
   }
   isExcludedMaintenancePath(value) {
-    return (0, import_obsidian6.normalizePath)(value).startsWith("papers/");
+    return (0, import_obsidian5.normalizePath)(value).startsWith("papers/");
   }
   async readRecord(file) {
     const text = await this.app.vault.cachedRead(file);
@@ -5157,7 +4481,7 @@ var DashboardDataService = class {
     const frontmatter = cachedFrontmatter && typeof cachedFrontmatter === "object" ? { ...cachedFrontmatter } : this.parseFrontmatter(text);
     return {
       file,
-      path: (0, import_obsidian6.normalizePath)(file.path),
+      path: (0, import_obsidian5.normalizePath)(file.path),
       name: file.basename,
       text,
       frontmatter,
@@ -5218,8 +4542,8 @@ var DashboardDataService = class {
     }
     return [];
   }
-  inferType(path8) {
-    const normalized = (0, import_obsidian6.normalizePath)(path8);
+  inferType(path7) {
+    const normalized = (0, import_obsidian5.normalizePath)(path7);
     if (normalized.startsWith("wiki/sources/")) return "source";
     if (normalized.startsWith("wiki/methods/")) return "method";
     if (normalized.startsWith("wiki/synthesis/")) return "synthesis";
@@ -5510,7 +4834,7 @@ var DashboardDataService = class {
     const counts = /* @__PURE__ */ new Map();
     for (const record of records) {
       for (const match of record.text.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
-        const target = (0, import_obsidian6.normalizePath)(match[1]).replace(/\.md$/i, "");
+        const target = (0, import_obsidian5.normalizePath)(match[1]).replace(/\.md$/i, "");
         for (const candidate of records) {
           const candidatePath = candidate.path.replace(/\.md$/i, "");
           if (target === candidatePath || target === candidate.name) {
@@ -5624,8 +4948,8 @@ var DashboardDataService = class {
         if (!link) continue;
         const target = link.endsWith(".md") ? link.slice(0, -3) : link;
         const candidates = [
-          (0, import_obsidian6.normalizePath)(target),
-          (0, import_obsidian6.normalizePath)(`wiki/${target}`)
+          (0, import_obsidian5.normalizePath)(target),
+          (0, import_obsidian5.normalizePath)(`wiki/${target}`)
         ];
         if (!candidates.some((candidate) => knownPaths.has(candidate)) && !knownBasenames.has(target)) {
           broken.push({ source: record.path, target });
@@ -5671,18 +4995,17 @@ var DashboardDataService = class {
 };
 
 // src/views/dashboard.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var ACTION_ICONS = {
   "paper-ingest": "file-down",
   "pdf-xray": "scan-search",
   "code-analysis": "code-xml",
-  "code-practice": "square-terminal",
   "vault-retrieval": "search",
   synthesis: "network",
   "vault-lint": "shield-check",
   "okf-export": "package-open"
 };
-var DashboardView = class extends import_obsidian7.ItemView {
+var DashboardView = class extends import_obsidian6.ItemView {
   get currentData() {
     if (!this.data) throw new Error("Dashboard data is not loaded");
     return this.data;
@@ -5729,7 +5052,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       let queuedOldPath = false;
       if (this.isDashboardWikiPath(oldPath)) {
-        this.pendingVaultChanges.set((0, import_obsidian7.normalizePath)(oldPath), {
+        this.pendingVaultChanges.set((0, import_obsidian6.normalizePath)(oldPath), {
           type: "delete",
           path: oldPath
         });
@@ -5740,16 +5063,16 @@ var DashboardView = class extends import_obsidian7.ItemView {
     }));
   }
   isDashboardWikiPath(value) {
-    const normalized = (0, import_obsidian7.normalizePath)(String(value || ""));
+    const normalized = (0, import_obsidian6.normalizePath)(String(value || ""));
     return normalized.startsWith("wiki/") && normalized.toLowerCase().endsWith(".md");
   }
   queueVaultChange(type, file) {
-    const filePath = (0, import_obsidian7.normalizePath)(String(file?.path || ""));
+    const filePath = (0, import_obsidian6.normalizePath)(String(file?.path || ""));
     if (!this.isDashboardWikiPath(filePath)) return;
     this.pendingVaultChanges.set(filePath, {
       type,
       path: filePath,
-      file: type === "upsert" && file instanceof import_obsidian7.TFile ? file : null
+      file: type === "upsert" && file instanceof import_obsidian6.TFile ? file : null
     });
     this.scheduleReload();
   }
@@ -5842,7 +5165,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
       attr: { "aria-label": "刷新控制台状态", title: "刷新" }
     });
     refresh.type = "button";
-    (0, import_obsidian7.setIcon)(refresh, "refresh-cw");
+    (0, import_obsidian6.setIcon)(refresh, "refresh-cw");
     this.registerDomEvent(refresh, "click", async () => {
       await this.runRefresh(refresh);
     });
@@ -5865,7 +5188,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
       if (!action.enabled) button.addClass("is-unavailable");
       if (isRunning) button.addClass("is-running");
       const icon = button.createSpan({ cls: "agent-dashboard-action-icon" });
-      (0, import_obsidian7.setIcon)(icon, isRunning ? "square" : ACTION_ICONS[action.id] || "circle");
+      (0, import_obsidian6.setIcon)(icon, isRunning ? "square" : ACTION_ICONS[action.id] || "circle");
       button.createSpan({ cls: "agent-dashboard-action-label", text: action.label });
       button.createSpan({
         cls: "agent-dashboard-action-state",
@@ -5885,12 +5208,12 @@ var DashboardView = class extends import_obsidian7.ItemView {
     const backend = String(run.executionConfig?.backend || "codex-cli");
     const requested = !isCliBackendId(backend) ? this.plugin.stopDirectVaultQuery(run.id) : this.plugin.stopVaultAction(run.id);
     if (!requested) {
-      new import_obsidian7.Notice("任务进程已经结束，正在刷新运行状态");
+      new import_obsidian6.Notice("任务进程已经结束，正在刷新运行状态");
       void this.loadAndRender();
       return;
     }
     this.stoppingRunIds.add(run.id);
-    new import_obsidian7.Notice(`正在停止：${run.label}`);
+    new import_obsidian6.Notice(`正在停止：${run.label}`);
     this.renderDashboard();
   }
   renderStats(parent) {
@@ -6056,11 +5379,11 @@ var DashboardView = class extends import_obsidian7.ItemView {
     button.type = "button";
     button.disabled = !action || !action.enabled || this.plugin.isActionRunning(action.id);
     if (action && this.plugin.isActionRunning(action.id)) button.addClass("is-running");
-    (0, import_obsidian7.setIcon)(button.createSpan({ cls: "agent-dashboard-gap-action-icon" }), action?.id === "okf-export" ? "package-open" : "arrow-right");
+    (0, import_obsidian6.setIcon)(button.createSpan({ cls: "agent-dashboard-gap-action-icon" }), action?.id === "okf-export" ? "package-open" : "arrow-right");
     button.createSpan({ text: action && this.plugin.isActionRunning(action.id) ? "处理中" : "处理" });
     this.registerDomEvent(button, "click", () => {
       if (!action) {
-        new import_obsidian7.Notice("该知识缺口尚未配置对应操作");
+        new import_obsidian6.Notice("该知识缺口尚未配置对应操作");
         return;
       }
       this.openAction(action, { initialInput: gap.actionInput || "" });
@@ -6098,22 +5421,22 @@ var DashboardView = class extends import_obsidian7.ItemView {
     button.addClass("is-loading");
     button.setAttribute("aria-label", "正在刷新控制台状态");
     button.title = "扫描中";
-    (0, import_obsidian7.setIcon)(button, "loader-circle");
+    (0, import_obsidian6.setIcon)(button, "loader-circle");
     await this.loadAndRender();
     button.removeClass("is-loading");
     button.setAttribute("aria-label", "控制台状态已刷新");
     button.title = "完成";
-    (0, import_obsidian7.setIcon)(button, "check");
+    (0, import_obsidian6.setIcon)(button, "check");
     window.setTimeout(() => {
       button.setAttribute("aria-label", "刷新控制台状态");
       button.title = "刷新";
-      (0, import_obsidian7.setIcon)(button, "refresh-cw");
+      (0, import_obsidian6.setIcon)(button, "refresh-cw");
       button.disabled = false;
     }, 900);
   }
   openAction(action, options = {}) {
     if (!action.enabled) {
-      new import_obsidian7.Notice(`${action.label}将在后续阶段接入`);
+      new import_obsidian6.Notice(`${action.label}将在后续阶段接入`);
       return;
     }
     if (action.queryView) {
@@ -6121,11 +5444,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
       return;
     }
     if (this.plugin.isActionRunning(action.id)) {
-      new import_obsidian7.Notice(`${action.label}正在运行`);
-      return;
-    }
-    if (action.localView) {
-      void this.plugin.activateCodePracticeView();
+      new import_obsidian6.Notice(`${action.label}正在运行`);
       return;
     }
     if (action.ai || action.requiresInput) {
@@ -6171,7 +5490,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
         error: status === "failed" ? `进程退出码：${result.exitCode}` : status === "interrupted" ? rollbackIncomplete ? "任务已手动停止，但自动回滚不完整，请检查变更清单" : rollbackCompleted ? "任务已手动停止，修改已自动回滚" : "任务已手动停止" : ""
       });
       const completionMessage = lintCompletedWithFindings ? "知识库体检已完成，发现待处理项" : repairCompletedWithFindings ? "体检修复已完成，仍有待处理项" : `${action.label}已完成`;
-      new import_obsidian7.Notice(
+      new import_obsidian6.Notice(
         status === "done" ? completionMessage : status === "interrupted" ? rollbackIncomplete ? `${action.label}已停止，但回滚不完整` : rollbackCompleted ? `${action.label}已停止，修改已回滚` : `${action.label}已停止` : `${action.label}执行失败`
       );
     } catch (error) {
@@ -6182,7 +5501,7 @@ var DashboardView = class extends import_obsidian7.ItemView {
         output: "",
         error: message
       });
-      new import_obsidian7.Notice(`${action.label}执行失败：${message}`);
+      new import_obsidian6.Notice(`${action.label}执行失败：${message}`);
     }
     await this.loadAndRender();
     if (completedRun) {
@@ -6396,17 +5715,17 @@ function nextPageCaptionPlaceholderFromText(value, expectedFigureKey = "") {
   return placeholder;
 }
 function normalizeAssetPath(value) {
-  let path8 = String(value || "").trim().replace(/^<|>$/g, "");
+  let path7 = String(value || "").trim().replace(/^<|>$/g, "");
   try {
-    path8 = decodeURIComponent(path8);
+    path7 = decodeURIComponent(path7);
   } catch {
   }
-  path8 = path8.replace(/\\/g, "/").replace(/^\.\//, "");
-  const segments = path8.split("/");
-  if (!path8 || /^[a-z][a-z0-9+.-]*:/i.test(path8) || path8.startsWith("/") || segments.some((segment) => segment === "..")) {
+  path7 = path7.replace(/\\/g, "/").replace(/^\.\//, "");
+  const segments = path7.split("/");
+  if (!path7 || /^[a-z][a-z0-9+.-]*:/i.test(path7) || path7.startsWith("/") || segments.some((segment) => segment === "..")) {
     return "";
   }
-  return path8;
+  return path7;
 }
 function normalizeBbox(value, scaleUnitInterval = true) {
   if (!Array.isArray(value) || value.length !== 4) return null;
@@ -8079,7 +7398,7 @@ function selectVisualCaption(captions) {
 
 // src/mineru/package-loader.ts
 var import_node_crypto = require("node:crypto");
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 var MIB = 1024 * 1024;
 var MAX_ARTICLE_BYTES = 64 * MIB;
 var MAX_MINERU_JSON_BYTES = 256 * MIB;
@@ -8155,11 +7474,11 @@ function parseJson(value, label) {
   }
 }
 function normalizePackageArticlePath(value) {
-  const path8 = (0, import_obsidian8.normalizePath)(value.trim());
-  if (!/^papers\/[^/]+\/article\.md$/i.test(path8)) {
+  const path7 = (0, import_obsidian7.normalizePath)(value.trim());
+  if (!/^papers\/[^/]+\/article\.md$/i.test(path7)) {
     throw new Error("MinerU 阅读器只能打开 papers/<citekey>/article.md");
   }
-  return path8;
+  return path7;
 }
 function packagePathFromArticle(articlePath) {
   return articlePath.slice(0, -"/article.md".length);
@@ -8167,31 +7486,31 @@ function packagePathFromArticle(articlePath) {
 function resolvePackageAssetPath(packagePath, rawPath) {
   const assetPath = normalizeAssetPath(rawPath);
   if (!assetPath) return "";
-  const resolved = (0, import_obsidian8.normalizePath)(`${packagePath}/${assetPath}`);
+  const resolved = (0, import_obsidian7.normalizePath)(`${packagePath}/${assetPath}`);
   return resolved.startsWith(`${packagePath}/`) ? resolved : "";
 }
-function findTFile(app, path8) {
-  const file = app.vault.getAbstractFileByPath((0, import_obsidian8.normalizePath)(path8));
-  return file instanceof import_obsidian8.TFile ? file : null;
+function findTFile(app, path7) {
+  const file = app.vault.getAbstractFileByPath((0, import_obsidian7.normalizePath)(path7));
+  return file instanceof import_obsidian7.TFile ? file : null;
 }
-async function readRequiredBinary(app, path8, label, maxBytes = MAX_MINERU_JSON_BYTES) {
-  const file = findTFile(app, path8);
-  if (!file) throw new Error(`缺少 ${label}：${path8}`);
+async function readRequiredBinary(app, path7, label, maxBytes = MAX_MINERU_JSON_BYTES) {
+  const file = findTFile(app, path7);
+  if (!file) throw new Error(`缺少 ${label}：${path7}`);
   if (file.stat.size > maxBytes) {
-    throw new Error(`${label} 超过阅读器安全上限（${Math.round(maxBytes / MIB)} MiB）：${path8}`);
+    throw new Error(`${label} 超过阅读器安全上限（${Math.round(maxBytes / MIB)} MiB）：${path7}`);
   }
   const buffer = await app.vault.readBinary(file);
   return { file, bytes: new Uint8Array(buffer), text: decodeUtf8(buffer) };
 }
-async function readOptionalJson(app, path8, maxBytes = MAX_CONTRACT_BYTES) {
-  const file = findTFile(app, path8);
+async function readOptionalJson(app, path7, maxBytes = MAX_CONTRACT_BYTES) {
+  const file = findTFile(app, path7);
   if (!file) return null;
-  if (file.stat.size > maxBytes) throw new Error(`${path8} 超过阅读器安全上限`);
-  return parseJson(await app.vault.read(file), path8);
+  if (file.stat.size > maxBytes) throw new Error(`${path7} 超过阅读器安全上限`);
+  return parseJson(await app.vault.read(file), path7);
 }
-async function readOptionalDerivedJson(app, path8, issues, manifestRecord) {
+async function readOptionalDerivedJson(app, path7, issues, manifestRecord) {
   try {
-    const file = findTFile(app, path8);
+    const file = findTFile(app, path7);
     if (!file) {
       if (manifestRecord) throw new Error("manifest.json 已登记该文件，但文件不存在");
       return null;
@@ -8205,9 +7524,9 @@ async function readOptionalDerivedJson(app, path8, issues, manifestRecord) {
     if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) {
       throw new Error("文件哈希与 manifest.json 不一致");
     }
-    return parseJson(decodeUtf8(bytes), path8);
+    return parseJson(decodeUtf8(bytes), path7);
   } catch (error) {
-    issues.push(`${path8} 无法解析，已回退到原始 MinerU 产物：${error instanceof Error ? error.message : String(error)}`);
+    issues.push(`${path7} 无法解析，已回退到原始 MinerU 产物：${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
@@ -8424,9 +7743,9 @@ function manifestRecords(value, label) {
   const records = /* @__PURE__ */ new Map();
   for (const item of value) {
     const record = asRecord6(item);
-    const path8 = normalizeAssetPath(record.path);
-    if (!path8 || records.has(path8)) throw new Error(`manifest.json 含无效或重复路径：${String(record.path || "")}`);
-    records.set(path8, record);
+    const path7 = normalizeAssetPath(record.path);
+    if (!path7 || records.has(path7)) throw new Error(`manifest.json 含无效或重复路径：${String(record.path || "")}`);
+    records.set(path7, record);
   }
   return records;
 }
@@ -8707,7 +8026,7 @@ var MineruPackageLoader = class {
 };
 
 // src/mineru/pdf-renderer.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 function outputScale(quality) {
   const density = window.devicePixelRatio || 1;
   return quality === "high" ? Math.max(1, Math.min(3, density * 1.5)) : Math.max(1, Math.min(2, density));
@@ -8743,10 +8062,10 @@ var MineruPdfRenderer = class {
     await this.clearResources();
     if (generation !== this.generation) return;
     const file = app.vault.getAbstractFileByPath(pdfPath);
-    if (!(file instanceof import_obsidian9.TFile)) throw new Error(`未找到阅读器 PDF：${pdfPath}`);
+    if (!(file instanceof import_obsidian8.TFile)) throw new Error(`未找到阅读器 PDF：${pdfPath}`);
     const bytes = new Uint8Array(await app.vault.readBinary(file));
     if (generation !== this.generation) return;
-    const pdfjs = await (0, import_obsidian9.loadPdfJs)();
+    const pdfjs = await (0, import_obsidian8.loadPdfJs)();
     if (generation !== this.generation) return;
     const loadingTask = pdfjs.getDocument({ data: bytes });
     this.loadingTask = loadingTask;
@@ -9130,7 +8449,7 @@ function buildMarkdownReaderPackage(articleMarkdown, articlePath) {
 }
 
 // src/reader/document-loader.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 var MAX_MARKDOWN_BYTES = 64 * 1024 * 1024;
 var ReaderDocumentLoader = class {
   constructor(app) {
@@ -9138,12 +8457,12 @@ var ReaderDocumentLoader = class {
     this.mineruLoader = new MineruPackageLoader(app);
   }
   async load(rawArticlePath) {
-    const articlePath = (0, import_obsidian10.normalizePath)(rawArticlePath.trim());
+    const articlePath = (0, import_obsidian9.normalizePath)(rawArticlePath.trim());
     if (/^papers\/[^/]+\/article\.md$/i.test(articlePath)) {
       return this.mineruLoader.load(articlePath);
     }
     const file = this.app.vault.getAbstractFileByPath(articlePath);
-    if (!(file instanceof import_obsidian10.TFile) || file.extension !== "md") {
+    if (!(file instanceof import_obsidian9.TFile) || file.extension !== "md") {
       throw new Error(`未找到 Markdown 文档：${articlePath}`);
     }
     if (file.stat.size > MAX_MARKDOWN_BYTES) {
@@ -9154,7 +8473,7 @@ var ReaderDocumentLoader = class {
 };
 
 // src/views/mineru-reader.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 var DEFAULT_STATE = {
   articlePath: "",
   mode: "pdf",
@@ -9210,10 +8529,10 @@ function iconButton(parent, icon, label, className = "") {
     attr: { "aria-label": label, title: label }
   });
   button.type = "button";
-  (0, import_obsidian11.setIcon)(button, icon);
+  (0, import_obsidian10.setIcon)(button, icon);
   return button;
 }
-var MineruReaderView = class extends import_obsidian11.ItemView {
+var MineruReaderView = class extends import_obsidian10.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.pdfRenderer = new MineruPdfRenderer();
@@ -9382,7 +8701,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("agent-dashboard-mineru-reader-view");
     const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state" });
-    (0, import_obsidian11.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "book-open-text");
+    (0, import_obsidian10.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "book-open-text");
     state.createEl("h2", { text: "尚未选择文献" });
     state.createEl("p", {
       text: "请在已配置目录中的 Markdown 文档上使用文件菜单，或先打开该文件再运行“打开文献阅读器”。"
@@ -9393,7 +8712,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("agent-dashboard-mineru-reader-view");
     const state = this.contentEl.createDiv({ cls: "agent-dashboard-mineru-reader-state is-error" });
-    (0, import_obsidian11.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "circle-alert");
+    (0, import_obsidian10.setIcon)(state.createDiv({ cls: "agent-dashboard-mineru-empty-icon" }), "circle-alert");
     state.createEl("h2", { text: "无法打开文献" });
     state.createEl("p", { text: error instanceof Error ? error.message : String(error) });
   }
@@ -9430,7 +8749,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
       attr: { "aria-label": "当前文献" }
     });
     const identity = header.createDiv({ cls: "agent-dashboard-mineru-document-identity" });
-    (0, import_obsidian11.setIcon)(identity.createSpan({ cls: "agent-dashboard-mineru-document-icon" }), "book-open-text");
+    (0, import_obsidian10.setIcon)(identity.createSpan({ cls: "agent-dashboard-mineru-document-icon" }), "book-open-text");
     const titleBlock = identity.createDiv({ cls: "agent-dashboard-mineru-title-block" });
     titleBlock.createEl("p", {
       text: readerPackage.articlePath,
@@ -9478,9 +8797,9 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
       readerPackage.viewerIndex
     );
     this.markdownComponent?.unload();
-    this.markdownComponent = new import_obsidian11.Component();
+    this.markdownComponent = new import_obsidian10.Component();
     this.markdownComponent.load();
-    await import_obsidian11.MarkdownRenderer.render(
+    await import_obsidian10.MarkdownRenderer.render(
       this.app,
       prepared,
       article,
@@ -9684,7 +9003,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
       if (generation !== this.referenceGeneration) return;
       body.empty();
       const state = body.createDiv({ cls: "agent-dashboard-mineru-reference-empty is-error" });
-      (0, import_obsidian11.setIcon)(state.createDiv(), "circle-alert");
+      (0, import_obsidian10.setIcon)(state.createDiv(), "circle-alert");
       state.createEl("strong", { text: "参考视图渲染失败" });
       state.createEl("p", { text: error instanceof Error ? error.message : String(error) });
     }
@@ -9760,7 +9079,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     if (!readerPackage) return;
     if (!readerPackage.pdfPath || !this.pdfRenderer.numPages) {
       const state = parent.createDiv({ cls: "agent-dashboard-mineru-reference-empty" });
-      (0, import_obsidian11.setIcon)(state.createDiv(), "file-warning");
+      (0, import_obsidian10.setIcon)(state.createDiv(), "file-warning");
       state.createEl("strong", { text: "文献包未附带原始 PDF" });
       state.createEl("p", {
         text: readerPackage.externalPdfRecorded ? "清单记录了外部 PDF，但阅读器不会自动读取 Vault 外的绝对路径。重新入库时勾选“在原文包中附带 PDF”即可启用版面框与整图重建。" : "重新入库时勾选“在原文包中附带 PDF”，即可启用版面框与整图重建。"
@@ -9821,7 +9140,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
       attr: { "aria-pressed": this.readerState.showLayoutBoxes ? "true" : "false" }
     });
     layout.type = "button";
-    (0, import_obsidian11.setIcon)(layout.createSpan(), "panels-top-left");
+    (0, import_obsidian10.setIcon)(layout.createSpan(), "panels-top-left");
     layout.createSpan({ text: "版面框" });
     this.onReferenceEvent(layout, "click", () => {
       this.readerState.showLayoutBoxes = !this.readerState.showLayoutBoxes;
@@ -10022,7 +9341,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     for (const block of compatibleBlocks) {
       const assetPath = resolvePackageAssetPath(this.readerPackage?.packagePath || "", block.asset_path || "");
       const file = this.app.vault.getAbstractFileByPath(assetPath);
-      if (!(file instanceof import_obsidian11.TFile)) continue;
+      if (!(file instanceof import_obsidian10.TFile)) continue;
       let bytes;
       try {
         bytes = await this.app.vault.readBinary(file);
@@ -10094,7 +9413,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     if (!readerPackage) return;
     if (!readerPackage.visuals.length) {
       const state = parent.createDiv({ cls: "agent-dashboard-mineru-reference-empty" });
-      (0, import_obsidian11.setIcon)(state.createDiv(), "image-off");
+      (0, import_obsidian10.setIcon)(state.createDiv(), "image-off");
       state.createEl("strong", { text: "没有可显示的图片或表格" });
       state.createEl("p", {
         text: readerPackage.sourceKind === "markdown" ? "正文仍可正常阅读；当前 Markdown 中没有识别到独立图片块。" : "正文仍可正常阅读；当前 MinerU JSON 没有可解析的视觉资源。"
@@ -10126,18 +9445,18 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     }
     if (visual.captionStatus === "partial") {
       const note = scroll.createDiv({ cls: "agent-dashboard-mineru-caption-note is-partial" });
-      (0, import_obsidian11.setIcon)(note.createSpan(), "info");
+      (0, import_obsidian10.setIcon)(note.createSpan(), "info");
       note.createSpan({ text: "已匹配下一页图注；MinerU 未提取到全部续栏文字，当前仅显示可验证部分。" });
     }
     const actions = scroll.createDiv({ cls: "agent-dashboard-mineru-visual-actions" });
     const back = actions.createEl("button", { text: "回到正文位置" });
     back.type = "button";
-    (0, import_obsidian11.setIcon)(back.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "locate-fixed");
+    (0, import_obsidian10.setIcon)(back.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "locate-fixed");
     this.onReferenceEvent(back, "click", () => this.scrollToVisualAnchor(visual.id));
     if (visual.display.mode === "asset") {
       const open = actions.createEl("button", { text: "打开原图" });
       open.type = "button";
-      (0, import_obsidian11.setIcon)(open.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "external-link");
+      (0, import_obsidian10.setIcon)(open.createSpan({ cls: "agent-dashboard-mineru-button-icon" }), "external-link");
       this.onReferenceEvent(open, "click", () => void this.openAsset(visual.display.mode === "asset" ? visual.display.assetPath : ""));
     }
     this.renderThumbnailRail(scroll, visual.id);
@@ -10192,7 +9511,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
         const image = preview.createEl("img", { attr: { alt: "", loading: "lazy" } });
         image.src = this.resourceUrl(previewPath);
       } else {
-        (0, import_obsidian11.setIcon)(preview, "image");
+        (0, import_obsidian10.setIcon)(preview, "image");
       }
       button.createSpan({ cls: "agent-dashboard-mineru-thumbnail-label", text: visual.label });
       if (visual.repairDecision === "auto") button.createSpan({ cls: "agent-dashboard-mineru-rebuilt-mark", text: "重建" });
@@ -10205,30 +9524,30 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     const status = parent.createDiv({ cls: "agent-dashboard-mineru-reference-status" });
     const visual = this.currentVisual();
     if (readerPackage.sourceKind === "markdown") {
-      (0, import_obsidian11.setIcon)(status.createSpan(), "link");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "link");
       status.createSpan({ text: "图片与紧邻图注来自原始 Markdown；Figure 编号仅补在阅读显示层。" });
     } else if (visual?.captionStatus === "partial" && visual.captionPageIdx !== void 0) {
       status.addClass("has-warning");
-      (0, import_obsidian11.setIcon)(status.createSpan(), "triangle-alert");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "triangle-alert");
       status.createSpan({
         text: `${visual.label}：已关联第 ${visual.captionPageIdx + 1} 页图注，但 MinerU 图注文本不完整`
       });
     } else if (visual?.captionPageIdx !== void 0 && visual.captionPageIdx !== visual.pageIdx) {
-      (0, import_obsidian11.setIcon)(status.createSpan(), "link");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "link");
       status.createSpan({ text: `${visual.label}：跨页图注已匹配至第 ${visual.captionPageIdx + 1} 页` });
     } else if (visual?.repairDecision === "auto" && visual.display.mode === "fragment-set") {
       status.addClass("has-warning");
-      (0, import_obsidian11.setIcon)(status.createSpan(), "triangle-alert");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "triangle-alert");
       status.createSpan({
         text: `${visual.label}：已识别疑似碎图，但缺少包内 PDF，当前保留 MinerU 原始图块`
       });
     } else if (visual?.repairDecision === "auto") {
-      (0, import_obsidian11.setIcon)(status.createSpan(), "scan-line");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "scan-line");
       status.createSpan({
         text: `${visual.label}：完整图已在显示层重建 · 置信度 ${Math.round(visual.confidence * 100)}%`
       });
     } else {
-      (0, import_obsidian11.setIcon)(status.createSpan(), "shield-check");
+      (0, import_obsidian10.setIcon)(status.createSpan(), "shield-check");
       status.createSpan({ text: "原始 MinerU 产物保持不变；当前仅调整阅读显示。" });
     }
   }
@@ -10431,7 +9750,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
       return;
     }
     const file = this.app.vault.getAbstractFileByPath(readerPackage.articlePath);
-    if (!(file instanceof import_obsidian11.TFile)) return;
+    if (!(file instanceof import_obsidian10.TFile)) return;
     await this.app.workspace.getLeaf("tab").openFile(file);
   }
   async openAsset(assetPath) {
@@ -10444,8 +9763,8 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     const file = readerPackage.sourceKind === "markdown" ? this.app.metadataCache.getFirstLinkpathDest(assetPath, readerPackage.articlePath) : this.app.vault.getAbstractFileByPath(
       resolvePackageAssetPath(readerPackage.packagePath, assetPath)
     );
-    if (!(file instanceof import_obsidian11.TFile)) {
-      new import_obsidian11.Notice("未找到原始图片资源");
+    if (!(file instanceof import_obsidian10.TFile)) {
+      new import_obsidian10.Notice("未找到原始图片资源");
       return;
     }
     await this.app.workspace.getLeaf("tab").openFile(file);
@@ -10457,7 +9776,7 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
     const file = readerPackage.sourceKind === "markdown" ? this.app.metadataCache.getFirstLinkpathDest(assetPath, readerPackage.articlePath) : this.app.vault.getAbstractFileByPath(
       resolvePackageAssetPath(readerPackage.packagePath, assetPath)
     );
-    return file instanceof import_obsidian11.TFile ? this.app.vault.getResourcePath(file) : "";
+    return file instanceof import_obsidian10.TFile ? this.app.vault.getResourcePath(file) : "";
   }
   clearWorkspaceLifecycle() {
     this.referenceGeneration += 1;
@@ -10495,21 +9814,21 @@ var MineruReaderView = class extends import_obsidian11.ItemView {
 };
 
 // src/query/normalization.ts
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path = __toESM(require("node:path"));
 function asRecord7(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
 function normalizeVaultImageAttachment(value) {
   const source = asRecord7(value);
   const attachmentPath = String(source.path || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
-  const extension = import_node_path2.default.posix.extname(attachmentPath).toLowerCase();
+  const extension = import_node_path.default.posix.extname(attachmentPath).toLowerCase();
   const mimeType = VAULT_IMAGE_MIME_TYPES[extension] || "";
   if (!attachmentPath || !mimeType) return null;
   const size = Number(source.size || 0);
   const sourceNotePath = String(source.sourceNotePath || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   return {
     path: attachmentPath.slice(0, 1e3),
-    name: String(source.name || import_node_path2.default.posix.basename(attachmentPath)).slice(0, 240),
+    name: String(source.name || import_node_path.default.posix.basename(attachmentPath)).slice(0, 240),
     mimeType,
     size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
     sourceNotePath: sourceNotePath.toLowerCase().endsWith(".md") ? sourceNotePath.slice(0, 1e3) : ""
@@ -10539,7 +9858,7 @@ function normalizeQueryVaultSources(values) {
     seen.add(sourcePath.toLowerCase());
     normalized.push({
       path: sourcePath.slice(0, 1e3),
-      title: String(source.title || import_node_path2.default.posix.basename(sourcePath, import_node_path2.default.posix.extname(sourcePath))).trim().slice(0, 500),
+      title: String(source.title || import_node_path.default.posix.basename(sourcePath, import_node_path.default.posix.extname(sourcePath))).trim().slice(0, 500),
       cited: source.cited === true
     });
     if (normalized.length >= 30) break;
@@ -10654,9 +9973,9 @@ function normalizeQueryCitationValidation(value) {
 }
 
 // src/modals/vault-image-picker.ts
-var import_obsidian12 = require("obsidian");
-var path5 = __toESM(require("node:path"));
-var VaultImagePickerModal = class extends import_obsidian12.Modal {
+var import_obsidian11 = require("obsidian");
+var path4 = __toESM(require("node:path"));
+var VaultImagePickerModal = class extends import_obsidian11.Modal {
   constructor(app, plugin, onChoose, selectedImages = []) {
     super(app);
     this.plugin = plugin;
@@ -10703,7 +10022,7 @@ var VaultImagePickerModal = class extends import_obsidian12.Modal {
       cls: "query-wiki-image-picker-preview",
       attr: { "aria-label": "图片预览与引用信息" }
     });
-    const files = this.app.vault.getFiles().filter((file) => Boolean(VAULT_IMAGE_MIME_TYPES[path5.extname(file.path).toLowerCase()])).filter((file) => Number(file.stat?.size || 0) <= MAX_VAULT_IMAGE_BYTES).filter((file) => !this.selectedPaths.has(file.path.toLocaleLowerCase())).sort((a, b) => Number(b.stat?.mtime || 0) - Number(a.stat?.mtime || 0));
+    const files = this.app.vault.getFiles().filter((file) => Boolean(VAULT_IMAGE_MIME_TYPES[path4.extname(file.path).toLowerCase()])).filter((file) => Number(file.stat?.size || 0) <= MAX_VAULT_IMAGE_BYTES).filter((file) => !this.selectedPaths.has(file.path.toLocaleLowerCase())).sort((a, b) => Number(b.stat?.mtime || 0) - Number(a.stat?.mtime || 0));
     const referenceIndex = this.plugin.buildVaultImageReferenceIndex(files);
     const items = files.map((file) => ({
       file,
@@ -10753,7 +10072,7 @@ var VaultImagePickerModal = class extends import_obsidian12.Modal {
           cls: "query-wiki-image-picker-reference-row"
         });
         const icon = row.createSpan({ cls: "query-wiki-image-picker-reference-icon" });
-        (0, import_obsidian12.setIcon)(icon, "file-text");
+        (0, import_obsidian11.setIcon)(icon, "file-text");
         const note = row.createDiv({ cls: "query-wiki-image-picker-reference-note" });
         note.createEl("strong", { text: reference.title });
         note.createEl("span", { text: reference.path });
@@ -10812,7 +10131,7 @@ var VaultImagePickerModal = class extends import_obsidian12.Modal {
         const reference = text.createDiv({ cls: "query-wiki-image-picker-item-reference" });
         if (references.length) {
           const referenceIcon = reference.createSpan();
-          (0, import_obsidian12.setIcon)(referenceIcon, "file-text");
+          (0, import_obsidian11.setIcon)(referenceIcon, "file-text");
           reference.createEl("span", {
             text: references.length === 1 ? `引用：${references[0].title}` : `被 ${references.length} 篇笔记引用：${references[0].title} 等`
           });
@@ -10845,8 +10164,8 @@ var VaultImagePickerModal = class extends import_obsidian12.Modal {
 };
 
 // src/views/query-wiki.ts
-var import_obsidian13 = require("obsidian");
-var QueryWikiView = class extends import_obsidian13.ItemView {
+var import_obsidian12 = require("obsidian");
+var QueryWikiView = class extends import_obsidian12.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -11114,7 +10433,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
   renderEmptyState(parent) {
     const empty = parent.createDiv({ cls: "query-wiki-empty" });
     const icon = empty.createDiv({ cls: "query-wiki-empty-icon" });
-    (0, import_obsidian13.setIcon)(icon, "search");
+    (0, import_obsidian12.setIcon)(icon, "search");
     empty.createEl("h2", { text: "从当前知识库开始查询" });
     empty.createEl("p", {
       text: "当前会话暂无查询记录。"
@@ -11128,7 +10447,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     const heading = article.createDiv({ cls: "query-wiki-message-heading" });
     const identity = heading.createDiv({ cls: "query-wiki-message-identity" });
     const icon = identity.createSpan({ cls: "query-wiki-message-icon" });
-    (0, import_obsidian13.setIcon)(icon, message.role === "user" ? "user" : "library-big");
+    (0, import_obsidian12.setIcon)(icon, message.role === "user" ? "user" : "library-big");
     identity.createSpan({ text: message.role === "user" ? "你" : "检索助手" });
     if (message.role === "assistant" && message.retrievalMode) {
       identity.createSpan({
@@ -11168,19 +10487,19 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
           "aria-label": "复制本条内容"
         }
       });
-      (0, import_obsidian13.setIcon)(copyButton, "copy");
+      (0, import_obsidian12.setIcon)(copyButton, "copy");
       copyButton.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(String(message.content || ""));
-          (0, import_obsidian13.setIcon)(copyButton, "check");
+          (0, import_obsidian12.setIcon)(copyButton, "check");
           copyButton.title = "已复制";
           window.setTimeout(() => {
             if (!copyButton.isConnected) return;
-            (0, import_obsidian13.setIcon)(copyButton, "copy");
+            (0, import_obsidian12.setIcon)(copyButton, "copy");
             copyButton.title = "复制本条内容";
           }, 1400);
         } catch (error) {
-          new import_obsidian13.Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
+          new import_obsidian12.Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
         }
       });
     }
@@ -11209,7 +10528,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       });
     } else if (message.content) {
       const markdown = body.createDiv({ cls: "query-wiki-markdown markdown-rendered" });
-      await import_obsidian13.MarkdownRenderer.render(this.app, message.content, markdown, "", this);
+      await import_obsidian12.MarkdownRenderer.render(this.app, message.content, markdown, "", this);
     }
     if (message.vaultSources && message.vaultSources.length || message.webSources && message.webSources.length || message.citationValidation?.warnings?.length) {
       this.renderSourcePanel(article, message);
@@ -11225,7 +10544,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     for (const image of images) {
       const file = this.app.vault.getAbstractFileByPath(image.path);
       const figure = gallery.createEl("figure", { cls: "query-wiki-message-image" });
-      if (file instanceof import_obsidian13.TFile) {
+      if (file instanceof import_obsidian12.TFile) {
         figure.createEl("img", {
           attr: {
             src: this.app.vault.getResourcePath(file),
@@ -11245,7 +10564,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     const details = parent.createEl("details", { cls: "query-wiki-trace" });
     const summary = details.createEl("summary");
     const summaryIcon = summary.createSpan({ cls: "query-wiki-trace-icon" });
-    (0, import_obsidian13.setIcon)(summaryIcon, "git-fork");
+    (0, import_obsidian12.setIcon)(summaryIcon, "git-fork");
     summary.createSpan({
       text: fallback.used ? `本轮检索 · ${trace.retrieval_label || "索引回退"}` : `本轮检索 · ${trace.retrieval_label || "图扩展"} · ${seeds.length} 个种子 / ${graph.length} 个关联页`
     });
@@ -11321,7 +10640,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     details.open = webSources.length > 0;
     const summary = details.createEl("summary");
     const summaryIcon = summary.createSpan({ cls: "query-wiki-sources-icon" });
-    (0, import_obsidian13.setIcon)(summaryIcon, webSources.length ? "globe-2" : "library-big");
+    (0, import_obsidian12.setIcon)(summaryIcon, webSources.length ? "globe-2" : "library-big");
     const summaryParts = [];
     if (vaultSources.length) summaryParts.push(`${vaultSources.length} 个知识库页面`);
     if (webSources.length) summaryParts.push(`${webSources.length} 个联网来源`);
@@ -11353,7 +10672,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
           attr: { type: "button", title: source.path }
         });
         const icon = button.createSpan({ cls: "query-wiki-source-icon" });
-        (0, import_obsidian13.setIcon)(icon, "file-text");
+        (0, import_obsidian12.setIcon)(icon, "file-text");
         const text = button.createSpan({ cls: "query-wiki-source-text" });
         text.createEl("strong", { text: source.title || source.path });
         text.createEl("span", { text: source.path });
@@ -11412,7 +10731,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     if (validation.warnings.length) {
       const warning = content.createDiv({ cls: "query-wiki-source-warnings" });
       const icon = warning.createSpan({ cls: "query-wiki-source-warning-icon" });
-      (0, import_obsidian13.setIcon)(icon, "triangle-alert");
+      (0, import_obsidian12.setIcon)(icon, "triangle-alert");
       const list = warning.createEl("ul");
       validation.warnings.forEach((item) => list.createEl("li", { text: item }));
     }
@@ -11459,7 +10778,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       this.pendingImages.forEach((image, index) => {
         const preview = previews.createDiv({ cls: "query-wiki-pending-image" });
         const file = this.app.vault.getAbstractFileByPath(image.path);
-        if (file instanceof import_obsidian13.TFile) {
+        if (file instanceof import_obsidian12.TFile) {
           preview.createEl("img", {
             attr: {
               src: this.app.vault.getResourcePath(file),
@@ -11520,7 +10839,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       cls: "query-wiki-send mod-cta",
       attr: { type: "button", "aria-label": "发送问题" }
     });
-    (0, import_obsidian13.setIcon)(send, "arrow-up");
+    (0, import_obsidian12.setIcon)(send, "arrow-up");
     send.createSpan({ text: "发送" });
     send.disabled = Boolean(this.activeRunId) || !input.value.trim();
     const submit = () => {
@@ -11564,7 +10883,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
         }
       });
       const icon = button.createSpan({ cls: "query-wiki-mode-icon" });
-      (0, import_obsidian13.setIcon)(icon, iconName);
+      (0, import_obsidian12.setIcon)(icon, iconName);
       button.createSpan({ text: label });
       button.disabled = Boolean(this.activeRunId);
       button.addEventListener("click", async () => {
@@ -11574,7 +10893,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
         if (value === "web" && !isCliBackendId(activeBackendId)) {
           if (this.pendingImages.length) this.pendingImages = [];
           await this.plugin.setActiveQueryBackend("codex-cli");
-          new import_obsidian13.Notice(
+          new import_obsidian12.Notice(
             "Direct API 仅用于知识库内检索；联网搜索已切换到 Codex CLI"
           );
         }
@@ -11631,7 +10950,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     details.open = true;
     const summary = details.createEl("summary");
     const icon = summary.createSpan({ cls: "query-wiki-settings-icon" });
-    (0, import_obsidian13.setIcon)(icon, "sliders-horizontal");
+    (0, import_obsidian12.setIcon)(icon, "sliders-horizontal");
     const summaryText = summary.createSpan({
       text: directProfile ? `Direct API · ${directProfile.name} · ${directProfile.model}` : backendId === "claude-code" ? `Agent · Claude Code · ${claudeEffective.model || claudeDefaultModelLabel} · ${this.plugin.getReasoningLabel(claudeEffective.reasoningEffort || "")}` : backendId === "opencode" ? `Agent · OpenCode · ${openCodeEffective.model || openCodeDefaultModelLabel} · ${this.plugin.getReasoningLabel(openCodeEffective.reasoningEffort || "")}` : `Agent · Codex CLI · ${codexModelLabel} · ${codexReasoningLabel} · ${effective.serviceTier === "fast" ? "快速" : this.plugin.settings.codexConfigSource === "cc-switch" ? "当前速度配置" : "标准"}`
     });
@@ -11845,7 +11164,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       const selectedSupportsImages = backend.value === "claude-code" || profileSupportsQueryImage(selectedProfile);
       if (this.pendingImages.length && !selectedSupportsImages) {
         this.pendingImages = [];
-        new import_obsidian13.Notice("所选后端未启用视觉输入，已移除待发送图片");
+        new import_obsidian12.Notice("所选后端未启用视觉输入，已移除待发送图片");
       }
       await this.plugin.setActiveQueryBackend(backend.value);
       await this.render();
@@ -11889,27 +11208,27 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       cls: "query-wiki-icon-button",
       attr: { type: "button", title: label, "aria-label": label }
     });
-    (0, import_obsidian13.setIcon)(button, icon);
+    (0, import_obsidian12.setIcon)(button, icon);
     return button;
   }
   async submitQuestion(question) {
     if (!question || this.activeRunId || this.plugin.isActionRunning("vault-retrieval")) return;
     const action = ACTION_BY_ID.get("vault-retrieval");
     if (!action) {
-      new import_obsidian13.Notice("知识库检索操作未注册");
+      new import_obsidian12.Notice("知识库检索操作未注册");
       return;
     }
     const session = this.session;
     const backendId = this.plugin.resolveQueryBackendId(session.queryBackendId);
     const directProfile = isCliBackendId(backendId) ? null : this.plugin.getProviderProfile(backendId);
     if (!isCliBackendId(backendId) && !directProfile) {
-      new import_obsidian13.Notice("所选 Direct API 配置不可用，请重新选择执行后端");
+      new import_obsidian12.Notice("所选 Direct API 配置不可用，请重新选择执行后端");
       return;
     }
     const selectedImages = normalizeVaultImageAttachments(this.pendingImages);
     const backendSupportsImages = backendId === "claude-code" || profileSupportsQueryImage(directProfile);
     if (selectedImages.length && !backendSupportsImages) {
-      new import_obsidian13.Notice("当前执行后端未启用视觉输入，无法发送图片");
+      new import_obsidian12.Notice("当前执行后端未启用视觉输入，无法发送图片");
       return;
     }
     let linkedImageResult = {
@@ -11922,7 +11241,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
       try {
         linkedImageResult = await this.plugin.resolveQuestionImageAttachments(question, selectedImages);
       } catch (error) {
-        new import_obsidian13.Notice(
+        new import_obsidian12.Notice(
           `未能解析链接笔记中的图片，将继续使用手动附件：${error instanceof Error ? error.message : String(error)}`,
           8e3
         );
@@ -11934,7 +11253,7 @@ var QueryWikiView = class extends import_obsidian13.ItemView {
     ]);
     if (linkedImageResult.discoveredCount > 0) {
       const addedCount = attachments.filter((attachment) => attachment.sourceNotePath).length;
-      new import_obsidian13.Notice(
+      new import_obsidian12.Notice(
         linkedImageResult.discoveredCount > addedCount ? `从链接笔记发现 ${linkedImageResult.discoveredCount} 张图片，本轮按限制附加 ${addedCount} 张` : `已从链接笔记附加 ${addedCount} 张图片`
       );
     }
@@ -12067,7 +11386,7 @@ ${result.stderr.trim()}` : ""
         output,
         error
       });
-      new import_obsidian13.Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
+      new import_obsidian12.Notice(status === "done" ? "知识库回答已完成" : stopped ? "知识库查询已停止" : "知识库查询失败");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const interrupted = this.stopRequested || /cancelled|canceled|已停止|正在停止/i.test(message);
@@ -12084,7 +11403,7 @@ ${result.stderr.trim()}` : ""
           error: message
         });
       }
-      new import_obsidian13.Notice(interrupted ? "知识库查询已停止" : `知识库查询失败：${message}`);
+      new import_obsidian12.Notice(interrupted ? "知识库查询已停止" : `知识库查询失败：${message}`);
     } finally {
       this.activeRunId = "";
       this.activeMessageId = "";
@@ -12169,7 +11488,7 @@ ${result.stderr.trim()}` : ""
     const message = this.session.messages.find((item) => item.id === this.activeMessageId);
     this.stopRequested = message?.queryBackendId && !isCliBackendId(message.queryBackendId) ? this.plugin.stopDirectVaultQuery(this.activeRunId) : this.plugin.stopVaultAction(this.activeRunId);
     if (!this.stopRequested) {
-      new import_obsidian13.Notice("当前查询进程已经结束");
+      new import_obsidian12.Notice("当前查询进程已经结束");
       return;
     }
     this.updateProgressText("正在停止任务");
@@ -12183,7 +11502,7 @@ ${result.stderr.trim()}` : ""
   openSynthesisHandoff() {
     const action = ACTION_BY_ID.get("synthesis");
     if (!action) {
-      new import_obsidian13.Notice("综合分析操作未注册");
+      new import_obsidian12.Notice("综合分析操作未注册");
       return;
     }
     const session = this.session;
@@ -12210,7 +11529,7 @@ ${message.content}`).join("\n\n");
   }
   async executeSynthesisHandoff(action, input, overrides) {
     if (this.plugin.isActionRunning(action.id)) {
-      new import_obsidian13.Notice("综合分析正在运行");
+      new import_obsidian12.Notice("综合分析正在运行");
       return;
     }
     const backendId = overrides.backend === "claude-code" ? "claude-code" : overrides.backend === "opencode" ? "opencode" : "codex-cli";
@@ -12236,7 +11555,7 @@ ${result.stderr.trim()}` : ""
         output,
         error: status === "failed" ? `进程退出码：${result.exitCode}` : ""
       });
-      new import_obsidian13.Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
+      new import_obsidian12.Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       completedRun = await this.plugin.finishTaskRun(run.id, {
@@ -12245,7 +11564,7 @@ ${result.stderr.trim()}` : ""
         output: "",
         error: message
       });
-      new import_obsidian13.Notice(`整理为笔记失败：${message}`);
+      new import_obsidian12.Notice(`整理为笔记失败：${message}`);
     }
     if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
   }
@@ -12270,14 +11589,14 @@ ${result.stderr.trim()}` : ""
 };
 
 // src/annotations/annotation-popover.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 function displayError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 function sectionLabel(value) {
   return value.trim() || "当前段落";
 }
-var AnnotationPopover = class extends import_obsidian14.Component {
+var AnnotationPopover = class extends import_obsidian13.Component {
   constructor(options) {
     super();
     this.element = null;
@@ -12372,7 +11691,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
       attr: { type: "button" }
     });
     const manualIcon = manual.createSpan({ cls: "agent-annotation-choice-icon" });
-    (0, import_obsidian14.setIcon)(manualIcon, "square-pen");
+    (0, import_obsidian13.setIcon)(manualIcon, "square-pen");
     const manualText = manual.createDiv();
     manualText.createEl("strong", { text: "手动批注" });
     manualText.createSpan({ text: "记录自己的理解、疑问或提醒" });
@@ -12381,7 +11700,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
       attr: { type: "button" }
     });
     const aiIcon = ai.createSpan({ cls: "agent-annotation-choice-icon" });
-    (0, import_obsidian14.setIcon)(aiIcon, "sparkles");
+    (0, import_obsidian13.setIcon)(aiIcon, "sparkles");
     const aiText = ai.createDiv();
     aiText.createEl("strong", { text: "AI 解释" });
     aiText.createSpan({ text: "结合当前段落和文章语境生成初步解释" });
@@ -12414,7 +11733,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
     const submit = async () => {
       const manualText = textarea.value.trim();
       if (!manualText) {
-        new import_obsidian14.Notice("请输入批注内容");
+        new import_obsidian13.Notice("请输入批注内容");
         textarea.focus();
         return;
       }
@@ -12593,10 +11912,10 @@ var AnnotationPopover = class extends import_obsidian14.Component {
           aiProvider: this.record?.aiProvider,
           aiModel: this.record?.aiModel
         });
-        new import_obsidian14.Notice("批注已保存");
+        new import_obsidian13.Notice("批注已保存");
         this.renderExisting();
       } catch (error) {
-        new import_obsidian14.Notice(`保存失败：${displayError(error)}`);
+        new import_obsidian13.Notice(`保存失败：${displayError(error)}`);
         save.disabled = false;
       }
     };
@@ -12631,7 +11950,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
       button.setText("已生成");
     } catch (error) {
       this.cancelGeneration = null;
-      new import_obsidian14.Notice(`重新解释失败：${displayError(error)}`);
+      new import_obsidian13.Notice(`重新解释失败：${displayError(error)}`);
       button.setText("重新解释");
     } finally {
       button.disabled = false;
@@ -12643,11 +11962,11 @@ var AnnotationPopover = class extends import_obsidian14.Component {
     try {
       const record = await this.service.createAnnotation(this.selection, draft);
       this.record = record;
-      new import_obsidian14.Notice("批注已保留");
+      new import_obsidian13.Notice("批注已保留");
       if (closeAfterSave) this.close();
       return record;
     } catch (error) {
-      new import_obsidian14.Notice(`保存批注失败：${displayError(error)}`);
+      new import_obsidian13.Notice(`保存批注失败：${displayError(error)}`);
       button.disabled = false;
       return null;
     }
@@ -12685,7 +12004,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
         "aria-label": "关闭"
       }
     });
-    (0, import_obsidian14.setIcon)(close, "x");
+    (0, import_obsidian13.setIcon)(close, "x");
     close.addEventListener("click", () => this.requestClose());
     header.addEventListener("pointerdown", (event) => this.startDragging(event));
   }
@@ -12703,7 +12022,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
   }
   renderMarkdown(parent, markdown) {
     const sourcePath = this.record?.sourcePath || this.selection?.sourcePath || "";
-    void import_obsidian14.MarkdownRenderer.render(
+    void import_obsidian13.MarkdownRenderer.render(
       this.app,
       markdown,
       parent,
@@ -12810,7 +12129,7 @@ var AnnotationPopover = class extends import_obsidian14.Component {
 };
 
 // src/annotations/annotation-service.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var ANNOTATION_FOLDER = "wiki/annotations";
 var BLOCK_START = "<!-- agent-dashboard:annotation-start ";
 var BLOCK_END = "<!-- agent-dashboard:annotation-end ";
@@ -12981,7 +12300,7 @@ var AnnotationService = class {
     const sectionElement = element.closest("[data-agent-annotation-source]");
     const sourcePath = String(sectionElement?.dataset.agentAnnotationSource || "");
     const file = this.app.vault.getAbstractFileByPath(sourcePath);
-    if (!(file instanceof import_obsidian15.TFile) || file.extension !== "md") {
+    if (!(file instanceof import_obsidian14.TFile) || file.extension !== "md") {
       throw new Error("无法确定选区对应的 Markdown 文件");
     }
     const content = await this.app.vault.read(file);
@@ -13043,7 +12362,7 @@ var AnnotationService = class {
   }
   async createAnnotation(selection, draft) {
     const sourceFile = this.app.vault.getAbstractFileByPath(selection.sourcePath);
-    if (!(sourceFile instanceof import_obsidian15.TFile)) throw new Error("原始 Markdown 文件不存在");
+    if (!(sourceFile instanceof import_obsidian14.TFile)) throw new Error("原始 Markdown 文件不存在");
     await this.ensureFolder(ANNOTATION_FOLDER);
     const annotationPath = await this.resolveAnnotationPath(sourceFile);
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -13107,11 +12426,11 @@ var AnnotationService = class {
     return updated;
   }
   async loadAnnotation(annotationPath, annotationId) {
-    const normalizedPath = (0, import_obsidian15.normalizePath)(
+    const normalizedPath = (0, import_obsidian14.normalizePath)(
       annotationPath.endsWith(".md") ? annotationPath : `${annotationPath}.md`
     );
     const file = this.app.vault.getAbstractFileByPath(normalizedPath);
-    if (!(file instanceof import_obsidian15.TFile)) return null;
+    if (!(file instanceof import_obsidian14.TFile)) return null;
     const content = await this.app.vault.read(file);
     const block = this.findRecordBlock(content, annotationId);
     if (!block) return null;
@@ -13220,7 +12539,7 @@ ${user}`,
   async getRecordExplanationContext(record) {
     const file = this.app.vault.getAbstractFileByPath(record.sourcePath);
     let context = record.selectedText;
-    if (file instanceof import_obsidian15.TFile) {
+    if (file instanceof import_obsidian14.TFile) {
       const content = await this.app.vault.read(file);
       const offsets = countOccurrences(content, record.selectedText);
       const offset = offsets[0] ?? -1;
@@ -13245,13 +12564,13 @@ ${user}`,
   async openArchiveTarget(record, target) {
     const normalized = normalizeArchiveTarget(target);
     if (!normalized) {
-      new import_obsidian15.Notice("该批注尚未关联正式知识节点");
+      new import_obsidian14.Notice("该批注尚未关联正式知识节点");
       return;
     }
     await this.app.workspace.openLinkText(normalized, record.sourcePath, true);
   }
   async ensureFolder(folderPath) {
-    const parts = (0, import_obsidian15.normalizePath)(folderPath).split("/");
+    const parts = (0, import_obsidian14.normalizePath)(folderPath).split("/");
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
@@ -13262,15 +12581,15 @@ ${user}`,
   }
   async resolveAnnotationPath(sourceFile) {
     const safeBase = sourceFile.basename.replace(/[\\/:*?"<>|#[\]^]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 90) || "note";
-    const candidate = (0, import_obsidian15.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}.md`);
+    const candidate = (0, import_obsidian14.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}.md`);
     const existing = this.app.vault.getAbstractFileByPath(candidate);
-    if (!(existing instanceof import_obsidian15.TFile)) return candidate;
+    if (!(existing instanceof import_obsidian14.TFile)) return candidate;
     const content = await this.app.vault.read(existing);
     if (content.includes(`source: ${yamlString(sourceFile.path.replace(/\.md$/i, ""))}`)) {
       return candidate;
     }
     const suffix = this.hashPath(sourceFile.path);
-    return (0, import_obsidian15.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}-${suffix}.md`);
+    return (0, import_obsidian14.normalizePath)(`${ANNOTATION_FOLDER}/${safeBase}-${suffix}.md`);
   }
   createAnnotationId() {
     const random = typeof crypto.randomUUID === "function" ? crypto.randomUUID().split("-").join("").slice(0, 10) : Math.random().toString(36).slice(2, 12);
@@ -13401,7 +12720,7 @@ ${user}`,
   }
   async writeRecord(record) {
     const file = this.app.vault.getAbstractFileByPath(record.annotationPath);
-    if (!(file instanceof import_obsidian15.TFile)) {
+    if (!(file instanceof import_obsidian14.TFile)) {
       await this.app.vault.create(record.annotationPath, this.renderNewDocument(record));
       return;
     }
@@ -14130,7 +13449,7 @@ var ProviderHttpTransport = class {
 
 // src/query/direct-query-service.ts
 var fs4 = __toESM(require("node:fs"));
-var path6 = __toESM(require("node:path"));
+var path5 = __toESM(require("node:path"));
 var DirectQueryService = class {
   constructor(deps) {
     this.deps = deps;
@@ -14329,7 +13648,7 @@ var DirectQueryService = class {
       return target && (answer.includes(`[[${target}]]`) || answer.includes(`[[${target}|`) || answer.includes(`[[${item.path}]]`) || answer.includes(`[[${item.path}|`));
     }).map((item) => ({
       path: item.path,
-      title: path6.posix.basename(item.path, ".md"),
+      title: path5.posix.basename(item.path, ".md"),
       cited: true
     }));
     return {
@@ -14392,8 +13711,8 @@ var DirectQueryService = class {
   }
   async runRetrievalPreflight(runId, question, expandedTerms = []) {
     const settings = this.deps.getSettings();
-    const projectRoot = path6.resolve(settings.projectRoot);
-    const script = path6.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
+    const projectRoot = path5.resolve(settings.projectRoot);
+    const script = path5.join(projectRoot, "tool-library", "scripts", "retrieve_vault.py");
     if (!fs4.existsSync(script)) {
       throw new Error(`知识库检索脚本不存在：${script}`);
     }
@@ -14419,9 +13738,9 @@ var DirectQueryService = class {
     }
   }
   readEvidencePacket(trace) {
-    const projectRoot = path6.resolve(this.deps.getSettings().projectRoot);
-    const vaultRoot = path6.resolve(projectRoot, "knowledge-base");
-    const vaultPrefix = `${vaultRoot}${path6.sep}`;
+    const projectRoot = path5.resolve(this.deps.getSettings().projectRoot);
+    const vaultRoot = path5.resolve(projectRoot, "knowledge-base");
+    const vaultPrefix = `${vaultRoot}${path5.sep}`;
     const candidates = Array.isArray(trace?.candidate_paths) ? trace.candidate_paths : [];
     const evidence = [];
     const seen = /* @__PURE__ */ new Set();
@@ -14432,7 +13751,7 @@ var DirectQueryService = class {
       if (!relativePath || !/\.md$/i.test(relativePath) || seen.has(relativePath.toLowerCase())) {
         continue;
       }
-      const absolutePath = path6.resolve(vaultRoot, ...relativePath.split("/"));
+      const absolutePath = path5.resolve(vaultRoot, ...relativePath.split("/"));
       if (absolutePath !== vaultRoot && !absolutePath.startsWith(vaultPrefix)) continue;
       if (!fs4.existsSync(absolutePath) || !fs4.statSync(absolutePath).isFile()) continue;
       const raw = fs4.readFileSync(absolutePath, "utf8");
@@ -14520,9 +13839,9 @@ var DirectQueryService = class {
 };
 
 // src/plugin.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 var fs5 = __toESM(require("node:fs"));
-var path7 = __toESM(require("node:path"));
+var path6 = __toESM(require("node:path"));
 function asRecord8(value) {
   return value !== null && typeof value === "object" ? value : {};
 }
@@ -14530,7 +13849,7 @@ function normalizeQueryMessageStatus(value) {
   const status = String(value || "");
   return status === "pending" || status === "stopping" || status === "done" || status === "failed" || status === "interrupted" ? status : "done";
 }
-var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
+var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -14590,14 +13909,13 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
     this.annotationService = new AnnotationService(this.app, this);
     this.lastContextFile = this.app.workspace.getActiveFile();
     await this.loadSettings();
-    this.recoverInterruptedPracticeRuns();
     this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
-    this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf, this));
+    this.registerView(CODE_PRACTICE_VIEW_TYPE, (leaf) => new CodePracticeView(leaf));
     this.registerView(QUERY_WIKI_VIEW_TYPE, (leaf) => new QueryWikiView(leaf, this));
     this.registerView(MINERU_READER_VIEW_TYPE, (leaf) => new MineruReaderView(leaf, this));
     this.app.workspace.onLayoutReady(() => {
       this.consolidateMineruReaderLeaves();
-      const markdownView = this.app.workspace.getActiveViewOfType(import_obsidian16.MarkdownView);
+      const markdownView = this.app.workspace.getActiveViewOfType(import_obsidian15.MarkdownView);
       if (markdownView?.file && this.isConfiguredReaderMarkdownFile(markdownView.file)) {
         void this.activateMineruReaderView(markdownView.file.path, markdownView.leaf);
       }
@@ -14605,14 +13923,14 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file?.extension === "md") this.lastContextFile = file;
       if (!this.isConfiguredReaderMarkdownFile(file)) return;
-      const normalizedPath = (0, import_obsidian16.normalizePath)(file.path);
+      const normalizedPath = (0, import_obsidian15.normalizePath)(file.path);
       if (this.readerAutoOpenBypass.delete(normalizedPath)) return;
       window.setTimeout(() => {
-        let markdownView = this.app.workspace.getActiveViewOfType(import_obsidian16.MarkdownView);
+        let markdownView = this.app.workspace.getActiveViewOfType(import_obsidian15.MarkdownView);
         if (markdownView?.file?.path !== file.path) markdownView = null;
         if (!markdownView) {
           this.app.workspace.iterateAllLeaves((leaf) => {
-            if (!markdownView && leaf.view instanceof import_obsidian16.MarkdownView && leaf.view.file?.path === file.path) markdownView = leaf.view;
+            if (!markdownView && leaf.view instanceof import_obsidian15.MarkdownView && leaf.view.file?.path === file.path) markdownView = leaf.view;
           });
         }
         if (markdownView) void this.activateMineruReaderView(file.path, markdownView.leaf);
@@ -14647,13 +13965,6 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
       name: "打开研究知识库控制台",
       callback: () => {
         this.activateDashboardView();
-      }
-    });
-    this.addCommand({
-      id: "open-code-practice",
-      name: "打开代码练习",
-      callback: () => {
-        this.activateCodePracticeView();
       }
     });
     this.addCommand({
@@ -14702,7 +14013,7 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
         selection
       });
     } catch (error) {
-      new import_obsidian16.Notice(error instanceof Error ? error.message : String(error));
+      new import_obsidian15.Notice(error instanceof Error ? error.message : String(error));
     }
   }
   openAnnotationPopover(options) {
@@ -14738,19 +14049,19 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
     event.stopPropagation();
     const record = await this.annotationService.loadAnnotation(match[1], match[2]);
     if (!record) {
-      new import_obsidian16.Notice("未找到对应的批注记录");
+      new import_obsidian15.Notice("未找到对应的批注记录");
       return;
     }
     if (event.ctrlKey || event.metaKey) {
       if (!record.archiveTargets.length) {
-        new import_obsidian16.Notice("该批注尚未关联正式知识节点");
+        new import_obsidian15.Notice("该批注尚未关联正式知识节点");
         return;
       }
       if (record.archiveTargets.length === 1) {
         await this.annotationService.openArchiveTarget(record, record.archiveTargets[0]);
         return;
       }
-      const menu = new import_obsidian16.Menu();
+      const menu = new import_obsidian15.Menu();
       record.archiveTargets.forEach((archiveTarget) => {
         menu.addItem((item) => {
           item.setTitle(archiveTarget.split("/").pop() || archiveTarget).setIcon("file-text").onClick(() => {
@@ -14774,7 +14085,7 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
     if (!this.annotationService) return;
     const action = ACTION_BY_ID.get("synthesis");
     if (!action) {
-      new import_obsidian16.Notice("综合分析操作未注册");
+      new import_obsidian15.Notice("综合分析操作未注册");
       return;
     }
     if (this.isActionRunning(action.id)) {
@@ -14782,7 +14093,7 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
         archiveStatus: "failed",
         archiveError: "综合分析正在运行，请稍后重试"
       });
-      new import_obsidian16.Notice("综合分析正在运行，批注已保留但尚未归档");
+      new import_obsidian15.Notice("综合分析正在运行，批注已保留但尚未归档");
       return;
     }
     const executionConfig = this.resolveActionExecutionConfig(action);
@@ -14796,7 +14107,7 @@ var AgentDashboardPlugin = class extends import_obsidian16.Plugin {
       archiveRunId: run.id,
       archiveError: ""
     });
-    new import_obsidian16.Notice("批注已保留，正在交给综合分析归档");
+    new import_obsidian15.Notice("批注已保留，正在交给综合分析归档");
     const request = [
       "处理一条由 Agent Dashboard 批注功能提交的正式知识归档请求。",
       `批注文档：${record.annotationPath}#^${record.id}`,
@@ -14846,7 +14157,7 @@ ${result.stderr.trim()}` : ""
         archiveTargets,
         archiveError: ""
       });
-      new import_obsidian16.Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
+      new import_obsidian15.Notice(`批注归档完成，已关联 ${archiveTargets.length} 个知识节点`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const task = this.getTaskRun(run.id);
@@ -14862,7 +14173,7 @@ ${result.stderr.trim()}` : ""
         archiveStatus: "failed",
         archiveError: message.slice(0, 500)
       });
-      new import_obsidian16.Notice(`批注已保留，但归档失败：${message}`);
+      new import_obsidian15.Notice(`批注已保留，但归档失败：${message}`);
     }
   }
   parseAnnotationArchiveTargets(output) {
@@ -14878,127 +14189,9 @@ ${result.stderr.trim()}` : ""
       return [];
     }
   }
-  createPracticeRunId() {
-    const now = /* @__PURE__ */ new Date();
-    const pad = (value) => String(value).padStart(2, "0");
-    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    return `${stamp}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
-  }
-  recoverInterruptedPracticeRuns() {
-    this.processExecution.recoverInterruptedPracticeRuns(this.settings);
-  }
-  runCodePractice(request) {
-    return this.processExecution.runCodePractice(this.settings, request);
-  }
-  stopCodePractice(runId) {
-    return this.processExecution.stopCodePractice(runId);
-  }
-  readPracticeFigure(relativePath) {
-    const root = path7.resolve(this.settings.projectRoot);
-    const outputRoot = path7.join(root, "tool-library", "output", "code-practice", "figures");
-    const candidate = path7.resolve(root, relativePath);
-    const relative2 = path7.relative(outputRoot, candidate);
-    if (!relative2 || relative2.startsWith("..") || path7.isAbsolute(relative2) || !fs5.existsSync(candidate)) return "";
-    const stat = fs5.statSync(candidate);
-    if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return "";
-    const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" }[path7.extname(candidate).toLowerCase()];
-    if (!mime) return "";
-    return `data:${mime};base64,${fs5.readFileSync(candidate).toString("base64")}`;
-  }
-  async savePracticeNote(payload) {
-    const folder = (0, import_obsidian16.normalizePath)("wiki/code/practice");
-    await this.ensureVaultFolder(folder);
-    const cells = Array.isArray(payload.cells) ? payload.cells.filter((cell) => String(cell.code || "").trim() || cell.result) : [];
-    if (!cells.length) throw new Error("没有可保存的练习单元格");
-    const lastResult = [...cells].reverse().find((cell) => cell.result)?.result || null;
-    const now = /* @__PURE__ */ new Date();
-    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const slugBase = payload.title.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 72);
-    const fallback = `practice-${date.split("-").join("")}-${lastResult?.run_id.slice(-6) || Date.now()}`;
-    let notePath = (0, import_obsidian16.normalizePath)(`${folder}/${slugBase || fallback}.md`);
-    if (this.app.vault.getAbstractFileByPath(notePath)) {
-      notePath = (0, import_obsidian16.normalizePath)(`${folder}/${slugBase || "practice"}-${lastResult?.run_id.slice(-6) || Date.now()}.md`);
-    }
-    if (this.app.vault.getAbstractFileByPath(notePath)) throw new Error(`目标笔记已存在：${notePath}`);
-    const languageLabel = payload.language === "r" ? "R" : "Python";
-    const relatedTarget = payload.relatedNotePath ? payload.relatedNotePath.replace(/\.md$/i, "") : "";
-    const relatedLink = relatedTarget ? `[[${relatedTarget}]]` : "";
-    const fence = (value) => String(value || "").includes("```") ? "````" : "```";
-    const cellSections = cells.flatMap((cell, index) => {
-      const result = cell.result;
-      const codeFence = fence(cell.code);
-      const outputFence = fence(result?.stdout);
-      const errorFence = fence(result?.stderr);
-      const lines = [
-        `### 单元格 ${index + 1}`,
-        "",
-        `执行编号：${cell.executionCount ?? "未运行"}  `,
-        `状态：${result?.status || "未运行"}`,
-        "",
-        `${codeFence}${payload.language === "r" ? "r" : "python"}`,
-        String(cell.code || ""),
-        codeFence
-      ];
-      if (!result) return [...lines, ""];
-      lines.push(
-        "",
-        `运行编号：${result.run_id || "-"}  `,
-        `耗时：${Number(result.duration_ms || 0) / 1e3} 秒  `,
-        `退出码：${result.exit_code ?? "-"}`,
-        "",
-        "#### 标准输出",
-        "",
-        `${outputFence}text`,
-        result.stdout || "（无）",
-        outputFence
-      );
-      if (result.stderr) {
-        const stderrTitle = ["failed", "timeout"].includes(result.status) ? "错误与诊断（stderr）" : result.status === "stopped" ? "运行消息（stderr）" : "消息与警告（stderr）";
-        lines.push("", `#### ${stderrTitle}`, "", `${errorFence}text`, result.stderr, errorFence);
-      }
-      if (result.figures?.length) {
-        lines.push("", "#### 生成图片", "", ...result.figures.map((value) => `- \`${value}\``));
-      }
-      return [...lines, ""];
-    });
-    const body = [
-      "---",
-      "type: code-practice",
-      `title: ${JSON.stringify(payload.title)}`,
-      `language: ${languageLabel}`,
-      `related_note: ${JSON.stringify(relatedLink)}`,
-      "execution_mode: stateless-replay",
-      `cell_count: ${cells.length}`,
-      `last_run_id: ${lastResult?.run_id || ""}`,
-      `status: ${lastResult?.status || "not-run"}`,
-      `created: ${date}`,
-      `updated: ${date}`,
-      "tags:",
-      "  - code-practice",
-      `  - ${languageLabel}`,
-      "---",
-      "",
-      "## 目标",
-      "",
-      payload.goal || "记录并验证本次代码练习。",
-      "",
-      "## 单元格",
-      "",
-      ...cellSections,
-      "## 说明",
-      "",
-      payload.notes || "本页使用无状态累计重放：每次运行都会启动新进程，并在执行目标单元格前重放其前置单元格。",
-      "",
-      "## 关联",
-      "",
-      relatedLink ? `- 相关笔记：${relatedLink}` : "- 相关笔记：未关联",
-      ""
-    ].join("\n");
-    return this.app.vault.create(notePath, body);
-  }
   async ensureVaultFolder(folderPath) {
     let current = "";
-    for (const segment of (0, import_obsidian16.normalizePath)(folderPath).split("/")) {
+    for (const segment of (0, import_obsidian15.normalizePath)(folderPath).split("/")) {
       current = current ? `${current}/${segment}` : segment;
       if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
     }
@@ -15477,7 +14670,6 @@ ${result.stderr.trim()}` : ""
       describe("Obsidian CLI", "obsidian", this.settings.obsidianCliExecutable),
       `MinerU 服务: ${this.settings.mineruServiceMode === "private" ? "私有部署" : "官方服务"}`,
       `Python: ${this.settings.pythonExecutable && fs5.existsSync(this.settings.pythonExecutable) ? "可用" : "不可用"}`,
-      `Rscript: ${this.settings.rscriptExecutable && fs5.existsSync(this.settings.rscriptExecutable) ? "可用" : "不可用"}`,
       `Direct API 配置数: ${this.settings.providerProfiles.length}`,
       "体检范围: wiki/ 与顶层索引；排除 papers/",
       "凭据、endpoint、正文和对话内容: 已排除"
@@ -15662,10 +14854,10 @@ ${result.stderr.trim()}` : ""
   }
   inferProjectRoot() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian16.FileSystemAdapter)) return "";
+    if (!(adapter instanceof import_obsidian15.FileSystemAdapter)) return "";
     const vaultRoot = adapter.getBasePath();
-    const parent = path7.dirname(vaultRoot);
-    if (fs5.existsSync(path7.join(parent, "AGENTS.md"))) return parent;
+    const parent = path6.dirname(vaultRoot);
+    if (fs5.existsSync(path6.join(parent, "AGENTS.md"))) return parent;
     return vaultRoot;
   }
   getTaskRuns() {
@@ -15682,7 +14874,7 @@ ${result.stderr.trim()}` : ""
   }
   getTaskRunOutput(run) {
     if (run?.outputPath) {
-      const absolutePath = path7.join(
+      const absolutePath = path6.join(
         this.settings.projectRoot,
         ...String(run.outputPath).split("/")
       );
@@ -15699,12 +14891,12 @@ ${result.stderr.trim()}` : ""
     const output = String(run?.output || "");
     if (!output) return "";
     const relativePath = `tool-library/output/dashboard-runs/${run.id}.json`;
-    const absolutePath = path7.join(
+    const absolutePath = path6.join(
       this.settings.projectRoot,
       ...relativePath.split("/")
     );
     const temporaryPath = `${absolutePath}.tmp`;
-    await fs5.promises.mkdir(path7.dirname(absolutePath), { recursive: true });
+    await fs5.promises.mkdir(path6.dirname(absolutePath), { recursive: true });
     await fs5.promises.writeFile(
       temporaryPath,
       JSON.stringify({
@@ -15823,8 +15015,8 @@ ${result.stderr.trim()}` : ""
   }
   getOkfExportStatus() {
     const projectRoot = this.settings.projectRoot;
-    const exporter = path7.join(projectRoot, "tool-library", "scripts", "export_okf.py");
-    const latestPath = path7.join(projectRoot, "tool-library", "output", "okf", "latest.json");
+    const exporter = path6.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+    const latestPath = path6.join(projectRoot, "tool-library", "output", "okf", "latest.json");
     let latest = null;
     let error = "";
     if (fs5.existsSync(latestPath)) {
@@ -15842,7 +15034,7 @@ ${result.stderr.trim()}` : ""
   }
   getLintStatus() {
     const projectRoot = this.settings.projectRoot;
-    const latestPath = path7.join(projectRoot, "tool-library", "output", "lint", "latest.json");
+    const latestPath = path6.join(projectRoot, "tool-library", "output", "lint", "latest.json");
     let latest = null;
     let error = "";
     if (fs5.existsSync(latestPath)) {
@@ -15856,19 +15048,16 @@ ${result.stderr.trim()}` : ""
   }
   checkRuntime(action = null, backendId = "codex-cli") {
     const projectRoot = this.settings.projectRoot;
-    const runner = path7.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
-    const practiceRunner = path7.join(projectRoot, "tool-library", "scripts", "run_code_practice.py");
-    const exporter = path7.join(projectRoot, "tool-library", "scripts", "export_okf.py");
-    const lintScript = path7.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
+    const runner = path6.join(projectRoot, "tool-library", "scripts", "run_vault_action.py");
+    const exporter = path6.join(projectRoot, "tool-library", "scripts", "export_okf.py");
+    const lintScript = path6.join(projectRoot, "tool-library", "scripts", "lint_vault.py");
     const checks = [
       ["项目根目录", fs5.existsSync(projectRoot)],
-      ["AGENTS.md", fs5.existsSync(path7.join(projectRoot, "AGENTS.md"))],
+      ["AGENTS.md", fs5.existsSync(path6.join(projectRoot, "AGENTS.md"))],
       ["Dashboard runner", fs5.existsSync(runner)],
       ["Python", fs5.existsSync(this.settings.pythonExecutable)]
     ];
     if (!action) {
-      checks.push(["Code practice runner", fs5.existsSync(practiceRunner)]);
-      checks.push(["Rscript", Boolean(this.settings.rscriptExecutable) && fs5.existsSync(this.settings.rscriptExecutable)]);
       checks.push(["MinerU CLI", Boolean(this.settings.mineruExecutable) && fs5.existsSync(this.settings.mineruExecutable)]);
     }
     if (!action || action.id === "okf-export") {
@@ -15924,21 +15113,21 @@ ${result.stderr.trim()}` : ""
       link = decodeURIComponent(link);
     } catch {
     }
-    link = (0, import_obsidian16.normalizePath)(link.replace(/^knowledge-base\//i, ""));
+    link = (0, import_obsidian15.normalizePath)(link.replace(/^knowledge-base\//i, ""));
     if (!link) return null;
     const metadataCache = this.app?.metadataCache;
     if (typeof metadataCache?.getFirstLinkpathDest === "function") {
       const resolved = metadataCache.getFirstLinkpathDest(link, sourcePath || "");
-      if (resolved instanceof import_obsidian16.TFile) return resolved;
+      if (resolved instanceof import_obsidian15.TFile) return resolved;
     }
     const direct = this.app.vault.getAbstractFileByPath(link);
-    if (direct instanceof import_obsidian16.TFile) return direct;
+    if (direct instanceof import_obsidian15.TFile) return direct;
     if (sourcePath) {
-      const relative2 = (0, import_obsidian16.normalizePath)(
-        path7.posix.normalize(path7.posix.join(path7.posix.dirname(sourcePath), link))
+      const relative = (0, import_obsidian15.normalizePath)(
+        path6.posix.normalize(path6.posix.join(path6.posix.dirname(sourcePath), link))
       );
-      const relativeFile = this.app.vault.getAbstractFileByPath(relative2);
-      if (relativeFile instanceof import_obsidian16.TFile) return relativeFile;
+      const relativeFile = this.app.vault.getAbstractFileByPath(relative);
+      if (relativeFile instanceof import_obsidian15.TFile) return relativeFile;
     }
     return null;
   }
@@ -15951,7 +15140,7 @@ ${result.stderr.trim()}` : ""
       candidate = decodeURIComponent(candidate);
     } catch {
     }
-    candidate = (0, import_obsidian16.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
+    candidate = (0, import_obsidian15.normalizePath)(candidate.replace(/^knowledge-base\//i, ""));
     const attempts = [candidate];
     if (!candidate.toLowerCase().endsWith(".md")) attempts.push(`${candidate}.md`);
     for (const attempt of attempts) {
@@ -15981,7 +15170,7 @@ ${result.stderr.trim()}` : ""
     }
     for (const match of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
       const value = String(match[1] || "").split("|", 1)[0].split("#", 1)[0].trim();
-      if (!VAULT_IMAGE_MIME_TYPES[path7.posix.extname(value).toLowerCase()]) {
+      if (!VAULT_IMAGE_MIME_TYPES[path6.posix.extname(value).toLowerCase()]) {
         candidates.push(value);
       }
     }
@@ -16016,7 +15205,7 @@ ${result.stderr.trim()}` : ""
     const images = [];
     for (const link of links) {
       const file = this.resolveVaultLinkedFile(link, noteFile.path);
-      if (!file || !VAULT_IMAGE_MIME_TYPES[path7.posix.extname(file.path).toLowerCase()]) continue;
+      if (!file || !VAULT_IMAGE_MIME_TYPES[path6.posix.extname(file.path).toLowerCase()]) continue;
       const key = file.path.toLocaleLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -16030,7 +15219,7 @@ ${result.stderr.trim()}` : ""
     const seen = new Set(existing.map((attachment) => attachment.path.toLocaleLowerCase()));
     let totalBytes = existing.reduce((sum, attachment) => {
       const file = this.app.vault.getAbstractFileByPath(attachment.path);
-      return sum + Number(file instanceof import_obsidian16.TFile ? file.stat.size : attachment.size || 0);
+      return sum + Number(file instanceof import_obsidian15.TFile ? file.stat.size : attachment.size || 0);
     }, 0);
     const attachments = [];
     let discoveredCount = 0;
@@ -16064,7 +15253,7 @@ ${result.stderr.trim()}` : ""
     };
   }
   buildVaultImageReferenceIndex(imageFiles = []) {
-    const normalizeVaultPath = (value) => (0, import_obsidian16.normalizePath)(
+    const normalizeVaultPath = (value) => (0, import_obsidian15.normalizePath)(
       String(value || "").trim().replace(/\\/g, "/").replace(/^\/+/, "")
     );
     const imagePaths = new Set(
@@ -16082,9 +15271,9 @@ ${result.stderr.trim()}` : ""
       const notePath = normalizeVaultPath(notePathValue);
       if (!imagePaths.has(imagePath) || !notePath.toLowerCase().endsWith(".md")) return;
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-      const frontmatter = noteFile instanceof import_obsidian16.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
+      const frontmatter = noteFile instanceof import_obsidian15.TFile ? metadataCache.getFileCache(noteFile)?.frontmatter : null;
       const title = String(
-        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian16.TFile ? noteFile.basename : "") || path7.posix.basename(notePath, ".md")
+        frontmatter?.title_zh || frontmatter?.title || (noteFile instanceof import_obsidian15.TFile ? noteFile.basename : "") || path6.posix.basename(notePath, ".md")
       ).trim();
       const count = Math.max(1, Number(countValue) || 1);
       const references = referenceMaps.get(imagePath);
@@ -16092,7 +15281,7 @@ ${result.stderr.trim()}` : ""
       const current = references.get(notePath);
       references.set(notePath, {
         path: notePath,
-        title: title || path7.posix.basename(notePath, ".md"),
+        title: title || path6.posix.basename(notePath, ".md"),
         count: Math.max(current?.count || 0, count)
       });
     };
@@ -16133,15 +15322,15 @@ ${result.stderr.trim()}` : ""
         "仅支持 Vault 内的 PNG、JPEG 和 WebP 图片"
       );
     }
-    const projectRoot = path7.resolve(this.settings.projectRoot);
-    const vaultRoot = path7.resolve(projectRoot, "knowledge-base");
+    const projectRoot = path6.resolve(this.settings.projectRoot);
+    const vaultRoot = path6.resolve(projectRoot, "knowledge-base");
     if (!fs5.existsSync(vaultRoot)) {
       throw new ProviderConnectionError("attachment", `Vault 根目录不存在：${vaultRoot}`);
     }
     if (normalized.path.split("/").includes("..")) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
-    const absolutePath = path7.resolve(vaultRoot, ...normalized.path.split("/"));
+    const absolutePath = path6.resolve(vaultRoot, ...normalized.path.split("/"));
     if (!fs5.existsSync(absolutePath)) {
       throw new ProviderConnectionError("attachment", `图片不存在：${normalized.path}`);
     }
@@ -16149,7 +15338,7 @@ ${result.stderr.trim()}` : ""
     const imageRealPath = fs5.realpathSync(absolutePath);
     const normalizedVault = vaultRealPath.toLowerCase();
     const normalizedImage = imageRealPath.toLowerCase();
-    if (normalizedImage !== normalizedVault && !normalizedImage.startsWith(`${normalizedVault}${path7.sep}`)) {
+    if (normalizedImage !== normalizedVault && !normalizedImage.startsWith(`${normalizedVault}${path6.sep}`)) {
       throw new ProviderConnectionError("attachment", "图片路径超出当前 Vault");
     }
     const stat = fs5.statSync(imageRealPath);
@@ -16162,7 +15351,7 @@ ${result.stderr.trim()}` : ""
         `图片超过 ${(MAX_VAULT_IMAGE_BYTES / 1024 / 1024).toFixed(0)} MiB 上限`
       );
     }
-    const extension = path7.extname(imageRealPath).toLowerCase();
+    const extension = path6.extname(imageRealPath).toLowerCase();
     const mimeType = VAULT_IMAGE_MIME_TYPES[extension];
     if (!mimeType) {
       throw new ProviderConnectionError("attachment", "图片格式不受支持");
@@ -16245,16 +15434,6 @@ ${result.stderr.trim()}` : ""
     }
     await this.app.workspace.revealLeaf(leaf);
   }
-  async activateCodePracticeView() {
-    const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
-    const existing = this.app.workspace.getLeavesOfType(CODE_PRACTICE_VIEW_TYPE)[0];
-    const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
-    if (!existing) {
-      await leaf.setViewState({ type: CODE_PRACTICE_VIEW_TYPE, active: true });
-    }
-    if (leaf.view instanceof CodePracticeView) leaf.view.setRelatedNote(contextFile);
-    await this.app.workspace.revealLeaf(leaf);
-  }
   async activateQueryWikiView(initialQuestion = "") {
     const existing = this.app.workspace.getLeavesOfType(QUERY_WIKI_VIEW_TYPE)[0];
     const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
@@ -16267,13 +15446,13 @@ ${result.stderr.trim()}` : ""
     await this.app.workspace.revealLeaf(leaf);
   }
   isMineruArticleFile(file) {
-    return file instanceof import_obsidian16.TFile && file.extension === "md" && /^papers\/[^/]+\/article\.md$/i.test((0, import_obsidian16.normalizePath)(file.path));
+    return file instanceof import_obsidian15.TFile && file.extension === "md" && /^papers\/[^/]+\/article\.md$/i.test((0, import_obsidian15.normalizePath)(file.path));
   }
   isConfiguredReaderMarkdownFile(file) {
-    if (!(file instanceof import_obsidian16.TFile) || file.extension !== "md") return false;
-    const filePath = (0, import_obsidian16.normalizePath)(file.path).toLowerCase();
+    if (!(file instanceof import_obsidian15.TFile) || file.extension !== "md") return false;
+    const filePath = (0, import_obsidian15.normalizePath)(file.path).toLowerCase();
     return this.settings.readerMarkdownFolders.some((folder) => {
-      const root = (0, import_obsidian16.normalizePath)(folder).replace(/\/$/, "").toLowerCase();
+      const root = (0, import_obsidian15.normalizePath)(folder).replace(/\/$/, "").toLowerCase();
       return Boolean(root) && filePath.startsWith(`${root}/`);
     });
   }
@@ -16282,7 +15461,7 @@ ${result.stderr.trim()}` : ""
   }
   async activateMineruReaderView(articlePath = "", preferredLeaf) {
     const contextFile = this.app.workspace.getActiveFile() || this.lastContextFile;
-    const resolvedPath = (0, import_obsidian16.normalizePath)(
+    const resolvedPath = (0, import_obsidian15.normalizePath)(
       articlePath || (this.isReaderDocumentFile(contextFile) ? contextFile.path : "")
     );
     const activation = this.mineruReaderActivationQueue.then(
@@ -16294,7 +15473,7 @@ ${result.stderr.trim()}` : ""
   async activateMineruReaderViewOnce(resolvedPath, preferredLeaf) {
     const file = this.app.vault.getAbstractFileByPath(resolvedPath);
     if (!this.isReaderDocumentFile(file)) {
-      new import_obsidian16.Notice("请先选择已配置目录中的 Markdown 文档");
+      new import_obsidian15.Notice("请先选择已配置目录中的 Markdown 文档");
       return;
     }
     if (preferredLeaf) {
@@ -16329,9 +15508,9 @@ ${result.stderr.trim()}` : ""
     await this.app.workspace.revealLeaf(leaf);
   }
   async openReaderSourceMarkdown(articlePath) {
-    const normalizedPath = (0, import_obsidian16.normalizePath)(articlePath);
+    const normalizedPath = (0, import_obsidian15.normalizePath)(articlePath);
     const file = this.app.vault.getAbstractFileByPath(normalizedPath);
-    if (!(file instanceof import_obsidian16.TFile)) return;
+    if (!(file instanceof import_obsidian15.TFile)) return;
     this.readerAutoOpenBypass.add(normalizedPath);
     try {
       await this.app.workspace.getLeaf("tab").openFile(file);
@@ -16353,12 +15532,12 @@ ${result.stderr.trim()}` : ""
     const normalized = `${run.output}
 ${run.summary}`.replace(/\\\\|\\/g, "/");
     const direct = /(?:^|[\s"'])(?:knowledge-base\/)?(papers\/[A-Za-z0-9._-]+\/article\.md)(?=$|[\s"'}\]])/im.exec(normalized)?.[1];
-    if (direct && this.isMineruArticleFile(this.app.vault.getAbstractFileByPath((0, import_obsidian16.normalizePath)(direct)))) {
-      return (0, import_obsidian16.normalizePath)(direct);
+    if (direct && this.isMineruArticleFile(this.app.vault.getAbstractFileByPath((0, import_obsidian15.normalizePath)(direct)))) {
+      return (0, import_obsidian15.normalizePath)(direct);
     }
     const packageMatch = /(?:^|\/)(?:knowledge-base\/)?papers\/([A-Za-z0-9._-]+)(?=$|[\s"'}\]])/im.exec(normalized);
     if (!packageMatch) return "";
-    const candidate = (0, import_obsidian16.normalizePath)(`papers/${packageMatch[1]}/article.md`);
+    const candidate = (0, import_obsidian15.normalizePath)(`papers/${packageMatch[1]}/article.md`);
     return this.isMineruArticleFile(this.app.vault.getAbstractFileByPath(candidate)) ? candidate : "";
   }
 };
