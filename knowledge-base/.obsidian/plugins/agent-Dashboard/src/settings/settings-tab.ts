@@ -53,6 +53,7 @@ import type {
 } from "../types/contracts";
 
 interface SettingsPluginHost extends PluginHost {
+	openMaintenanceAction(id: "vault-lint" | "okf-export"): Promise<void>;
 	providerRuntimeState: Map<string, ProviderRuntimeEntry>;
 	obsidianCliProbeState: ObsidianCliProbeState;
 	providerEditorProfileId: string;
@@ -973,9 +974,11 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 
 		this.createProviderSectionHeader(
 			containerEl,
-			"知识库维护范围",
+			"维护与导出",
 			"核心范围由项目契约固定，避免用户设置造成原文包污染或跨目录链接冲突。",
 		);
+		new Setting(containerEl).setName("手动体检").setDesc("检查知识页的链接和属性，完成后查看报告和具体发现。")
+			.addButton(button => button.setButtonText("运行只读体检").onClick(() => this.plugin.openMaintenanceAction("vault-lint")));
 		new Setting(containerEl)
 			.setName("体检范围")
 			.setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");

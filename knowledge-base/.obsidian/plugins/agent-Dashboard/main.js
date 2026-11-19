@@ -115,6 +115,7 @@ var ACTIONS = [
   },
   {
     id: "vault-lint",
+    showInRail: false,
     label: "知识库体检",
     agent: "research-vault-lint",
     description: "体检 wiki 与顶层知识索引：检查结构、属性、链接、孤立页、证据深度、source note 正文、代码关系、索引和 OKF 状态；排除 papers 原文包。完成后可在结果弹窗中选择由 AI 提出方案并修复。",
@@ -2802,9 +2803,10 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     this.createProviderSectionHeader(
       containerEl,
-      "知识库维护范围",
+      "维护与导出",
       "核心范围由项目契约固定，避免用户设置造成原文包污染或跨目录链接冲突。"
     );
+    new import_obsidian.Setting(containerEl).setName("手动体检").setDesc("检查知识页的链接和属性，完成后查看报告和具体发现。").addButton((button) => button.setButtonText("运行只读体检").onClick(() => this.plugin.openMaintenanceAction("vault-lint")));
     new import_obsidian.Setting(containerEl).setName("体检范围").setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");
     this.createProviderSectionHeader(
       containerEl,
@@ -5352,7 +5354,7 @@ var DashboardView = class extends import_obsidian6.ItemView {
   }
   renderKnowledgeGapsList(parent) {
     parent.empty();
-    const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => this.isVisibleKnowledgeGap(gap));
+    const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => !gap.actionId?.startsWith("vault-lint") && this.isVisibleKnowledgeGap(gap));
     if (visibleGaps.length === 0) {
       parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有待处理的知识缺口。" });
       return;
@@ -15348,6 +15350,14 @@ ${result.stderr.trim()}` : ""
       return this.directQueryService.isActive(runId);
     }
     return this.isVaultActionProcessActive(runId);
+  }
+  async openMaintenanceAction(id) {
+    const action = ACTION_BY_ID.get(id);
+    if (!action) return;
+    this.app.setting?.close();
+    await this.activateDashboardView();
+    const view = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view;
+    if (view instanceof DashboardView) view.openAction(action);
   }
   async activateDashboardView() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];

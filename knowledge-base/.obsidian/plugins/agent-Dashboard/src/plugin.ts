@@ -2201,6 +2201,15 @@ export default class AgentDashboardPlugin extends Plugin {
 		return this.isVaultActionProcessActive(runId);
 	}
 
+	async openMaintenanceAction(id: "vault-lint" | "okf-export"): Promise<void> {
+		const action = ACTION_BY_ID.get(id);
+		if (!action) return;
+		(this.app as typeof this.app & { setting?: { close(): void } }).setting?.close();
+		await this.activateDashboardView();
+		const view = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view;
+		if (view instanceof DashboardView) view.openAction(action);
+	}
+
 	async activateDashboardView(): Promise<void> {
 		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
 		const leaf = existing || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);

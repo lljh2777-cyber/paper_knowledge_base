@@ -113,6 +113,7 @@ export const ACTIONS: readonly DashboardAction[] = [
 	},
 	{
 		id: "vault-lint",
+		showInRail: false,
 		label: "知识库体检",
 		agent: "research-vault-lint",
 		description: "体检 wiki 与顶层知识索引：检查结构、属性、链接、孤立页、证据深度、source note 正文、代码关系、索引和 OKF 状态；排除 papers 原文包。完成后可在结果弹窗中选择由 AI 提出方案并修复。",
