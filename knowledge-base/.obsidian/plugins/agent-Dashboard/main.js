@@ -139,6 +139,7 @@ var ACTIONS = [
   },
   {
     id: "okf-export",
+    showInRail: false,
     label: "OKF 导出",
     agent: "okf-export",
     description: "预检 wiki 后生成 OKF v0.1 时间戳 bundle，转换 wikilink、补齐最低属性并保留旧导出。不会修改源笔记或复制附件。",
@@ -2807,6 +2808,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       "核心范围由项目契约固定，避免用户设置造成原文包污染或跨目录链接冲突。"
     );
     new import_obsidian.Setting(containerEl).setName("手动体检").setDesc("检查知识页的链接和属性，完成后查看报告和具体发现。").addButton((button) => button.setButtonText("运行只读体检").onClick(() => this.plugin.openMaintenanceAction("vault-lint")));
+    new import_obsidian.Setting(containerEl).setName("导出 Wiki 知识页").setDesc("将 Wiki 知识页导出为 OKF 包。外部目录中的论文、译文和配图保存在原处。").addButton((button) => button.setButtonText("导出 OKF").onClick(() => this.plugin.openMaintenanceAction("okf-export")));
     new import_obsidian.Setting(containerEl).setName("体检范围").setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");
     this.createProviderSectionHeader(
       containerEl,
@@ -5354,7 +5356,7 @@ var DashboardView = class extends import_obsidian6.ItemView {
   }
   renderKnowledgeGapsList(parent) {
     parent.empty();
-    const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => !gap.actionId?.startsWith("vault-lint") && this.isVisibleKnowledgeGap(gap));
+    const visibleGaps = this.currentData.knowledgeGaps.filter((gap) => gap.actionId !== "okf-export" && !gap.actionId?.startsWith("vault-lint") && this.isVisibleKnowledgeGap(gap));
     if (visibleGaps.length === 0) {
       parent.createEl("p", { cls: "agent-dashboard-empty-state", text: "当前筛选条件下没有待处理的知识缺口。" });
       return;

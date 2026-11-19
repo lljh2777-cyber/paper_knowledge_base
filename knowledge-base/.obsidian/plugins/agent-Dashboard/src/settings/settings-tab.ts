@@ -979,6 +979,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		);
 		new Setting(containerEl).setName("手动体检").setDesc("检查知识页的链接和属性，完成后查看报告和具体发现。")
 			.addButton(button => button.setButtonText("运行只读体检").onClick(() => this.plugin.openMaintenanceAction("vault-lint")));
+		new Setting(containerEl).setName("导出 Wiki 知识页").setDesc("将 Wiki 知识页导出为 OKF 包。外部目录中的论文、译文和配图保存在原处。")
+			.addButton(button => button.setButtonText("导出 OKF").onClick(() => this.plugin.openMaintenanceAction("okf-export")));
 		new Setting(containerEl)
 			.setName("体检范围")
 			.setDesc("检查 wiki/ 与顶层知识索引；排除 papers/ 原文包。papers/ 与 wiki/ 之间禁止创建 Obsidian 或 Markdown 链接。核心排除规则不可关闭。");
