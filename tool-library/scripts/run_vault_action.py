@@ -322,7 +322,7 @@ file list, evidence-depth report, or skipped-step summary.
         "post_validate": True,
         "instructions": """
 Use the `research-vault-lint` skill. Read
-`tool-library/output/lint/latest.json` as the repair scope. Before editing,
+`tool-library/output/lint/latest.json` as the report to verify. When the request names a specific finding or file, limit edits to that finding and file. If other files or an uncertain original/annotation location are involved, report them for manual review. Before editing,
 inspect every finding and form a concise repair plan. Treat `fixable: true` as
 a deterministic auto-fix hint, not as the authorization boundary for this AI
 repair action. A finding marked `fixable: false` may still be repaired when
