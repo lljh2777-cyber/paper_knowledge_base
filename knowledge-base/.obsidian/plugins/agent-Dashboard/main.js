@@ -36,6 +36,18 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 
 // src/actions.ts
+var ARCHIVE_ANNOTATION_ACTION = {
+  id: "synthesis",
+  label: "归档本条批注",
+  agent: "research-vault-synthesis",
+  description: "依据这一条批注和原文归档知识点。",
+  placeholder: "",
+  requiresInput: true,
+  writes: true,
+  enabled: true,
+  ai: true,
+  reasoningEffort: "high"
+};
 var ACTIONS = [
   {
     id: "paper-ingest",
@@ -87,19 +99,6 @@ var ACTIONS = [
     ai: true,
     reasoningEffort: "medium",
     queryView: true
-  },
-  {
-    id: "synthesis",
-    label: "综合分析",
-    agent: "research-vault-synthesis",
-    description: "输入跨文献主题、比较问题或目标页面。该操作可更新 synthesis、MOC、concept、method、dataset 或 project 页面及其索引。",
-    placeholder: "例如：综合已有单细胞文献与代码笔记，更新 Single-cell RNA-seq 方法页并列出证据缺口",
-    requiresInput: true,
-    writes: true,
-    enabled: true,
-    ai: true,
-    model: "gpt-5.6-sol",
-    reasoningEffort: "high"
   },
   {
     id: "annotation-explain",
@@ -2402,7 +2401,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     this.renderCliExecutableSetting(containerEl, {
       kind: "opencode",
       name: "OpenCode 可执行文件",
-      description: "用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。",
+      description: "用于检索、批注解释，以及代码分析和批注归档的阶段所有权写入。",
       placeholder: "opencode.exe",
       getValue: () => this.plugin.settings.openCodeExecutable,
       setValue: (value) => {
@@ -2926,7 +2925,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("用于 Claude Code 的检索、批注解释、代码分析和综合分析。").addDropdown((dropdown) => {
+    new import_obsidian.Setting(containerEl).setName("默认推理强度").setDesc("用于 Claude Code 的检索、批注解释、代码分析和批注归档。").addDropdown((dropdown) => {
       REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
       dropdown.setValue(this.plugin.settings.claudeReasoningEffort).onChange(async (value) => {
         this.plugin.settings.claudeReasoningEffort = value;
@@ -3028,7 +3027,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
     this.createProviderSectionHeader(
       containerEl,
       "执行边界",
-      "检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和综合分析可写入阶段目录，并由宿主审计、验证和失败回滚。"
+      "检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和批注归档可写入阶段目录，并由宿主审计、验证和失败回滚。"
     );
     const resultState = this.plugin.providerRuntimeState.get("opencode") || null;
     new import_obsidian.Setting(containerEl).setName(sourceLabel).setDesc(
@@ -3198,7 +3197,7 @@ var AgentDashboardSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     const reasoningValue = isClaude ? this.plugin.settings.annotationClaudeReasoningEffort : isOpenCode ? this.plugin.settings.annotationOpenCodeReasoningEffort : this.plugin.settings.annotationCodexReasoningEffort;
-    new import_obsidian.Setting(containerEl).setName("推理强度").setDesc("仅影响批注解释，不改变查询、深读或综合分析任务。").addDropdown((dropdown) => {
+    new import_obsidian.Setting(containerEl).setName("推理强度").setDesc("仅影响批注解释，不改变查询、深读或批注归档任务。").addDropdown((dropdown) => {
       REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
       dropdown.setValue(reasoningValue).onChange(async (value) => {
         if (isClaude) {
@@ -5001,7 +5000,6 @@ var ACTION_ICONS = {
   "pdf-xray": "scan-search",
   "code-analysis": "code-xml",
   "vault-retrieval": "search",
-  synthesis: "network",
   "vault-lint": "shield-check",
   "okf-export": "package-open"
 };
@@ -5369,6 +5367,7 @@ var DashboardView = class extends import_obsidian6.ItemView {
   }
   renderKnowledgeGapAction(parent, gap) {
     const action = ACTION_BY_ID.get(gap.actionId);
+    if (!action) return;
     const button = parent.createEl("button", {
       cls: "agent-dashboard-gap-action",
       attr: {
@@ -10408,9 +10407,6 @@ var QueryWikiView = class extends import_obsidian12.ItemView {
       this.pendingImages = [];
       void this.plugin.createQuerySession().then(() => this.render()).then(() => this.inputEl?.focus());
     });
-    const save = this.createIconButton(tools, "file-output", "整理为笔记");
-    save.disabled = Boolean(this.activeRunId) || !session.messages.some((message) => message.role === "assistant" && message.status === "done");
-    save.addEventListener("click", () => this.openSynthesisHandoff());
     const canDeleteSession = this.plugin.getQuerySessions().length > 1;
     const clear = this.createIconButton(
       tools,
@@ -11498,75 +11494,6 @@ ${result.stderr.trim()}` : ""
         progress: "正在停止任务"
       });
     }
-  }
-  openSynthesisHandoff() {
-    const action = ACTION_BY_ID.get("synthesis");
-    if (!action) {
-      new import_obsidian12.Notice("综合分析操作未注册");
-      return;
-    }
-    const session = this.session;
-    const transcript = session.messages.filter((message) => message.status === "done" && message.content).slice(-10).map((message) => `${message.role === "user" ? "用户" : "知识库回答"}：
-${message.content}`).join("\n\n");
-    const initialInput = [
-      "将以下知识库查询对话整理为合适的 Wiki 页面。",
-      "先重新核验被引用的 vault 页面，不要把对话中的模型表述直接当作证据。",
-      "根据内容选择 synthesis、method、concept、dataset 或 project 页面；优先更新已有页面，写入前遵守 research-vault-synthesis 边界并同步相应索引和日志。",
-      "",
-      `会话标题：${session.title}`,
-      "",
-      transcript
-    ].join("\n").slice(0, 3e4);
-    new ActionInputModal(
-      this.app,
-      this.plugin,
-      action,
-      ({ input, overrides }) => {
-        void this.executeSynthesisHandoff(action, input, overrides);
-      },
-      { initialInput }
-    ).open();
-  }
-  async executeSynthesisHandoff(action, input, overrides) {
-    if (this.plugin.isActionRunning(action.id)) {
-      new import_obsidian12.Notice("综合分析正在运行");
-      return;
-    }
-    const backendId = overrides.backend === "claude-code" ? "claude-code" : overrides.backend === "opencode" ? "opencode" : "codex-cli";
-    const executionConfig = this.plugin.resolveCliActionExecutionConfig(
-      action,
-      backendId,
-      overrides
-    );
-    const summary = input.trim().split(/\r?\n/)[0].slice(0, 160) || "整理查询对话";
-    const run = await this.plugin.startTaskRun(action, summary, executionConfig);
-    let completedRun;
-    try {
-      const result = await this.plugin.runVaultAction(run.id, action, input, executionConfig);
-      const output = [
-        result.stdout.trim(),
-        result.stderr.trim() ? `运行日志
-${result.stderr.trim()}` : ""
-      ].filter(Boolean).join("\n\n").slice(0, 12e4) || "任务未返回文本输出。";
-      const status = result.exitCode === 0 ? "done" : "failed";
-      completedRun = await this.plugin.finishTaskRun(run.id, {
-        status,
-        exitCode: result.exitCode,
-        output,
-        error: status === "failed" ? `进程退出码：${result.exitCode}` : ""
-      });
-      new import_obsidian12.Notice(status === "done" ? "查询对话已整理为知识任务" : "整理为笔记失败");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      completedRun = await this.plugin.finishTaskRun(run.id, {
-        status: "failed",
-        exitCode: null,
-        output: "",
-        error: message
-      });
-      new import_obsidian12.Notice(`整理为笔记失败：${message}`);
-    }
-    if (completedRun) new TaskResultModal(this.app, this.plugin, completedRun, null).open();
   }
   displayRetrievalStage(stage) {
     const stageKey = String(stage || "");
@@ -14083,17 +14010,13 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
   }
   async archiveAnnotation(record) {
     if (!this.annotationService) return;
-    const action = ACTION_BY_ID.get("synthesis");
-    if (!action) {
-      new import_obsidian15.Notice("综合分析操作未注册");
-      return;
-    }
+    const action = ARCHIVE_ANNOTATION_ACTION;
     if (this.isActionRunning(action.id)) {
       await this.annotationService.updateArchiveState(record, {
         archiveStatus: "failed",
-        archiveError: "综合分析正在运行，请稍后重试"
+        archiveError: "批注归档正在运行，请稍后重试"
       });
-      new import_obsidian15.Notice("综合分析正在运行，批注已保留但尚未归档");
+      new import_obsidian15.Notice("批注归档正在运行，批注已保留但尚未归档");
       return;
     }
     const executionConfig = this.resolveActionExecutionConfig(action);
@@ -14107,7 +14030,7 @@ var AgentDashboardPlugin = class extends import_obsidian15.Plugin {
       archiveRunId: run.id,
       archiveError: ""
     });
-    new import_obsidian15.Notice("批注已保留，正在交给综合分析归档");
+    new import_obsidian15.Notice("批注已保留，正在归档本条批注");
     const request = [
       "处理一条由 Agent Dashboard 批注功能提交的正式知识归档请求。",
       `批注文档：${record.annotationPath}#^${record.id}`,
@@ -14140,7 +14063,7 @@ ${result.stderr.trim()}` : ""
       ].filter(Boolean).join("\n\n").slice(0, 12e4);
       const processSucceeded = result.exitCode === 0;
       const archiveTargets = processSucceeded ? this.parseAnnotationArchiveTargets(result.stdout) : [];
-      const integrationError = processSucceeded && !archiveTargets.length ? "综合分析已完成，但没有返回可关联的知识节点路径" : "";
+      const integrationError = processSucceeded && !archiveTargets.length ? "批注归档已完成，但没有返回可关联的知识节点路径" : "";
       const success = processSucceeded && !integrationError;
       await this.finishTaskRun(run.id, {
         status: success ? "done" : result.exitCode === 130 ? "interrupted" : "failed",
@@ -14149,7 +14072,7 @@ ${result.stderr.trim()}` : ""
         error: success ? "" : integrationError || `进程退出码：${result.exitCode}`
       });
       if (!processSucceeded) {
-        throw new Error(result.stderr.trim() || `综合分析退出码：${result.exitCode}`);
+        throw new Error(result.stderr.trim() || `批注归档退出码：${result.exitCode}`);
       }
       if (integrationError) throw new Error(integrationError);
       await this.annotationService.updateArchiveState(record, {
@@ -15392,7 +15315,7 @@ ${result.stderr.trim()}` : ""
     const stageWriteAllowed = backendId !== "codex-cli" && ["code-analysis", "synthesis"].includes(action.id);
     if (action.writes && backendId !== "codex-cli" && !stageWriteAllowed) {
       return Promise.reject(
-        new Error(`${getCliBackendLabel(backendId)} 当前仅开放“代码分析”和“综合分析”的阶段所有权写入`)
+        new Error(`${getCliBackendLabel(backendId)} 当前仅开放“代码分析”和“批注归档”的阶段所有权写入`)
       );
     }
     const runtime = this.checkRuntime(action, backendId);

@@ -59,7 +59,6 @@ papers / sources / methods / concepts / code / projects / synthesis
 | PDF 深读 | `paper_xray` 智能体 | 严格使用所选的原始 PDF 或已有 `article.md`；完成全文证据检查后才允许标记为 `x-ray` |
 | 代码分析 | Codex CLI、Claude Code 或 OpenCode | 默认静态阅读；Claude/OpenCode 仅能在阶段目录白名单内写入知识页面 |
 | 知识库检索 | Codex CLI、Claude Code、OpenCode 或 Direct API | 知识库模式可自由选择 Agent 或 Direct API；联网模式仅使用 Agent，所有查询均保持只读 |
-| 综合分析 | Codex CLI、Claude Code 或 OpenCode | 创建或更新 MOC、concept、method、dataset、project 和 synthesis 页面；所有 CLI 后端均执行变更审计 |
 | 知识库体检 | 本地 Python | 确定性审计，不调用模型 |
 | 体检修复 | Codex CLI | AI 提出方案并执行低风险修复，高影响问题只报告 |
 | OKF 导出 | 本地 Python | 生成独立 bundle，不修改源笔记 |
@@ -85,13 +84,13 @@ PDF / DOI / Zotero 条目
 插件支持三类查询后端：
 
 1. **Codex CLI**：可在设置中选择官方 Codex 或 CC Switch。官方模式显式使用 OpenAI provider 和 Dashboard 的官方模型策略；CC Switch 模式沿用当前 `~/.codex/config.toml`，插件不改写供应商或凭据文件。
-2. **Claude Code**：可在设置中选择官方 Claude Code 或 CC Switch 配置来源。查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和综合分析支持受审计的阶段所有权写入。
-3. **OpenCode**：可选择官方 OpenCode Zen 或 CC Switch。官方模式默认提供当前内置的免费 Zen 模型候选并动态运行 `opencode models opencode` 校验；CC Switch 模式读取当前 OpenCode 全局配置和模型。查询与批注保持只读，代码分析和综合分析支持受审计的阶段所有权写入。第一版不传递图片。
+2. **Claude Code**：可在设置中选择官方 Claude Code 或 CC Switch 配置来源。查询与批注为只读模式；查询可通过 `Read` 分析经过路径校验的 Vault 图片，并且只在“联网搜索”模式额外开放 `WebSearch`/`WebFetch`；代码分析和批注归档支持受审计的阶段所有权写入。
+3. **OpenCode**：可选择官方 OpenCode Zen 或 CC Switch。官方模式默认提供当前内置的免费 Zen 模型候选并动态运行 `opencode models opencode` 校验；CC Switch 模式读取当前 OpenCode 全局配置和模型。查询与批注保持只读，代码分析和批注归档支持受审计的阶段所有权写入。第一版不传递图片。
 4. **Direct API**：通过统一 Provider 接口支持 OpenAI、Anthropic、OpenAI 兼容服务、Ollama 和 LM Studio，定位为只读知识库助手。
 
 Direct API 凭据通过 Obsidian SecretStorage 管理，插件设置只保存凭据名称，不把真实 Key 写入 `data.json`。已实现模型发现、连接测试、SSE/NDJSON 流式输出、请求取消、超时分类和响应大小限制。插件只向 Direct API 发送确定性检索筛选出的 Vault 页面和用户明确附加的图片；Direct API 不联网、不执行 Skill、不调用工具、不写入文件。知识库模式允许用户在 Direct API 与 Agent 之间自由选择，联网搜索、运行工具和文件修改则由 Agent 承担。
 
-CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和综合分析可在阶段目录白名单内写入。所有 AI 写入任务都由宿主在运行前建立操作级快照，完成后生成变更清单并执行知识库体检；手动停止、进程失败、越界写入或验证失败时自动回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
+CLI Agent 已建立版本化任务、能力和事件协议，命令构造与工具专有 JSONL 解析由独立适配器负责。当前注册 `codex-cli`、`claude-code` 与 `opencode`。三者分别保存模型覆盖，切换后端不会串用模型 ID。Claude Code 和 OpenCode 的知识库检索与批注解释保持只读；代码分析和批注归档可在阶段目录白名单内写入。所有 AI 写入任务都由宿主在运行前建立操作级快照，完成后生成变更清单并执行知识库体检；手动停止、进程失败、越界写入或验证失败时自动回滚。文献入库、PDF 深读和体检修复等完整写入任务仍只使用 Codex CLI。
 
 OpenCode 的模型目录由插件直接运行 `opencode models` 获取；连接测试和实际任务统一通过 Python runner 执行。这样可以统一处理 JSONL、超时、Windows 进程树终止和错误分类。若 Python 或 runner 路径无效，设置页会显示明确的配置错误，而不会误报为 OpenCode 超时。
 

@@ -290,6 +290,7 @@ assert.ok(
 );
 assert.ok(!pluginSource.includes('id: "open-code-practice"'));
 assert.ok(!pluginSource.includes("runCodePractice("));
+assert.ok(!pluginSource.includes("openSynthesisHandoff"));
 assert.ok(
 	pluginSource.includes('isRunning ? "点击停止" : "空闲"'),
 	"running Dashboard actions should expose a manual stop control",

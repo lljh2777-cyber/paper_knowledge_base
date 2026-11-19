@@ -317,7 +317,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.renderCliExecutableSetting(containerEl, {
 			kind: "opencode",
 			name: "OpenCode 可执行文件",
-			description: "用于检索、批注解释，以及代码分析和综合分析的阶段所有权写入。",
+			description: "用于检索、批注解释，以及代码分析和批注归档的阶段所有权写入。",
 			placeholder: "opencode.exe",
 			getValue: () => this.plugin.settings.openCodeExecutable,
 			setValue: (value) => {
@@ -1161,7 +1161,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("默认推理强度")
-			.setDesc("用于 Claude Code 的检索、批注解释、代码分析和综合分析。")
+			.setDesc("用于 Claude Code 的检索、批注解释、代码分析和批注归档。")
 			.addDropdown((dropdown) => {
 				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
 				dropdown
@@ -1308,7 +1308,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		this.createProviderSectionHeader(
 			containerEl,
 			"执行边界",
-			"检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和综合分析可写入阶段目录，并由宿主审计、验证和失败回滚。",
+			"检索只允许读取 Vault；联网模式才开放 websearch/webfetch。代码分析和批注归档可写入阶段目录，并由宿主审计、验证和失败回滚。",
 		);
 		const resultState = this.plugin.providerRuntimeState.get("opencode") || null;
 		new Setting(containerEl)
@@ -1594,7 +1594,7 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 				: this.plugin.settings.annotationCodexReasoningEffort;
 		new Setting(containerEl)
 			.setName("推理强度")
-			.setDesc("仅影响批注解释，不改变查询、深读或综合分析任务。")
+			.setDesc("仅影响批注解释，不改变查询、深读或批注归档任务。")
 			.addDropdown((dropdown) => {
 				REASONING_OPTIONS.forEach((option) => dropdown.addOption(option.id, option.label));
 				dropdown
@@ -2180,4 +2180,4 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
 		}
 	}
 }
-
+
