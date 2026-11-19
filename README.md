@@ -1,8 +1,13 @@
-# Research Vault 与 Agent Dashboard
+# 论文阅读知识库
 
-这是一个面向科研论文、代码项目和可复用技术知识的本地优先工作区。项目将 Obsidian 知识库、Codex 智能体工作流、确定性 Python 工具和自研 Agent Dashboard 插件组合在一起，用于完成文献入库、PDF 深读、代码分析、知识检索、跨文献综合、知识库体检和结构化导出。
+日常入口是 Obsidian 中的 Research Agent Reader。Paper Clipper 把论文保存为 Markdown，翻译工具在同一个论文目录里维护中文译文。Reader 直接打开外部原文、译文和图片，并把批注与阅读记录保存在当前知识库。
 
-项目并不把聊天记录当作知识库。可复用结论会被整理为带来源、处理深度、链接关系和索引的 Markdown 页面；本地元数据、API 凭据和个人知识内容默认留在本机。使用 MinerU 转换时，所选文档会发送到配置的 MinerU 服务端处理。
+1. 在 Reader 设置的“文献阅读器”中指定 Paper Clipper 输出目录。
+2. 在文献库打开论文。中英段落可靠配对时，顺着中文阅读即可同步英文。首页可回到上次的位置。
+3. 选词或段落提问，先看简释，再按需查看上下文。也可从论文启动 AI 全文带读。
+4. 在“查知识点”中优先找回已读、标记或问过的片段，再决定是否让 AI 根据库内文献回答。
+
+日常安装使用 [Reader 0.93.1](https://github.com/lljh2777-cyber/research-agent-reader/releases/tag/0.93.1)。项目决策记录在[项目瘦身决策](tool-library/docs/项目瘦身决策.md)。下面保留知识库工具、历史 Dashboard 和独立 PDF 工作流的说明。
 
 ## 核心能力
 
@@ -47,7 +52,7 @@ papers / sources / methods / concepts / code / projects / synthesis
 
 在 Obsidian 中应打开 `knowledge-base/`，而不是整个仓库根目录。
 
-## Agent Dashboard
+## 旧版 Agent Dashboard
 
 仓库包含桌面版 Obsidian 插件 [Agent Dashboard](knowledge-base/.obsidian/plugins/agent-Dashboard/)，当前版本为 `0.26.0`。
 
