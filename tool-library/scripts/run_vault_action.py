@@ -2543,10 +2543,11 @@ def dry_run_payload(
         ]
         prompt = ""
     elif kind == "exporter":
+        output_args = okf_output_args(project_root, user_input)
         command = [
             python_value,
             str(project_root / "tool-library" / "scripts" / "export_okf.py"),
-            *okf_output_args(project_root, user_input),
+            *output_args,
         ]
         prompt = ""
     else:
@@ -2592,6 +2593,8 @@ def dry_run_payload(
             spec,
             project_root,
         ).to_payload(),
+        **({"export_destination": output_args[1] if output_args else str(project_root / "tool-library" / "output" / "okf"),
+            "runner": "local-exporter"} if kind == "exporter" else {}),
         "post_validate": bool(spec.get("post_validate")),
         "backend": (
             {
