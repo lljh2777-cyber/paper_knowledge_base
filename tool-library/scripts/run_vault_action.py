@@ -881,6 +881,18 @@ def normalize_query_image_attachments(
     return normalized
 
 
+def okf_output_args(project_root: Path, request: str) -> list[str]:
+    if not request.strip():
+        return []
+    dest = Path(request.strip()).expanduser()
+    if not dest.is_absolute():
+        raise ValueError("OKF 导出目录必须是绝对路径")
+    dest = dest.resolve()
+    if dest.is_relative_to((project_root / "knowledge-base" / "wiki").resolve()):
+        raise ValueError("请选择 Wiki 源目录之外的输出目录")
+    return ["--output-root", str(dest)]
+
+
 def normalize_action_input(
     action: str,
     raw_input: str,
@@ -2534,6 +2546,7 @@ def dry_run_payload(
         command = [
             python_value,
             str(project_root / "tool-library" / "scripts" / "export_okf.py"),
+            *okf_output_args(project_root, user_input),
         ]
         prompt = ""
     else:
@@ -2698,6 +2711,8 @@ def main() -> int:
         if not script.is_file():
             raise FileNotFoundError(f"Dashboard action script not found: {script}")
         command = [python, str(script)]
+        if kind == "exporter":
+            command.extend(okf_output_args(project_root, user_input))
         if kind == "validator":
             command.extend(
                 [
